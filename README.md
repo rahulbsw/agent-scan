@@ -69,7 +69,7 @@ Agent Scan auto-discovers agents and their capabilities (MCP servers or skills) 
 | OpenCode | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | Antigravity | ✓ | ✗ | ✓ | ✗ | ✓ | ✗ |
 | Codex | ✗ | ✓ | ✗ | ✓ | — | — |
-| Amazon Q | ✓ | ✗ | ✓ | ✗ | — | — |
+| Amazon Q | ✓ | ✗ | ✓ | ✗ | ✓ (WSL) | ✗ |
 
 ## Quick Start
 
