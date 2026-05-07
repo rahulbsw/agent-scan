@@ -69,7 +69,7 @@ def _is_path(arg: str) -> bool:
     return len(arg) >= 3 and arg[1] == ":" and arg[2] in "/\\"
 
 
-def redact_args(args: list[str] | None) -> list[str] | None:
+def redact_args(args: list[str]) -> list[str]:
     """
     Redact values of key-value arguments in a command line argument list.
 
@@ -79,13 +79,13 @@ def redact_args(args: list[str] | None) -> list[str] | None:
     Also redacts file paths (arguments starting with /, ~/, or drive letters).
 
     Args:
-        args: List of command line arguments, or None
+        args: List of command line arguments
 
     Returns:
-        List of arguments with values redacted, or None if input was None
+        List of arguments with values redacted
     """
     if not args:
-        return args
+        return []
 
     redacted: list[str] = []
     i = 0

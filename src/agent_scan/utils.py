@@ -82,7 +82,7 @@ def check_executable_exists(command: str) -> bool:
     return path.exists() or shutil.which(command) is not None
 
 
-def resolve_command_and_args(server_config: StdioServer) -> tuple[str, list[str] | None]:
+def resolve_command_and_args(server_config: StdioServer) -> tuple[str, list[str]]:
     """
     Resolve the command and arguments for a StdioServer.
     """

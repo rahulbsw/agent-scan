@@ -2,7 +2,7 @@ import logging
 import os
 import re
 from itertools import chain
-from typing import Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 from lark import Lark
 from mcp.client.auth import TokenStorage
@@ -11,6 +11,7 @@ from mcp.types import Completion, InitializeResult, Prompt, Resource, ResourceTe
 from pydantic import (
     AliasChoices,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     RootModel,
@@ -114,10 +115,20 @@ class RemoteServer(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
 
 
+def _coerce_none_to_empty_list(v: Any) -> Any:
+    """Coerce None to [] before Pydantic type-checks the args field.
+
+    Used as a BeforeValidator so user JSON containing `"args": null` (or
+    omitting `args` entirely) is normalized to an empty list rather than
+    rejected by the `list[str]` type check on StdioServer.args.
+    """
+    return [] if v is None else v
+
+
 class StdioServer(BaseModel):
     model_config = ConfigDict()
     command: str
-    args: list[str] | None = None
+    args: Annotated[list[str], BeforeValidator(_coerce_none_to_empty_list)] = Field(default_factory=list)
     type: Literal["stdio"] | None = "stdio"
     env: dict[str, str] | None = None
     binary_identifier: str | None = None
