@@ -78,6 +78,10 @@ commands:
 
 jobs:
   security-scans:
+    parameters:
+      mode:
+        type: string
+        default: auto
     resource_class: small
     docker:
       - image: cimg/python:3.12
@@ -87,7 +91,7 @@ jobs:
           name: Update uv
           command: curl -LsSf https://astral.sh/uv/install.sh | sh
       - prodsec/security_scans:
-          mode: auto
+          mode: << parameters.mode >>
           open-source-additional-arguments: --exclude=mcp-builder,slack-gif-creator
           open-source-scan: medium
           iac-scan: disabled
@@ -116,6 +120,7 @@ workflows:
     jobs:
       - security-scans:
           name: Daily Security Scans
+          mode: gate
           context:
             - << pipeline.parameters.snyk-scan-context >>
             - snyk-bot-slack
