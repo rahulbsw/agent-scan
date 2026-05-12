@@ -3,7 +3,7 @@ Redaction utilities for sanitizing sensitive information from scan results.
 
 This module provides functions to redact sensitive data like:
 - Environment variables
-- Command line argument values
+- Command line argument values (detected via the detect-secrets library)
 - HTTP headers
 - URL query parameters
 - File paths in tracebacks
@@ -13,11 +13,45 @@ import logging
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from detect_secrets.plugins.high_entropy_strings import HighEntropyStringsPlugin
+from detect_secrets.plugins.keyword import KeywordDetector
+from detect_secrets.settings import default_settings, get_plugins, transient_settings
+
 from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, StdioServer
 
 logger = logging.getLogger(__name__)
 
 REDACTED = "**REDACTED**"
+
+_EXCLUDED_PLUGINS = frozenset({"IPPublicDetector"})
+
+
+def _build_detect_secrets_config() -> dict:
+    """
+    Build a ``transient_settings`` config from detect-secrets' default
+    plugin set, excluding plugins listed in ``_EXCLUDED_PLUGINS``.
+
+    IPPublicDetector is excluded because public IP addresses are common,
+    legitimate CLI argument values (e.g. ``--host 8.8.8.8``) and should
+    not be redacted as secrets.
+    """
+    with default_settings() as settings:
+        plugins_used = [
+            {"name": name, **kwargs} for name, kwargs in settings.plugins.items() if name not in _EXCLUDED_PLUGINS
+        ]
+    return {"plugins_used": plugins_used}
+
+
+_DETECT_SECRETS_CONFIG: dict = _build_detect_secrets_config()
+
+
+def _redaction_marker(plugin_name: str) -> str:
+    """Format the redaction marker for a triggering detect-secrets plugin.
+
+    Uses the same ``**...**`` delimiter shape as the legacy ``REDACTED`` constant
+    so both marker styles render and grep consistently.
+    """
+    return f"**REDACTED_SECRET_{plugin_name.upper()}**"
 
 
 def redact_absolute_paths(text: str | None) -> str | None:
@@ -57,70 +91,164 @@ def redact_absolute_paths(text: str | None) -> str | None:
     return result
 
 
-def _is_path(arg: str) -> bool:
-    """Check if an argument looks like a file path that should be redacted."""
-    # Unix absolute path
-    if arg.startswith("/") and len(arg) > 1:
-        return True
-    # Home directory path
-    if arg.startswith("~/"):
-        return True
-    # Windows absolute path (C:\, D:\, etc.)
-    return len(arg) >= 3 and arg[1] == ":" and arg[2] in "/\\"
+def _wrap_for_entropy(value: str) -> str:
+    """
+    Wrap ``value`` in quotes so the entropy plugins' quoted-literal
+    regex (``(['"])(token)(\\1)``) can tokenize it.
+
+    Returns one of ``"<value>"``, ``'<value>'``, or ``"<escaped>"``
+    (when both quote styles appear in ``value``).
+    """
+    if '"' not in value:
+        return f'"{value}"'
+    if "'" not in value:
+        return f"'{value}'"
+    return '"' + value.replace('"', r"\"") + '"'
+
+
+def _detect_secret(value: str) -> str | None:
+    """
+    Return the class name of the first detect-secrets plugin that flags
+    ``value``, or ``None`` if no plugin flags it.
+
+    Two-pass scan to give each plugin family the input format it expects:
+
+    1. Named-format detectors (``AWSKeyDetector``, ``GitHubTokenDetector``,
+       etc.) match self-contained format patterns and work on the raw
+       value directly.
+    2. ``HighEntropyStringsPlugin`` subclasses default to scanning quoted
+       string literals (``(['"])(token)(\\1)``); they receive the value
+       wrapped as ``"<value>"``, ``'<value>'``, or ``"<escaped>"`` so
+       their regex tokenizes the whole value, then the entropy ``limit``
+       filter is applied.
+    """
+    if not value:
+        return None
+    with transient_settings(_DETECT_SECRETS_CONFIG):
+        plugins = list(get_plugins())
+        # Pass 1: format-based named detectors on the bare value.
+        for plugin in plugins:
+            if isinstance(plugin, HighEntropyStringsPlugin):
+                continue
+            if plugin.analyze_line(filename="adhoc", line=value, line_number=1):
+                return type(plugin).__name__
+        # Pass 2: entropy plugins on the quote-wrapped value.
+        wrapped = _wrap_for_entropy(value)
+        for plugin in plugins:
+            if not isinstance(plugin, HighEntropyStringsPlugin):
+                continue
+            if plugin.analyze_line(filename="adhoc", line=wrapped, line_number=1):
+                return type(plugin).__name__
+    return None
+
+
+def _detect_keyword(prev_normalized: str, curr_raw: str) -> str | None:
+    """
+    Run only ``KeywordDetector`` against a synthetic assignment line
+    ``f'{prev_normalized}={_wrap_for_entropy(curr_raw)}'``.
+
+    ``KeywordDetector`` matches denylist tokens like ``api_?key``,
+    ``password``, ``secret`` (see upstream ``DENYLIST`` in
+    ``detect_secrets/plugins/keyword.py``) when they appear next to a
+    quoted literal. The bare-value scan in ``_detect_secret`` never
+    fires this plugin; this helper supplies the missing keyword
+    context via a previous-token-as-key lookup.
+
+    Returns ``"KeywordDetector"`` on a hit, else ``None``.
+    """
+    if not prev_normalized or not curr_raw:
+        return None
+    plugin = KeywordDetector()
+    synthetic = f"{prev_normalized}={_wrap_for_entropy(curr_raw)}"
+    if plugin.analyze_line(filename="adhoc", line=synthetic, line_number=1):
+        return type(plugin).__name__
+    return None
 
 
 def redact_args(args: list[str]) -> list[str]:
+    """Redact secret-bearing values in CLI argument tokens.
+
+    Detection runs in three passes against a tokenized view of ``args``
+    (each ``--flag=value`` arg yields two tokens; everything else
+    yields one):
+
+    1. Format detectors (AWSKeyDetector, GitHubTokenDetector, ...) on
+       the bare token value.
+    2. High-entropy string detectors on the quote-wrapped token value.
+    3. KeywordDetector via a sliding window of 2: for each adjacent
+       ``(prev, curr)`` pair, build a synthetic ``prev="curr"`` line
+       and ask the keyword plugin whether ``prev`` is in its denylist.
+
+    Pass order is format -> entropy -> keyword; the most-specific
+    detector wins (Pass B is skipped when Pass A already marked the
+    token). Pass B is also skipped when ``curr`` looks like another
+    CLI flag (starts with ``-``), so ``["--password", "--api-key"]``
+    does not redact the second flag.
+
+    The flag half of a ``--flag=value`` arg is never replaced; only
+    the value half (or a bare positional) can be redacted.
+
+    A bare token that happens to contain a secret-shaped substring (e.g.
+    a positional ``AKIAIOSFODNN7EXAMPLE`` or even a flag-shaped token
+    ``--AKIAIOSFODNN7EXAMPLE`` with no ``=``) is replaced wholesale by
+    the marker. This is intentionally conservative: a secret-looking
+    token should never appear verbatim in upload payloads, even if it
+    masquerades as a CLI flag.
     """
-    Redact values of key-value arguments in a command line argument list.
-
-    Identifies flags (arguments starting with - or --) and redacts their values.
-    Handles both space-separated (--arg value) and equals-separated (--arg=value) syntax.
-    The -y flag is treated as a boolean flag (common in npx) and doesn't consume the next arg.
-    Also redacts file paths (arguments starting with /, ~/, or drive letters).
-
-    Args:
-        args: List of command line arguments
-
-    Returns:
-        List of arguments with values redacted
-    """
-    if not args:
-        return []
-
-    redacted: list[str] = []
-    i = 0
-
-    while i < len(args):
-        arg = args[i]
-
-        # Check for --flag=value or -f=value syntax
+    # Tokenize args into a flat token list with positional metadata.
+    # Each token is a tuple (arg_idx, slot, raw, normalized) where
+    # slot 0 is the "whole arg" or the flag half of --flag=value,
+    # and slot 1 is the value half of --flag=value.
+    tokens: list[tuple[int, int, str, str]] = []
+    for i, arg in enumerate(args):
         if arg.startswith("-") and "=" in arg:
-            # Split on first = only, preserve the flag part
-            eq_idx = arg.index("=")
-            flag_part = arg[: eq_idx + 1]  # includes the =
-            redacted.append(flag_part + REDACTED)
-            i += 1
-        # Check for --flag or -f followed by a value (but not -y which is a boolean flag)
-        elif arg.startswith("-") and arg != "-y":
-            redacted.append(arg)
-            # Look ahead to see if next arg is a value (not a flag)
-            if i + 1 < len(args) and not args[i + 1].startswith("-"):
-                # Next arg is likely a value for this flag - redact it
-                redacted.append(REDACTED)
-                i += 2
-            else:
-                # Flag with no value or next arg is also a flag
-                i += 1
-        elif _is_path(arg):
-            # Redact file paths
-            redacted.append(REDACTED)
-            i += 1
+            flag, _, value = arg.partition("=")
+            tokens.append((i, 0, flag, flag.lstrip("-").replace("-", "_")))
+            tokens.append((i, 1, value, value.lstrip("-").replace("-", "_")))
         else:
-            # Positional argument - preserve as-is
-            redacted.append(arg)
-            i += 1
+            tokens.append((i, 0, arg, arg.lstrip("-").replace("-", "_")))
 
-    return redacted
+    marks: list[str | None] = [None] * len(tokens)
+
+    # Pass A: format + entropy on each token's raw value.
+    for t_idx, (_, _, raw, _) in enumerate(tokens):
+        triggering_plugin = _detect_secret(raw)
+        if triggering_plugin is not None:
+            marks[t_idx] = triggering_plugin
+
+    # Pass B: sliding window of 2 for keyword detection.
+    for t_idx in range(1, len(tokens)):
+        if marks[t_idx] is not None:
+            continue
+        prev = tokens[t_idx - 1]
+        curr = tokens[t_idx]
+        if curr[2].startswith("-"):
+            # Defensive: skip Pass B when the candidate looks like a CLI flag.
+            continue
+        triggering_plugin = _detect_keyword(prev[3], curr[2])
+        if triggering_plugin is not None:
+            marks[t_idx] = triggering_plugin
+
+    # Reassemble.
+    out = list(args)
+    # Iterate each token once; for slot-1 tokens we look up the sibling
+    # flag (slot 0 of the same arg_idx) directly from args[arg_idx].
+    for t_idx, (arg_idx, slot, _raw, _normalized) in enumerate(tokens):
+        mark = marks[t_idx]
+        if mark is None:
+            continue
+        if slot == 0:
+            # If the original arg had "=" in it, slot 0 is the flag name;
+            # never replace the flag name itself.
+            original = args[arg_idx]
+            if original.startswith("-") and "=" in original:
+                continue
+            out[arg_idx] = _redaction_marker(mark)
+        else:
+            # slot == 1: replace only the value half, preserve flag name.
+            flag = args[arg_idx].partition("=")[0]
+            out[arg_idx] = f"{flag}={_redaction_marker(mark)}"
+    return out
 
 
 def redact_server(server_scan_result: ServerScanResult) -> ServerScanResult:
@@ -145,7 +273,7 @@ def redact_server(server_scan_result: ServerScanResult) -> ServerScanResult:
         # Redact all environment variables
         if server_scan_result.server.env:
             server_scan_result.server.env = dict.fromkeys(server_scan_result.server.env, REDACTED)
-        # Redact argument values (e.g., --api-key secret → --api-key **REDACTED**)
+        # Redact argument values via detect-secrets (plugin-named markers).
         if server_scan_result.server.args:
             server_scan_result.server.args = redact_args(server_scan_result.server.args)
 
