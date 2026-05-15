@@ -431,7 +431,7 @@ def main():
     guard_parser = subparsers.add_parser(
         "guard",
         help="Install, uninstall, or check status of Agent Guard hooks",
-        description="Manage Agent Guard hooks for Claude Code and Cursor.",
+        description="Manage Agent Guard hooks for Claude Code, Cursor, and Codex.",
     )
     guard_subparsers = guard_parser.add_subparsers(
         dest="guard_command",
@@ -446,7 +446,7 @@ def main():
     )
     guard_install_parser.add_argument(
         "client",
-        choices=["claude", "cursor"],
+        choices=["claude", "cursor", "codex"],
         help="Client to install hooks for",
     )
     guard_install_parser.add_argument(
@@ -487,7 +487,7 @@ def main():
     )
     guard_uninstall_parser.add_argument(
         "client",
-        choices=["claude", "cursor"],
+        choices=["claude", "cursor", "codex"],
         help="Client to uninstall hooks from",
     )
     guard_uninstall_parser.add_argument(
