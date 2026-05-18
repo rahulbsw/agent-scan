@@ -94,12 +94,20 @@ def format_servers_line(
     severity_levels: list[Literal["critical", "high", "medium", "low"]] = ["critical", "high", "medium", "low"]
     if severities is not None and len([s for s in severities if s != "info"]) > 0:
         severity_summary: list[str] = []
+        total_findings = 0
+        single_severity: Literal["critical", "high", "medium", "low"] | None = None
         for k in severity_levels:
             count = severities.count(k)
             if count == 0:
                 continue
+            total_findings += count
+            single_severity = k
             severity_summary.append(f"{SEVERITY_COLOR_MAP[k]}{count} {k}{SEVERITY_COLOR_MAP[k].replace('[', '[/')}")
-        text += f" ({', '.join(severity_summary)})"
+        if total_findings == 1 and single_severity is not None:
+            color = SEVERITY_COLOR_MAP[single_severity]
+            text += f" {color}1 {single_severity} finding{color.replace('[', '[/')}"
+        else:
+            text += f" {total_findings} findings ({', '.join(severity_summary)})"
 
     if issues:
         text += format_issues(issues, new_line=True)
