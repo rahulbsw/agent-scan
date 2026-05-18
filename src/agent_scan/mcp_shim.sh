@@ -13,4 +13,4 @@ else
   log=$(mktemp /tmp/mcp_shim.XXXXXX)
 fi
 printf 'shim log: %s\n' "$log" >&2
-exec "$@" > >(tee -a "$log")
+exec "$@" | tee >(grep -E '"tools"[[:space:]]*:[[:space:]]*\[' >> "$log")

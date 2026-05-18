@@ -20,5 +20,8 @@ $log    = Join-Path $dir "$prefix.$rand.log"
 
 $exe  = $Cmd[0]
 $rest = if ($Cmd.Count -gt 1) { $Cmd[1..($Cmd.Count-1)] } else { @() }
-& $exe @rest | Tee-Object -FilePath $log
+& $exe @rest | ForEach-Object {
+  $_
+  if ($_ -match '"tools"\s*:\s*\[') { Add-Content -LiteralPath $log -Value $_ }
+}
 exit $LASTEXITCODE
