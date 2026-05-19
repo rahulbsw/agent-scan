@@ -414,6 +414,79 @@ async def test_inspect_pipeline_discovery_mode_falls_back_to_all_usernames_when_
 
 
 @pytest.mark.asyncio
+async def test_glob_discovers_plugin_mcp_configs():
+    """mcp_config_globs should discover .mcp.json files inside a plugin cache tree."""
+    tmp = tempfile.mkdtemp()
+    try:
+        home = Path(tmp) / "user"
+        # Simulate client exists
+        (home / ".fake-client").mkdir(parents=True)
+
+        # Create plugin cache with .mcp.json
+        plugin_dir = home / ".fake-client" / "plugins" / "cache" / "marketplace" / "my-plugin" / "v1"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / ".mcp.json").write_text('{"my-server": {"command": "node", "args": ["server.js"]}}')
+
+        # Create plugin cache with skills
+        skills_plugin_dir = home / ".fake-client" / "plugins" / "cache" / "marketplace" / "skill-plugin" / "v1"
+        skills_dir = skills_plugin_dir / "skills" / "my-skill"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "SKILL.md").write_text("# My Skill\nA test skill.")
+
+        candidate = CandidateClient(
+            name="fake-client",
+            client_exists_paths=["~/.fake-client"],
+            mcp_config_paths=[],
+            skills_dir_paths=[],
+            mcp_config_globs=["~/.fake-client/plugins/cache/**/.mcp.json"],
+            skills_dir_globs=["~/.fake-client/plugins/cache/**/skills"],
+        )
+
+        ctis = await get_mcp_config_per_client(candidate, [(home, "user")])
+        assert len(ctis) == 1
+        cti = ctis[0]
+
+        mcp_paths = [p for p, v in cti.mcp_configs.items() if isinstance(v, list)]
+        assert len(mcp_paths) == 1
+        servers = cti.mcp_configs[mcp_paths[0]]
+        assert isinstance(servers, list)
+        assert len(servers) == 1
+        assert servers[0][0] == "my-server"
+
+        skills_paths = [p for p, v in cti.skills_dirs.items() if isinstance(v, list)]
+        assert len(skills_paths) == 1
+        skills = cti.skills_dirs[skills_paths[0]]
+        assert isinstance(skills, list)
+        assert len(skills) == 1
+        assert skills[0][0] == "my-skill"
+    finally:
+        shutil.rmtree(tmp)
+
+
+@pytest.mark.asyncio
+async def test_glob_no_matches_still_works():
+    """When mcp_config_globs match nothing, the client should still be discovered with empty configs."""
+    tmp = tempfile.mkdtemp()
+    try:
+        home = Path(tmp) / "user"
+        (home / ".fake-client").mkdir(parents=True)
+
+        candidate = CandidateClient(
+            name="fake-client",
+            client_exists_paths=["~/.fake-client"],
+            mcp_config_paths=[],
+            skills_dir_paths=[],
+            mcp_config_globs=["~/.fake-client/plugins/cache/**/.mcp.json"],
+        )
+
+        ctis = await get_mcp_config_per_client(candidate, [(home, "user")])
+        assert len(ctis) == 1
+        assert len(ctis[0].mcp_configs) == 0
+    finally:
+        shutil.rmtree(tmp)
+
+
+@pytest.mark.asyncio
 async def test_inspect_pipeline_discovery_mode_without_all_users_falls_back_to_current_user():
     """Without --paths and without --scan-all-users, when no agents are detected, only the current user should be reported."""
     tmp = tempfile.mkdtemp()

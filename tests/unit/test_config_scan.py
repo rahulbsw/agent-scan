@@ -17,7 +17,7 @@ from mcp.types import (
 from pytest_lazy_fixtures import lf
 
 from agent_scan.mcp_client import check_server, scan_mcp_config_file
-from agent_scan.models import ConfigWithoutMCP, StdioServer, UnknownMCPConfig
+from agent_scan.models import ConfigWithoutMCP, PluginMCPConfigFile, RemoteServer, StdioServer, UnknownMCPConfig
 
 
 @pytest.mark.parametrize(
@@ -252,3 +252,67 @@ class TestServerUrlAliasParsing:
         assert "ambiguous" in servers
         assert isinstance(servers["ambiguous"], RemoteServer)
         assert servers["ambiguous"].url == "https://primary.example.com/mcp"
+
+
+class TestPluginMCPConfigFile:
+    @pytest.mark.asyncio
+    async def test_flat_stdio_server_config(self, tmp_path):
+        config = tmp_path / ".mcp.json"
+        config.write_text('{"my-server": {"command": "npx", "args": ["-y", "some-pkg"]}}')
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        assert isinstance(mcp_config, PluginMCPConfigFile)
+        servers = mcp_config.get_servers()
+        assert "my-server" in servers
+        assert isinstance(servers["my-server"], StdioServer)
+        assert servers["my-server"].command == "npx"
+
+    @pytest.mark.asyncio
+    async def test_flat_remote_server_config(self, tmp_path):
+        config = tmp_path / ".mcp.json"
+        config.write_text('{"remote": {"url": "https://example.com/mcp"}}')
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        assert isinstance(mcp_config, PluginMCPConfigFile)
+        servers = mcp_config.get_servers()
+        assert "remote" in servers
+        assert isinstance(servers["remote"], RemoteServer)
+        assert servers["remote"].url == "https://example.com/mcp"
+
+    @pytest.mark.asyncio
+    async def test_flat_multiple_servers(self, tmp_path):
+        config = tmp_path / ".mcp.json"
+        config.write_text("""{
+            "stdio-srv": {"command": "node", "args": ["server.js"]},
+            "remote-srv": {"url": "https://example.com/mcp"}
+        }""")
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        assert isinstance(mcp_config, PluginMCPConfigFile)
+        servers = mcp_config.get_servers()
+        assert len(servers) == 2
+
+    @pytest.mark.asyncio
+    async def test_flat_server_url_alias(self, tmp_path):
+        config = tmp_path / ".mcp.json"
+        config.write_text('{"srv": {"serverUrl": "https://example.com/mcp"}}')
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        assert isinstance(mcp_config, PluginMCPConfigFile)
+        servers = mcp_config.get_servers()
+        assert isinstance(servers["srv"], RemoteServer)
+
+    @pytest.mark.asyncio
+    async def test_empty_dict_not_plugin_config(self, tmp_path):
+        config = tmp_path / ".mcp.json"
+        config.write_text("{}")
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        assert not isinstance(mcp_config, PluginMCPConfigFile)
+
+    @pytest.mark.asyncio
+    async def test_set_servers(self):
+        config = PluginMCPConfigFile.model_validate({"my-server": {"command": "npx", "args": []}})
+        new_servers = {"replaced": StdioServer(command="node", args=["index.js"])}
+        config.set_servers(new_servers)
+        assert config.get_servers() == new_servers
