@@ -1,3 +1,4 @@
+import glob
 import logging
 import traceback
 from pathlib import Path
@@ -90,7 +91,13 @@ async def get_mcp_config_per_home_directory(
         | UnknownConfigFormat
         | CouldNotParseMCPConfig,
     ] = {}
-    for mcp_config_path in client.mcp_config_paths:
+
+    all_mcp_config_paths: list[str] = list(client.mcp_config_paths)
+    for glob_pattern in client.mcp_config_globs:
+        expanded_glob = str(expand_path(Path(glob_pattern), home_directory))
+        all_mcp_config_paths.extend(glob.glob(expanded_glob, recursive=True))
+
+    for mcp_config_path in all_mcp_config_paths:
         mcp_config_path_expanded = expand_path(Path(mcp_config_path), home_directory)
         if not mcp_config_path_expanded.exists():
             if create_file_not_found_error:
@@ -125,7 +132,15 @@ async def get_mcp_config_per_home_directory(
 
     # parse skills dirs
     skills_dirs: dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig] = {}
-    for skills_dir_path in client.skills_dir_paths:
+
+    all_skills_dir_paths: list[str] = list(client.skills_dir_paths)
+    for glob_pattern in client.skills_dir_globs:
+        expanded_glob = str(expand_path(Path(glob_pattern), home_directory))
+        for match in glob.glob(expanded_glob, recursive=True):
+            if Path(match).is_dir():
+                all_skills_dir_paths.append(match)
+
+    for skills_dir_path in all_skills_dir_paths:
         skills_dir_path_expanded = expand_path(Path(skills_dir_path), home_directory)
         if skills_dir_path_expanded.exists():
             skills_dirs[skills_dir_path_expanded.as_posix()] = inspect_skills_dir(str(skills_dir_path_expanded))

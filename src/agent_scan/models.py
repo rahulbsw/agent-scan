@@ -203,6 +203,31 @@ class VSCodeConfigFile(MCPConfig):
         self.mcp.servers = servers
 
 
+class PluginMCPConfigFile(MCPConfig):
+    """Flat ``{name: serverConfig, …}`` format used by Claude Code plugin ``.mcp.json`` files."""
+
+    model_config = ConfigDict()
+    servers: dict[str, StdioServer | RemoteServer]
+
+    @model_validator(mode="before")
+    @classmethod
+    def wrap_flat_dict(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or len(data) == 0:
+            raise ValueError("empty or non-dict")
+        for v in data.values():
+            if not isinstance(v, dict):
+                raise ValueError("values must be dicts")
+            if not ("command" in v or "url" in v or "serverUrl" in v):
+                raise ValueError("values must look like server configs")
+        return {"servers": data}
+
+    def get_servers(self) -> dict[str, StdioServer | RemoteServer]:
+        return self.servers
+
+    def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
+        self.servers = servers
+
+
 class UnknownMCPConfig(MCPConfig):
     """
     Represents an MCP configuration the scanner cannot interpret.
@@ -543,6 +568,8 @@ class CandidateClient(BaseModel):
     client_exists_paths: list[str]
     mcp_config_paths: list[str]
     skills_dir_paths: list[str]
+    mcp_config_globs: list[str] = Field(default_factory=list)
+    skills_dir_globs: list[str] = Field(default_factory=list)
 
 
 class ClientToInspect(BaseModel):

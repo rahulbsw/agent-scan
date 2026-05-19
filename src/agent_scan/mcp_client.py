@@ -22,6 +22,7 @@ from agent_scan.models import (
     ConfigWithoutMCP,
     FileTokenStorage,
     MCPConfig,
+    PluginMCPConfigFile,
     RemoteServer,
     ServerSignature,
     StdioServer,
@@ -333,6 +334,7 @@ async def scan_mcp_config_file(path: str) -> MCPConfig:
             ClaudeConfigFile,  # used by most clients
             VSCodeConfigFile,  # used by vscode settings.json
             VSCodeMCPConfig,  # used by vscode mcp.json
+            PluginMCPConfigFile,  # flat {name: serverConfig} in plugin .mcp.json
             UnknownMCPConfig,  # used by unknown config files
             ConfigWithoutMCP,  # used by config files without MCP
         ]
