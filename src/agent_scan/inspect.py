@@ -27,6 +27,7 @@ from agent_scan.models import (
     UnknownMCPConfig,
     UserDeclinedError,
 )
+from agent_scan.shim_installer import get_signature_for_server
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skill, inspect_skills_dir
 from agent_scan.traffic_capture import TrafficCapture
@@ -172,8 +173,6 @@ async def inspect_extension(
     traffic_capture = TrafficCapture()
     if isinstance(config, StdioServer):
         if use_shim_cache:
-            from agent_scan.shim_installer import get_signature_for_server
-
             cached_signature = get_signature_for_server(config)
             if cached_signature is not None:
                 logger.info("Using cached shim signature for %s", name)
