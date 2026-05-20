@@ -270,6 +270,12 @@ def add_server_arguments(parser):
         action="store_true",
         help=("Skip the interactive consent prompt and start every stdio MCP server listed in the scanned configs."),
     )
+    server_group.add_argument(
+        "--use-shim-cache",
+        default=False,
+        action="store_true",
+        help="Use cached signatures from the stdio shim instead of starting MCP servers.",
+    )
 
 
 def add_scan_arguments(scan_parser):
@@ -368,6 +374,9 @@ async def run_shim(args) -> None:
             return
         for h, capture in results.items():
             parts = []
+            if capture.metadata:
+                info = capture.metadata.get("serverInfo", {})
+                parts.append(f"{info.get('name', '?')} v{info.get('version', '?')}")
             if capture.tools:
                 names = [t.get("name", "?") for t in capture.tools]
                 parts.append(f"{len(capture.tools)} tools: {', '.join(names)}")
@@ -736,12 +745,15 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
         with open(args.mcp_oauth_tokens_path) as f:
             tokens = TokenAndClientInfoList.model_validate_json(f.read()).root
 
+    use_shim_cache: bool = hasattr(args, "use_shim_cache") and args.use_shim_cache
+
     inspect_args = InspectArgs(
         timeout=server_timeout,
         tokens=tokens,
         paths=files,
         all_users=scan_all_users,
         scan_skills=scan_skills,
+        use_shim_cache=use_shim_cache,
     )
 
     # Resolve the MCP server IO flag and the consent flag.

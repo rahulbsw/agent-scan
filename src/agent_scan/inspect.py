@@ -160,6 +160,7 @@ async def inspect_extension(
     *,
     config_path: str | None = None,
     stream_stderr: bool = False,
+    use_shim_cache: bool = False,
 ) -> InspectedExtensions:
     """
     Scan an extension (MCP server or skill) and return a InspectedExtensions object.
@@ -170,6 +171,14 @@ async def inspect_extension(
     """
     traffic_capture = TrafficCapture()
     if isinstance(config, StdioServer):
+        if use_shim_cache:
+            from agent_scan.shim_installer import get_signature_for_server
+
+            cached_signature = get_signature_for_server(config)
+            if cached_signature is not None:
+                logger.info("Using cached shim signature for %s", name)
+                return InspectedExtensions(name=name, config=config, signature_or_error=cached_signature)
+
         try:
             signature, _ = await check_server(
                 config,
@@ -261,6 +270,7 @@ async def inspect_client(
     *,
     stream_stderr: bool = False,
     declined_servers: set[tuple[str, str]] | None = None,
+    use_shim_cache: bool = False,
 ) -> InspectedClient:
     """
     Scan a client (Cursor, VSCode, etc.) and return a InspectedClient object.
@@ -299,6 +309,7 @@ async def inspect_client(
                 find_relevant_token(tokens, name),
                 config_path=mcp_config_path,
                 stream_stderr=stream_stderr,
+                use_shim_cache=use_shim_cache,
             )
             extensions_for_mcp_config.append(extension)
         extensions[mcp_config_path] = extensions_for_mcp_config

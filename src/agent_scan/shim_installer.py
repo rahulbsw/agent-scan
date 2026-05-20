@@ -9,15 +9,23 @@ the servers itself.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sys
 from pathlib import Path
 
 import pyjson5
+from mcp.types import (
+    InitializeResult,
+    Prompt,
+    Resource,
+    ResourceTemplate,
+    Tool,
+)
 
 from agent_scan.mcp_client import scan_mcp_config_file
-from agent_scan.models import StdioServer
+from agent_scan.models import ServerSignature, StdioServer
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +42,13 @@ def _get_shim_path() -> Path:
 
 def _is_shimmed_raw(server: dict) -> bool:
     return SHIM_MARKER in server.get("command", "")
+
+
+def compute_server_hash(server: StdioServer) -> str:
+    """Compute the same hash the shim uses: printf '%s\\0' arg1 arg2 ... | sha256"""
+    parts = [server.command, *server.args]
+    blob = b"".join(p.encode() + b"\x00" for p in parts)
+    return hashlib.sha256(blob).hexdigest()[:12]
 
 
 async def _get_stdio_server_names(config_path: str) -> set[str]:
@@ -174,6 +189,7 @@ class ServerCapture:
     """Captured capabilities for a single server."""
 
     def __init__(self) -> None:
+        self.metadata: dict | None = None
         self.tools: list[dict] = []
         self.prompts: list[dict] = []
         self.resources: list[dict] = []
@@ -207,6 +223,8 @@ def read_signatures() -> dict[str, ServerCapture]:
                 try:
                     data = json.loads(line)
                     result = data.get("result", data)
+                    if "serverInfo" in result:
+                        capture.metadata = result
                     if "tools" in result:
                         capture.tools = result["tools"]
                     if "prompts" in result:
@@ -220,3 +238,38 @@ def read_signatures() -> dict[str, ServerCapture]:
         results[h] = capture
 
     return results
+
+
+def _capture_to_signature(capture: ServerCapture) -> ServerSignature | None:
+    """Convert a shim capture to a ServerSignature, or None if empty."""
+    if not capture.metadata:
+        return None
+    if not capture.tools and not capture.prompts and not capture.resources and not capture.resource_templates:
+        return None
+
+    metadata = InitializeResult.model_validate(capture.metadata)
+
+    return ServerSignature(
+        metadata=metadata,
+        tools=[Tool.model_validate(t) for t in capture.tools],
+        prompts=[Prompt.model_validate(p) for p in capture.prompts],
+        resources=[Resource.model_validate(r) for r in capture.resources],
+        resource_templates=[ResourceTemplate.model_validate(rt) for rt in capture.resource_templates],
+    )
+
+
+def get_signature_for_server(server: StdioServer) -> ServerSignature | None:
+    """
+    Look up a cached shim signature for a StdioServer.
+    Returns a ServerSignature if found and non-empty, else None.
+    """
+    parts = server.args if SHIM_MARKER in server.command else [server.command, *server.args]
+
+    blob = b"".join(p.encode() + b"\x00" for p in parts)
+    h = hashlib.sha256(blob).hexdigest()[:12]
+
+    captures = read_signatures()
+    capture = captures.get(h)
+    if capture is None:
+        return None
+    return _capture_to_signature(capture)
