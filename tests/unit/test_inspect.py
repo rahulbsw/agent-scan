@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agent_scan.inspect import get_mcp_config_per_client
+from agent_scan.mcp_client import scan_mcp_config_file
 from agent_scan.models import CandidateClient, ClientToInspect
 from agent_scan.pipelines import InspectArgs, inspect_pipeline
 
@@ -482,6 +483,36 @@ async def test_glob_no_matches_still_works():
         ctis = await get_mcp_config_per_client(candidate, [(home, "user")])
         assert len(ctis) == 1
         assert len(ctis[0].mcp_configs) == 0
+    finally:
+        shutil.rmtree(tmp)
+
+
+@pytest.mark.asyncio
+async def test_glob_deduplicates_with_explicit_paths():
+    """When a glob matches a path already in mcp_config_paths, scan_mcp_config_file should only be called once."""
+    tmp = tempfile.mkdtemp()
+    try:
+        home = Path(tmp) / "user"
+        (home / ".fake-client").mkdir(parents=True)
+
+        plugin_dir = home / ".fake-client" / "plugins" / "cache" / "mp" / "my-plugin" / "v1"
+        plugin_dir.mkdir(parents=True)
+        mcp_json = plugin_dir / ".mcp.json"
+        mcp_json.write_text('{"srv": {"command": "node", "args": ["s.js"]}}')
+
+        candidate = CandidateClient(
+            name="fake-client",
+            client_exists_paths=["~/.fake-client"],
+            mcp_config_paths=[str(mcp_json)],
+            skills_dir_paths=[],
+            mcp_config_globs=["~/.fake-client/plugins/cache/**/.mcp.json"],
+        )
+
+        with patch("agent_scan.inspect.scan_mcp_config_file", wraps=scan_mcp_config_file) as spy:
+            ctis = await get_mcp_config_per_client(candidate, [(home, "user")])
+
+        assert len(ctis) == 1
+        assert spy.call_count == 1, f"scan_mcp_config_file called {spy.call_count} times, expected 1"
     finally:
         shutil.rmtree(tmp)
 

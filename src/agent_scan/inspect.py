@@ -110,6 +110,9 @@ async def get_mcp_config_per_home_directory(
     for glob_pattern in client.mcp_config_globs:
         expanded_glob = str(expand_path(Path(glob_pattern), home_directory))
         all_mcp_config_paths.extend(_resolve_glob_with_depth(expanded_glob, client.max_glob_depth))
+    all_mcp_config_paths = list(
+        dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in all_mcp_config_paths)
+    )
 
     for mcp_config_path in all_mcp_config_paths:
         mcp_config_path_expanded = expand_path(Path(mcp_config_path), home_directory)
@@ -153,6 +156,9 @@ async def get_mcp_config_per_home_directory(
         for match in _resolve_glob_with_depth(expanded_glob, client.max_glob_depth):
             if Path(match).is_dir():
                 all_skills_dir_paths.append(match)
+    all_skills_dir_paths = list(
+        dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in all_skills_dir_paths)
+    )
 
     for skills_dir_path in all_skills_dir_paths:
         skills_dir_path_expanded = expand_path(Path(skills_dir_path), home_directory)
