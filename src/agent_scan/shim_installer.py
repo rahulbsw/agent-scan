@@ -85,15 +85,11 @@ def _resolve_servers(config: dict) -> dict | None:
 
 async def repair_broken_shim(config_path: str) -> list[str]:
     """
-    If the config has shimmed servers but the shim script no longer exists
-    on disk, uninstall the shim to restore working server configs.
+    If the config has shimmed servers whose shim command no longer exists
+    on disk, uninstall those servers to restore working configs.
 
     Returns the list of server names that were repaired.
     """
-    shim_script = _get_shim_path()
-    if shim_script.exists():
-        return []
-
     path = Path(config_path).expanduser()
     if not path.exists():
         return []
@@ -109,13 +105,19 @@ async def repair_broken_shim(config_path: str) -> list[str]:
     if not servers:
         return []
 
-    has_shimmed = any(_is_shimmed_raw(s) for s in servers.values() if isinstance(s, dict))
-    if not has_shimmed:
+    needs_repair = False
+    for server in servers.values():
+        if not isinstance(server, dict):
+            continue
+        if _is_shimmed_raw(server) and not Path(server["command"]).exists():
+            needs_repair = True
+            break
+
+    if not needs_repair:
         return []
 
     logger.warning(
-        "Shim script missing (%s) but config %s has shimmed servers — restoring original commands",
-        shim_script,
+        "Config %s has shimmed servers pointing to a missing shim script — restoring original commands",
         path,
     )
     return await uninstall_shim_from_config(config_path)
@@ -130,6 +132,8 @@ async def install_shim_into_config(config_path: str) -> list[str]:
     if not path.exists():
         logger.warning("Config file not found: %s", path)
         return []
+
+    await repair_broken_shim(config_path)
 
     shim_script = _get_shim_path()
     shim_path = str(shim_script.resolve())
