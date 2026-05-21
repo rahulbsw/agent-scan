@@ -1,3 +1,4 @@
+import glob
 import logging
 import traceback
 from pathlib import Path
@@ -35,6 +36,20 @@ from agent_scan.traffic_capture import TrafficCapture
 from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_glob_with_depth(pattern: str, max_depth: int) -> list[str]:
+    """Glob with ``**`` but discard matches deeper than *max_depth* levels below the ``**`` anchor."""
+    star_idx = pattern.find("**")
+    if star_idx == -1:
+        return glob.glob(pattern)
+    base = pattern[:star_idx].rstrip("/\\")
+    base_depth = len(Path(base).parts)
+    results: list[str] = []
+    for match in glob.glob(pattern, recursive=True):
+        if len(Path(match).parts) - base_depth <= max_depth:
+            results.append(match)
+    return results
 
 
 async def get_mcp_config_per_client(
@@ -92,7 +107,16 @@ async def get_mcp_config_per_home_directory(
         | UnknownConfigFormat
         | CouldNotParseMCPConfig,
     ] = {}
-    for mcp_config_path in client.mcp_config_paths:
+
+    all_mcp_config_paths: list[str] = list(client.mcp_config_paths)
+    for glob_pattern in client.mcp_config_globs:
+        expanded_glob = str(expand_path(Path(glob_pattern), home_directory))
+        all_mcp_config_paths.extend(_resolve_glob_with_depth(expanded_glob, client.max_glob_depth))
+    all_mcp_config_paths = list(
+        dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in all_mcp_config_paths)
+    )
+
+    for mcp_config_path in all_mcp_config_paths:
         mcp_config_path_expanded = expand_path(Path(mcp_config_path), home_directory)
         if not mcp_config_path_expanded.exists():
             if create_file_not_found_error:
@@ -127,7 +151,18 @@ async def get_mcp_config_per_home_directory(
 
     # parse skills dirs
     skills_dirs: dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig] = {}
-    for skills_dir_path in client.skills_dir_paths:
+
+    all_skills_dir_paths: list[str] = list(client.skills_dir_paths)
+    for glob_pattern in client.skills_dir_globs:
+        expanded_glob = str(expand_path(Path(glob_pattern), home_directory))
+        for match in _resolve_glob_with_depth(expanded_glob, client.max_glob_depth):
+            if Path(match).is_dir():
+                all_skills_dir_paths.append(match)
+    all_skills_dir_paths = list(
+        dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in all_skills_dir_paths)
+    )
+
+    for skills_dir_path in all_skills_dir_paths:
         skills_dir_path_expanded = expand_path(Path(skills_dir_path), home_directory)
         if skills_dir_path_expanded.exists():
             skills_dirs[skills_dir_path_expanded.as_posix()] = inspect_skills_dir(str(skills_dir_path_expanded))

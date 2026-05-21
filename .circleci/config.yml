@@ -18,6 +18,7 @@ commands:
   notify_slack_on_failure:
     steps:
       - slack/notify:
+          branch_pattern: main
           channel: mcp-scan-alerting
           event: fail
           custom: |

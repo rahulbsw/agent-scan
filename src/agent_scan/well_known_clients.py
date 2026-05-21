@@ -1,3 +1,4 @@
+import glob
 import logging
 import os
 import sys
@@ -43,6 +44,8 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         client_exists_paths=["~/.claude"],
         mcp_config_paths=["~/.claude.json"],
         skills_dir_paths=["~/.claude/skills"],
+        mcp_config_globs=["~/.claude/plugins/cache/**/.mcp.json"],
+        skills_dir_globs=["~/.claude/plugins/cache/**/skills"],
     ),
     CandidateClient(
         name="gemini cli",
@@ -131,6 +134,8 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         client_exists_paths=["~/.claude"],
         mcp_config_paths=["~/.claude.json"],
         skills_dir_paths=["~/.claude/skills"],
+        mcp_config_globs=["~/.claude/plugins/cache/**/.mcp.json"],
+        skills_dir_globs=["~/.claude/plugins/cache/**/skills"],
     ),
     CandidateClient(
         name="gemini cli",
@@ -226,6 +231,8 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         client_exists_paths=["~/.claude"],
         mcp_config_paths=["~/.claude.json"],
         skills_dir_paths=["~/.claude/skills"],
+        mcp_config_globs=["~/.claude/plugins/cache/**/.mcp.json"],
+        skills_dir_globs=["~/.claude/plugins/cache/**/skills"],
     ),
     CandidateClient(
         name="gemini cli",
@@ -320,6 +327,10 @@ def get_client_from_path(path: str) -> str | None:
         real_paths = [os.path.realpath(os.path.expanduser(p)) for p in client.mcp_config_paths]
         if path in real_paths:
             return client.name
+        for pattern in client.mcp_config_globs:
+            expanded = os.path.expanduser(pattern)
+            if path in [os.path.realpath(p) for p in glob.glob(expanded, recursive=True)]:
+                return client.name
     return None
 
 
