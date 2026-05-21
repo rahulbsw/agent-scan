@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 SHIM_SCRIPT_UNIX = Path(__file__).parent / "snyk_mcp_stdio_local_proxy.sh"
 SHIM_SCRIPT_WINDOWS = Path(__file__).parent / "snyk_mcp_stdio_local_proxy.cmd"
 SHIM_MARKER = "snyk_mcp_stdio_local_proxy"
+RUNTIME_CONFIG_SHIM_FLAG = "enable-local-stdio-proxy"
 
 
 def _get_shim_path() -> Path:

@@ -35,8 +35,9 @@ from agent_scan.pipelines import (
     inspect_pipeline,
 )
 from agent_scan.printer import print_scan_result
-from agent_scan.runtime_config import RuntimeConfig, set_runtime_config
+from agent_scan.runtime_config import RuntimeConfig, get_runtime_config, set_runtime_config
 from agent_scan.shim_installer import (
+    RUNTIME_CONFIG_SHIM_FLAG,
     install_shim_into_config,
     read_signatures,
     uninstall_shim_from_config,
@@ -792,6 +793,34 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
             tokens = TokenAndClientInfoList.model_validate_json(f.read()).root
 
     use_shim_cache: bool = hasattr(args, "use_shim_cache") and args.use_shim_cache
+
+    # Apply shim policy based on the bootstrap runtime config: install the
+    # shim when the control server sets the flag, uninstall otherwise.
+    # Always runs — if bootstrap failed or wasn't configured, the flag is
+    # absent and shims are cleaned up.
+    runtime_cfg = get_runtime_config()
+    shim_enabled = bool(runtime_cfg.config.get(RUNTIME_CONFIG_SHIM_FLAG))
+    discovery_args = InspectArgs(
+        timeout=server_timeout,
+        tokens=[],
+        paths=files or [],
+        all_users=scan_all_users,
+        scan_skills=False,
+    )
+    pre_clients, _, _ = await discover_clients_to_inspect(discovery_args)
+    config_paths: list[str] = []
+    for cti in pre_clients:
+        config_paths.extend(cti.mcp_configs.keys())
+    config_paths = list(dict.fromkeys(config_paths))
+
+    # Apply the shim to the configs if it is enabled
+    for path in config_paths:
+        if shim_enabled:
+            await install_shim_into_config(path)
+        else:
+            await uninstall_shim_from_config(path)
+    if shim_enabled:
+        use_shim_cache = True
 
     inspect_args = InspectArgs(
         timeout=server_timeout,
