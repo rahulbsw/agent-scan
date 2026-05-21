@@ -78,3 +78,4 @@
 - `0.5.1` Dependency upgrades.
 - `0.5.2` Dependency upgrades and enable skill scanning by default.
 - `0.5.3` Improve redaction of args and env vars.
+- `0.5.4` Fix bug in parsing of skills. Cosmetic improvements to the CLI. Security fixes. Added agent-guard support for codex.
