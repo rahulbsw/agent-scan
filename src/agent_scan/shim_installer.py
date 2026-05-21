@@ -83,6 +83,44 @@ def _resolve_servers(config: dict) -> dict | None:
     return None
 
 
+async def repair_broken_shim(config_path: str) -> list[str]:
+    """
+    If the config has shimmed servers but the shim script no longer exists
+    on disk, uninstall the shim to restore working server configs.
+
+    Returns the list of server names that were repaired.
+    """
+    shim_script = _get_shim_path()
+    if shim_script.exists():
+        return []
+
+    path = Path(config_path).expanduser()
+    if not path.exists():
+        return []
+
+    try:
+        raw = path.read_text(encoding="utf-8")
+        config = pyjson5.loads(raw) if raw.strip() else {}
+    except Exception:
+        logger.exception("Failed to parse config: %s", path)
+        return []
+
+    servers = _resolve_servers(config)
+    if not servers:
+        return []
+
+    has_shimmed = any(_is_shimmed_raw(s) for s in servers.values() if isinstance(s, dict))
+    if not has_shimmed:
+        return []
+
+    logger.warning(
+        "Shim script missing (%s) but config %s has shimmed servers — restoring original commands",
+        shim_script,
+        path,
+    )
+    return await uninstall_shim_from_config(config_path)
+
+
 async def install_shim_into_config(config_path: str) -> list[str]:
     """
     Install the shim into a single config file.

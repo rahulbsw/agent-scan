@@ -18,6 +18,7 @@ from agent_scan.shim_installer import (
     _resolve_servers,
     compute_server_hash,
     install_shim_into_config,
+    repair_broken_shim,
     uninstall_shim_from_config,
 )
 
@@ -705,3 +706,120 @@ class TestConfigMutations:
 
         unshimmed = await uninstall_shim_from_config(str(cfg_path))
         assert unshimmed == []
+
+
+# ---------------------------------------------------------------------------
+# repair_broken_shim
+# ---------------------------------------------------------------------------
+
+
+class TestRepairBrokenShim:
+    @pytest.mark.asyncio
+    async def test_repairs_when_shim_file_missing(self, tmp_path):
+        """Shimmed config with missing shim file gets restored."""
+        missing_shim = tmp_path / "gone" / "snyk_mcp_stdio_local_proxy.sh"
+        config = {
+            "mcpServers": {
+                "weather": {
+                    "command": f"/old/path/{SHIM_MARKER}.sh",
+                    "args": ["uv", "run", "weather.py"],
+                }
+            }
+        }
+        cfg_path = _write_config(tmp_path, config)
+
+        with _patch_shim(missing_shim):
+            repaired = await repair_broken_shim(str(cfg_path))
+
+        assert repaired == ["weather"]
+        result = _read_config(cfg_path)
+        assert result["mcpServers"]["weather"]["command"] == "uv"
+        assert result["mcpServers"]["weather"]["args"] == ["run", "weather.py"]
+
+    @pytest.mark.asyncio
+    async def test_noop_when_shim_file_exists(self, tmp_path, shim_path):
+        """No repair needed when the shim file is present."""
+        config = {
+            "mcpServers": {
+                "weather": {
+                    "command": str(shim_path.resolve()),
+                    "args": ["uv", "run", "weather.py"],
+                }
+            }
+        }
+        cfg_path = _write_config(tmp_path, config)
+
+        with _patch_shim(shim_path):
+            repaired = await repair_broken_shim(str(cfg_path))
+
+        assert repaired == []
+        result = _read_config(cfg_path)
+        assert SHIM_MARKER in result["mcpServers"]["weather"]["command"]
+
+    @pytest.mark.asyncio
+    async def test_noop_when_no_shimmed_servers(self, tmp_path):
+        """No repair needed when config has no shimmed servers."""
+        missing_shim = tmp_path / "gone" / "snyk_mcp_stdio_local_proxy.sh"
+        config = {"mcpServers": {"srv": {"command": "uv", "args": ["run"]}}}
+        cfg_path = _write_config(tmp_path, config)
+
+        with _patch_shim(missing_shim):
+            repaired = await repair_broken_shim(str(cfg_path))
+
+        assert repaired == []
+
+    @pytest.mark.asyncio
+    async def test_noop_when_config_missing(self, tmp_path):
+        """No crash when config file doesn't exist."""
+        missing_shim = tmp_path / "gone" / "snyk_mcp_stdio_local_proxy.sh"
+
+        with _patch_shim(missing_shim):
+            repaired = await repair_broken_shim("/nonexistent/path.json")
+
+        assert repaired == []
+
+    @pytest.mark.asyncio
+    async def test_repairs_multiple_shimmed_servers(self, tmp_path):
+        """All shimmed servers get restored when shim is missing."""
+        missing_shim = tmp_path / "gone" / "snyk_mcp_stdio_local_proxy.sh"
+        config = {
+            "mcpServers": {
+                "a": {"command": f"/old/{SHIM_MARKER}.sh", "args": ["cmd_a", "--flag"]},
+                "b": {"command": f"/old/{SHIM_MARKER}.sh", "args": ["cmd_b"]},
+                "not_shimmed": {"command": "uv", "args": ["run"]},
+            }
+        }
+        cfg_path = _write_config(tmp_path, config)
+
+        with _patch_shim(missing_shim):
+            repaired = await repair_broken_shim(str(cfg_path))
+
+        assert set(repaired) == {"a", "b"}
+        result = _read_config(cfg_path)
+        assert result["mcpServers"]["a"]["command"] == "cmd_a"
+        assert result["mcpServers"]["a"]["args"] == ["--flag"]
+        assert result["mcpServers"]["b"]["command"] == "cmd_b"
+        assert result["mcpServers"]["b"]["args"] == []
+        assert result["mcpServers"]["not_shimmed"]["command"] == "uv"
+
+    @pytest.mark.asyncio
+    async def test_preserves_env_on_repair(self, tmp_path):
+        """Env vars and other keys survive repair."""
+        missing_shim = tmp_path / "gone" / "snyk_mcp_stdio_local_proxy.sh"
+        config = {
+            "mcpServers": {
+                "srv": {
+                    "command": f"/old/{SHIM_MARKER}.sh",
+                    "args": ["uv", "run"],
+                    "env": {"API_KEY": "secret"},
+                }
+            }
+        }
+        cfg_path = _write_config(tmp_path, config)
+
+        with _patch_shim(missing_shim):
+            await repair_broken_shim(str(cfg_path))
+
+        result = _read_config(cfg_path)
+        assert result["mcpServers"]["srv"]["command"] == "uv"
+        assert result["mcpServers"]["srv"]["env"] == {"API_KEY": "secret"}
