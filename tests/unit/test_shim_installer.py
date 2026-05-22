@@ -17,13 +17,15 @@ from agent_scan import shim_installer
 from agent_scan.models import StdioServer
 from agent_scan.shim_installer import (
     SHIM_MARKER,
+    WRAPPER_SENTINEL,
     _get_shim_path,
     _is_shimmed_raw,
     _read_shim_source_bytes,
     _resolve_servers,
+    _unwrap_shimmed,
+    _wrap_command,
     compute_server_hash,
     install_shim_into_config,
-    repair_broken_shim,
     uninstall_shim_from_config,
 )
 
@@ -87,11 +89,71 @@ class TestIsShimmedRaw:
     def test_not_shimmed(self):
         assert not _is_shimmed_raw({"command": "uv", "args": ["run"]})
 
-    def test_shimmed(self):
+    def test_shimmed_legacy_direct_exec(self):
         assert _is_shimmed_raw({"command": f"/path/to/{SHIM_MARKER}.sh", "args": ["uv", "run"]})
+
+    def test_shimmed_conditional_unix(self):
+        server = {
+            "command": "/bin/sh",
+            "args": [
+                "-c",
+                f'P=/tmp/{SHIM_MARKER}.HASH.sh; if [ -x "$P" ]; then exec "$P" "$@"; else exec "$@"; fi',
+                WRAPPER_SENTINEL,
+                "uv",
+                "run",
+            ],
+        }
+        assert _is_shimmed_raw(server)
+
+    def test_shimmed_conditional_windows(self):
+        server = {
+            "command": "cmd",
+            "args": [
+                "/d",
+                "/s",
+                "/c",
+                f'if exist "C:\\Users\\Public\\{SHIM_MARKER}.HASH.cmd" ("C:\\...{SHIM_MARKER}.HASH.cmd" %*) else (%*)',
+                "uv",
+                "run",
+            ],
+        }
+        assert _is_shimmed_raw(server)
 
     def test_no_command(self):
         assert not _is_shimmed_raw({"args": ["run"]})
+
+
+# ---------------------------------------------------------------------------
+# _unwrap_shimmed / _wrap_command
+# ---------------------------------------------------------------------------
+
+
+class TestUnwrapShimmed:
+    def test_unshimmed_returns_none(self):
+        assert _unwrap_shimmed({"command": "uv", "args": ["run", "server.py"]}) is None
+
+    def test_legacy_direct_exec(self):
+        server = {
+            "command": f"/tmp/{SHIM_MARKER}.HASH.sh",
+            "args": ["uv", "run", "server.py"],
+        }
+        assert _unwrap_shimmed(server) == ("uv", ["run", "server.py"])
+
+    def test_conditional_unix(self):
+        shim_path = f"/tmp/{SHIM_MARKER}.HASH.sh"
+        cmd, args = _wrap_command(shim_path, "uv", ["run", "server.py"])
+        assert _unwrap_shimmed({"command": cmd, "args": args}) == ("uv", ["run", "server.py"])
+
+
+class TestWrapCommand:
+    def test_round_trip(self):
+        shim_path = f"/tmp/{SHIM_MARKER}.HASH.sh"
+        cmd, args = _wrap_command(shim_path, "uv", ["run", "server.py"])
+        assert _unwrap_shimmed({"command": cmd, "args": args}) == ("uv", ["run", "server.py"])
+
+    def test_marker_present_in_args(self):
+        cmd, args = _wrap_command(f"/tmp/{SHIM_MARKER}.HASH.sh", "uv", [])
+        assert any(SHIM_MARKER in a for a in args if isinstance(a, str))
 
 
 # ---------------------------------------------------------------------------
@@ -152,9 +214,8 @@ class TestInstallShim:
         assert shimmed == ["weather"]
         result = _read_config(cfg_path)
         weather = result["mcpServers"]["weather"]
-        assert SHIM_MARKER in weather["command"]
-        assert weather["args"][0] == "uv"
-        assert weather["args"][1:] == ["run", "weather.py"]
+        assert _is_shimmed_raw(weather)
+        assert _unwrap_shimmed(weather) == ("uv", ["run", "weather.py"])
         # remote server should be untouched
         assert result["mcpServers"]["remote"] == {"url": "https://example.com/mcp"}
 
@@ -169,8 +230,7 @@ class TestInstallShim:
         assert shimmed == ["myserver"]
         result = _read_config(cfg_path)
         server = result["mcp"]["servers"]["myserver"]
-        assert SHIM_MARKER in server["command"]
-        assert server["args"][0] == "node"
+        assert _unwrap_shimmed(server) == ("node", ["index.js"])
 
     @pytest.mark.asyncio
     async def test_install_servers_format(self, tmp_path, shim_path):
@@ -182,21 +242,50 @@ class TestInstallShim:
 
         assert shimmed == ["s1"]
         result = _read_config(cfg_path)
-        assert SHIM_MARKER in result["servers"]["s1"]["command"]
+        assert _unwrap_shimmed(result["servers"]["s1"]) == ("python", ["-m", "srv"])
 
     @pytest.mark.asyncio
     async def test_skips_already_shimmed_with_current_path(self, tmp_path, shim_path):
+        """A config already in the conditional-wrapper form with the current
+        shim path is left alone (no rewrite)."""
+        wrapped_cmd, wrapped_args = _wrap_command(str(shim_path.resolve()), "uv", ["run"])
         config = {
             "mcpServers": {
-                "already": {"command": str(shim_path.resolve()), "args": ["uv", "run"]},
+                "already": {"command": wrapped_cmd, "args": wrapped_args},
             }
         }
         cfg_path = _write_config(tmp_path, config)
+        mtime_before = cfg_path.stat().st_mtime
 
         with _patch_shim(shim_path), _patch_stdio_names({"already"}):
             shimmed = await install_shim_into_config(str(cfg_path))
 
         assert shimmed == []
+        assert cfg_path.stat().st_mtime == mtime_before
+
+    @pytest.mark.asyncio
+    async def test_upgrades_legacy_direct_exec_to_conditional(self, tmp_path, shim_path):
+        """A config in the legacy direct-exec form gets re-wrapped to the
+        conditional form on install."""
+        config = {
+            "mcpServers": {
+                "weather": {
+                    "command": f"/old/path/{SHIM_MARKER}.sh",
+                    "args": ["uv", "run", "weather.py"],
+                },
+            }
+        }
+        cfg_path = _write_config(tmp_path, config)
+
+        with _patch_shim(shim_path), _patch_stdio_names({"weather"}):
+            shimmed = await install_shim_into_config(str(cfg_path))
+
+        assert shimmed == ["weather"]
+        result = _read_config(cfg_path)
+        weather = result["mcpServers"]["weather"]
+        assert _unwrap_shimmed(weather) == ("uv", ["run", "weather.py"])
+        # And it's no longer in the legacy form
+        assert SHIM_MARKER not in weather["command"]
 
     @pytest.mark.asyncio
     async def test_skips_non_stdio_servers(self, tmp_path, shim_path):
@@ -213,7 +302,7 @@ class TestInstallShim:
 
         assert shimmed == ["stdio_one"]
         result = _read_config(cfg_path)
-        assert SHIM_MARKER not in result["mcpServers"]["not_stdio"]["command"]
+        assert not _is_shimmed_raw(result["mcpServers"]["not_stdio"])
 
     @pytest.mark.asyncio
     async def test_missing_config_file(self, shim_path):
@@ -268,18 +357,18 @@ class TestInstallShim:
 
         assert set(shimmed) == {"a", "b"}
         result = _read_config(cfg_path)
-        for name in ("a", "b"):
-            assert SHIM_MARKER in result["mcpServers"][name]["command"]
+        assert _unwrap_shimmed(result["mcpServers"]["a"]) == ("cmd_a", ["--flag"])
+        assert _unwrap_shimmed(result["mcpServers"]["b"]) == ("cmd_b", [])
 
     @pytest.mark.asyncio
-    async def test_shim_marker_changed_updates_shimmed_servers(self, tmp_path, shim_path):
-        """If the shim marker has changed, we should update the shimmed servers to use the new marker."""
+    async def test_shim_path_changed_re_wraps_with_new_path(self, tmp_path, shim_path):
+        """If the shim path embedded in the conditional has changed (e.g. a
+        package upgrade with a new content-addressed hash), re-installing
+        re-wraps with the new shim path."""
+        old_wrap_cmd, old_wrap_args = _wrap_command(f"/old/path/{SHIM_MARKER}.OLD.sh", "uv", ["run", "weather.py"])
         config = {
             "mcpServers": {
-                "weather": {
-                    "command": f"/path/to/{SHIM_MARKER}.sh",
-                    "args": ["uv", "run", "weather.py"],
-                }
+                "weather": {"command": old_wrap_cmd, "args": old_wrap_args},
             }
         }
         cfg_path = _write_config(tmp_path, config)
@@ -289,8 +378,11 @@ class TestInstallShim:
 
         assert shimmed == ["weather"]
         result = _read_config(cfg_path)
-        assert SHIM_MARKER in result["mcpServers"]["weather"]["command"]
-        assert result["mcpServers"]["weather"]["args"] == ["uv", "run", "weather.py"]
+        weather = result["mcpServers"]["weather"]
+        assert _unwrap_shimmed(weather) == ("uv", ["run", "weather.py"])
+        # And the new shim path is what's embedded in the wrapper
+        new_path = str(shim_path.resolve())
+        assert any(new_path in a for a in weather["args"] if isinstance(a, str))
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +534,7 @@ class TestRoundTrip:
 
         # Verify shimmed state
         mid = _read_config(cfg_path)
-        assert SHIM_MARKER in mid["mcpServers"]["weather"]["command"]
+        assert _unwrap_shimmed(mid["mcpServers"]["weather"]) == ("uv", ["run", "weather.py"])
 
         await uninstall_shim_from_config(str(cfg_path))
 
@@ -452,8 +544,9 @@ class TestRoundTrip:
         assert result["mcpServers"]["remote"] == {"url": "https://example.com"}
 
     @pytest.mark.asyncio
-    async def test_install_updates_stale_shim_path(self, tmp_path, shim_path):
-        """If the shim path has changed (e.g. package updated), re-install should update the command."""
+    async def test_install_upgrades_legacy_to_conditional(self, tmp_path, shim_path):
+        """A legacy direct-exec shimmed entry gets upgraded to the conditional
+        wrapper form on re-install."""
         old_shim = f"/old/path/to/{SHIM_MARKER}.sh"
         config = {
             "mcpServers": {
@@ -471,11 +564,13 @@ class TestRoundTrip:
         assert shimmed == ["weather"]
         result = _read_config(cfg_path)
         weather = result["mcpServers"]["weather"]
-        # Command should now point to the new shim path, not the old one
-        assert weather["command"] == str(shim_path.resolve())
-        assert weather["command"] != old_shim
-        # Original args should be preserved (not double-wrapped)
-        assert weather["args"] == ["uv", "run", "weather.py"]
+        # Original command is recoverable via the unwrap helper
+        assert _unwrap_shimmed(weather) == ("uv", ["run", "weather.py"])
+        # And the old shim path is no longer embedded anywhere
+        assert old_shim not in weather["command"]
+        for a in weather["args"]:
+            if isinstance(a, str):
+                assert old_shim not in a
 
     @pytest.mark.asyncio
     async def test_double_install_is_idempotent(self, tmp_path, shim_path):
@@ -490,7 +585,7 @@ class TestRoundTrip:
         assert second == []
         result = _read_config(cfg_path)
         # Should only be wrapped once
-        assert result["mcpServers"]["srv"]["args"][0] == "uv"
+        assert _unwrap_shimmed(result["mcpServers"]["srv"]) == ("uv", ["run"])
 
     @pytest.mark.asyncio
     async def test_double_uninstall_is_idempotent(self, tmp_path, shim_path):
@@ -547,7 +642,7 @@ class TestRoundTrip:
 
         assert shimmed == ["bare"]
         result = _read_config(cfg_path)
-        assert result["mcpServers"]["bare"]["args"] == ["my-server"]
+        assert _unwrap_shimmed(result["mcpServers"]["bare"]) == ("my-server", [])
 
         await uninstall_shim_from_config(str(cfg_path))
 
@@ -581,11 +676,9 @@ class TestConfigMutations:
 
         assert shimmed == ["new_server"]
         result = _read_config(cfg_path)
-        assert SHIM_MARKER in result["mcpServers"]["new_server"]["command"]
-        assert result["mcpServers"]["new_server"]["args"][0] == "node"
+        assert _unwrap_shimmed(result["mcpServers"]["new_server"]) == ("node", ["index.js"])
         # Existing should still be shimmed, not double-wrapped
-        assert SHIM_MARKER in result["mcpServers"]["existing"]["command"]
-        assert result["mcpServers"]["existing"]["args"][0] == "uv"
+        assert _unwrap_shimmed(result["mcpServers"]["existing"]) == ("uv", ["run"])
 
     @pytest.mark.asyncio
     async def test_user_removes_shimmed_server(self, tmp_path, shim_path):
@@ -659,16 +752,21 @@ class TestConfigMutations:
 
     @pytest.mark.asyncio
     async def test_user_replaces_shimmed_server_command(self, tmp_path, shim_path):
-        """User changes the underlying command of a shimmed server (e.g. switches from uv to node)."""
+        """User changes the underlying command inside a shimmed entry (e.g.
+        switches from uv to node) by editing the wrapped command/args slots."""
         config = {"mcpServers": {"srv": {"command": "uv", "args": ["run", "old.py"]}}}
         cfg_path = _write_config(tmp_path, config)
 
         with _patch_shim(shim_path), _patch_stdio_names({"srv"}):
             await install_shim_into_config(str(cfg_path))
 
-        # User changes args[0] (the wrapped original command) and the rest
+        # User edits the wrapped command + args inside the conditional wrapper.
+        # We use _wrap_command to compute the new wrapped form for "node new.js"
+        # while keeping the same shim path. This mimics a user-supplied edit.
+        new_cmd, new_args = _wrap_command(str(shim_path.resolve()), "node", ["new.js"])
         mid = _read_config(cfg_path)
-        mid["mcpServers"]["srv"]["args"] = ["node", "new.js"]
+        mid["mcpServers"]["srv"]["command"] = new_cmd
+        mid["mcpServers"]["srv"]["args"] = new_args
         cfg_path.write_text(json.dumps(mid, indent=2), encoding="utf-8")
 
         await uninstall_shim_from_config(str(cfg_path))
@@ -714,120 +812,41 @@ class TestConfigMutations:
 
 
 # ---------------------------------------------------------------------------
-# repair_broken_shim
+# Silent degrade: the wrapper falls through to the original command when
+# the shim file isn't present at runtime. These tests exercise the wrapped
+# entry as an actual subprocess to verify the conditional behaviour.
 # ---------------------------------------------------------------------------
 
 
-class TestRepairBrokenShim:
-    @pytest.mark.asyncio
-    async def test_repairs_when_shim_file_missing(self, tmp_path):
-        """Shimmed config with missing shim file gets restored."""
-        missing_shim = tmp_path / "gone" / "snyk_mcp_stdio_local_proxy.sh"
-        config = {
-            "mcpServers": {
-                "weather": {
-                    "command": f"/old/path/{SHIM_MARKER}.sh",
-                    "args": ["uv", "run", "weather.py"],
-                }
-            }
-        }
-        cfg_path = _write_config(tmp_path, config)
+class TestConditionalWrapperSilentDegrade:
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix /bin/sh form")
+    def test_unix_wrapper_runs_original_when_shim_missing(self, tmp_path):
+        """When the shim file referenced in the wrapper doesn't exist, sh
+        falls through to exec the original command."""
+        import subprocess
 
-        with _patch_shim(missing_shim):
-            repaired = await repair_broken_shim(str(cfg_path))
+        missing_shim = tmp_path / f"{SHIM_MARKER}.MISSING.sh"
+        cmd, args = _wrap_command(str(missing_shim), "/bin/echo", ["hello"])
+        result = subprocess.run([cmd, *args], capture_output=True, text=True, timeout=5)
+        assert result.returncode == 0
+        assert result.stdout.strip() == "hello"
 
-        assert repaired == ["weather"]
-        result = _read_config(cfg_path)
-        assert result["mcpServers"]["weather"]["command"] == "uv"
-        assert result["mcpServers"]["weather"]["args"] == ["run", "weather.py"]
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix /bin/sh form")
+    def test_unix_wrapper_runs_shim_when_present(self, tmp_path):
+        """When the shim exists and is executable, sh exec's the shim with
+        the original command as its args."""
+        import os
+        import subprocess
 
-    @pytest.mark.asyncio
-    async def test_noop_when_shim_file_exists(self, tmp_path, shim_path):
-        """No repair needed when the shim file is present."""
-        config = {
-            "mcpServers": {
-                "weather": {
-                    "command": str(shim_path.resolve()),
-                    "args": ["uv", "run", "weather.py"],
-                }
-            }
-        }
-        cfg_path = _write_config(tmp_path, config)
+        fake_shim = tmp_path / f"{SHIM_MARKER}.PRESENT.sh"
+        fake_shim.write_text('#!/bin/sh\necho "via-shim:$@"\n')
+        os.chmod(fake_shim, 0o755)
 
-        with _patch_shim(shim_path):
-            repaired = await repair_broken_shim(str(cfg_path))
-
-        assert repaired == []
-        result = _read_config(cfg_path)
-        assert SHIM_MARKER in result["mcpServers"]["weather"]["command"]
-
-    @pytest.mark.asyncio
-    async def test_noop_when_no_shimmed_servers(self, tmp_path):
-        """No repair needed when config has no shimmed servers."""
-        missing_shim = tmp_path / "gone" / "snyk_mcp_stdio_local_proxy.sh"
-        config = {"mcpServers": {"srv": {"command": "uv", "args": ["run"]}}}
-        cfg_path = _write_config(tmp_path, config)
-
-        with _patch_shim(missing_shim):
-            repaired = await repair_broken_shim(str(cfg_path))
-
-        assert repaired == []
-
-    @pytest.mark.asyncio
-    async def test_noop_when_config_missing(self, tmp_path):
-        """No crash when config file doesn't exist."""
-        missing_shim = tmp_path / "gone" / "snyk_mcp_stdio_local_proxy.sh"
-
-        with _patch_shim(missing_shim):
-            repaired = await repair_broken_shim("/nonexistent/path.json")
-
-        assert repaired == []
-
-    @pytest.mark.asyncio
-    async def test_repairs_multiple_shimmed_servers(self, tmp_path):
-        """All shimmed servers get restored when shim is missing."""
-        missing_shim = tmp_path / "gone" / "snyk_mcp_stdio_local_proxy.sh"
-        config = {
-            "mcpServers": {
-                "a": {"command": f"/old/{SHIM_MARKER}.sh", "args": ["cmd_a", "--flag"]},
-                "b": {"command": f"/old/{SHIM_MARKER}.sh", "args": ["cmd_b"]},
-                "not_shimmed": {"command": "uv", "args": ["run"]},
-            }
-        }
-        cfg_path = _write_config(tmp_path, config)
-
-        with _patch_shim(missing_shim):
-            repaired = await repair_broken_shim(str(cfg_path))
-
-        assert set(repaired) == {"a", "b"}
-        result = _read_config(cfg_path)
-        assert result["mcpServers"]["a"]["command"] == "cmd_a"
-        assert result["mcpServers"]["a"]["args"] == ["--flag"]
-        assert result["mcpServers"]["b"]["command"] == "cmd_b"
-        assert result["mcpServers"]["b"]["args"] == []
-        assert result["mcpServers"]["not_shimmed"]["command"] == "uv"
-
-    @pytest.mark.asyncio
-    async def test_preserves_env_on_repair(self, tmp_path):
-        """Env vars and other keys survive repair."""
-        missing_shim = tmp_path / "gone" / "snyk_mcp_stdio_local_proxy.sh"
-        config = {
-            "mcpServers": {
-                "srv": {
-                    "command": f"/old/{SHIM_MARKER}.sh",
-                    "args": ["uv", "run"],
-                    "env": {"API_KEY": "secret"},
-                }
-            }
-        }
-        cfg_path = _write_config(tmp_path, config)
-
-        with _patch_shim(missing_shim):
-            await repair_broken_shim(str(cfg_path))
-
-        result = _read_config(cfg_path)
-        assert result["mcpServers"]["srv"]["command"] == "uv"
-        assert result["mcpServers"]["srv"]["env"] == {"API_KEY": "secret"}
+        cmd, args = _wrap_command(str(fake_shim), "/bin/echo", ["hello"])
+        result = subprocess.run([cmd, *args], capture_output=True, text=True, timeout=5)
+        assert result.returncode == 0
+        assert result.stdout.startswith("via-shim:")
+        assert "/bin/echo hello" in result.stdout
 
 
 # ---------------------------------------------------------------------------

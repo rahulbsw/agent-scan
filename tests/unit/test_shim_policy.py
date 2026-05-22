@@ -26,6 +26,8 @@ from agent_scan.runtime_config import RuntimeConfig, get_runtime_config, set_run
 from agent_scan.shim_installer import (
     RUNTIME_CONFIG_SHIM_FLAG,
     SHIM_MARKER,
+    _is_shimmed_raw,
+    _unwrap_shimmed,
 )
 
 # ---------------------------------------------------------------------------
@@ -133,8 +135,8 @@ class TestShimPolicyInRunScan:
             await run_scan(args, mode="scan")
 
         result = _read_config(cfg_path)
-        assert SHIM_MARKER in result["mcpServers"]["srv"]["command"]
-        assert result["mcpServers"]["srv"]["args"][0] == "uv"
+        assert _is_shimmed_raw(result["mcpServers"]["srv"])
+        assert _unwrap_shimmed(result["mcpServers"]["srv"]) == ("uv", ["run", "server.py"])
 
     async def test_flag_false_uninstalls_shims_from_config(self, tmp_path):
         """When the bootstrap returns enable-local-stdio-proxy=false, run_scan
@@ -289,8 +291,8 @@ class TestShimPolicyInRunScan:
         ):
             await run_scan(args, mode="scan")
 
-        assert SHIM_MARKER in _read_config(path1)["mcpServers"]["a"]["command"]
-        assert SHIM_MARKER in _read_config(path2)["mcpServers"]["b"]["command"]
+        assert _is_shimmed_raw(_read_config(path1)["mcpServers"]["a"])
+        assert _is_shimmed_raw(_read_config(path2)["mcpServers"]["b"])
 
     async def test_multiple_configs_all_unshimmed(self, tmp_path):
         """When flag is absent, all configs get their shims removed."""
@@ -512,8 +514,8 @@ class TestFullShimPolicyE2E:
 
         # 1. Config file on disk was shimmed
         on_disk = _read_config(cfg_path)
-        assert SHIM_MARKER in on_disk["mcpServers"]["my-stdio"]["command"]
-        assert on_disk["mcpServers"]["my-stdio"]["args"][0] == "uv"
+        assert _is_shimmed_raw(on_disk["mcpServers"]["my-stdio"])
+        assert _unwrap_shimmed(on_disk["mcpServers"]["my-stdio"]) == ("uv", ["run", "server.py"])
         # Remote server untouched on disk
         assert on_disk["mcpServers"]["my-remote"]["url"] == "http://localhost:9999/mcp"
 
@@ -680,11 +682,11 @@ class TestFullShimPolicyE2E:
         ):
             results = await run_scan(args, mode="scan")
 
-        # 1. Config was repaired: stale shim removed, original command restored
+        # 1. Config was cleaned up: stale shim wrapping removed, original command restored
         on_disk = _read_config(cfg_path)
         assert on_disk["mcpServers"]["my-stdio"]["command"] == "uv"
         assert on_disk["mcpServers"]["my-stdio"]["args"] == ["run", "server.py"]
-        assert SHIM_MARKER not in on_disk["mcpServers"]["my-stdio"]["command"]
+        assert not _is_shimmed_raw(on_disk["mcpServers"]["my-stdio"])
 
         # 2. Both servers got a real check_server call (no cache available)
         assert check_server_mock.call_count == 2

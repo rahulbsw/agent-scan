@@ -27,7 +27,7 @@ from agent_scan.models import (
     UnknownMCPConfig,
     UserDeclinedError,
 )
-from agent_scan.shim_installer import SHIM_MARKER, get_signature_for_server, repair_broken_shim
+from agent_scan.shim_installer import get_signature_for_server
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skill, inspect_skills_dir
 from agent_scan.traffic_capture import TrafficCapture
@@ -172,13 +172,6 @@ async def inspect_extension(
     """
     traffic_capture = TrafficCapture()
     if isinstance(config, StdioServer):
-        if SHIM_MARKER in config.command and not Path(config.command).exists():
-            if config_path:
-                await repair_broken_shim(config_path)
-            logger.info("Repairing broken shim for %s (command %s not found)", name, config.command)
-            args = config.args
-            config = config.model_copy(update={"command": args[0], "args": args[1:]})
-
         if use_shim_cache:
             cached_signature = get_signature_for_server(config)
             if cached_signature is not None:

@@ -35,6 +35,7 @@ from agent_scan.models import ServerSignature, StdioServer
 logger = logging.getLogger(__name__)
 
 SHIM_MARKER = "snyk_mcp_stdio_local_proxy"
+WRAPPER_SENTINEL = "snyk_mcp_stdio_local_proxy_wrapper"
 RUNTIME_CONFIG_SHIM_FLAG = "enable-local-stdio-proxy"
 # Suffixes used for the materialized shim itself. read_signatures() must
 # exclude these so the shim file isn't mistaken for a capture log.
@@ -163,7 +164,67 @@ def _get_shim_path() -> Path | None:
 
 
 def _is_shimmed_raw(server: dict) -> bool:
-    return SHIM_MARKER in server.get("command", "")
+    """True if the server is wrapped by our shim, either form (legacy
+    direct-exec or the conditional sh/cmd wrapper)."""
+    if SHIM_MARKER in server.get("command", ""):
+        return True
+    return any(isinstance(a, str) and SHIM_MARKER in a for a in server.get("args", []) or [])
+
+
+def _unwrap_shimmed(server: dict) -> tuple[str, list[str]] | None:
+    """Extract (original_command, original_args) from a shimmed entry.
+
+    Handles both forms produced by past and current versions:
+      * Legacy direct-exec: ``command=<shim_path>``, ``args=[orig_cmd, *orig_args]``
+      * Conditional Unix:   ``command="/bin/sh"``,
+                            ``args=["-c", <script>, <sentinel>, orig_cmd, *orig_args]``
+      * Conditional Windows: ``command="cmd"``,
+                            ``args=["/d","/s","/c", <script>, orig_cmd, *orig_args]``
+    Returns None if the entry is not recognised as shimmed.
+    """
+    if not _is_shimmed_raw(server):
+        return None
+
+    command = server.get("command", "")
+    args = list(server.get("args", []) or [])
+
+    # Conditional Unix wrapper
+    if (
+        command in ("/bin/sh", "sh")
+        and len(args) >= 4
+        and args[0] == "-c"
+        and isinstance(args[1], str)
+        and SHIM_MARKER in args[1]
+        and args[2] == WRAPPER_SENTINEL
+    ):
+        return args[3], args[4:]
+
+    # Conditional Windows wrapper
+    if (
+        command.lower() in ("cmd", "cmd.exe")
+        and len(args) >= 5
+        and args[:3] == ["/d", "/s", "/c"]
+        and isinstance(args[3], str)
+        and SHIM_MARKER in args[3]
+    ):
+        return args[4], args[5:]
+
+    # Legacy direct-exec wrapper
+    if SHIM_MARKER in command and args:
+        return args[0], args[1:]
+
+    return None
+
+
+def _wrap_command(shim_path: str, original_command: str, original_args: list[str]) -> tuple[str, list[str]]:
+    """Build the (command, args) pair that wraps the original invocation in a
+    conditional that falls through to the original command when the shim file
+    is missing."""
+    if sys.platform == "win32":
+        script = f'if exist "{shim_path}" ("{shim_path}" %*) else (%*)'
+        return "cmd", ["/d", "/s", "/c", script, original_command, *original_args]
+    script = f'P={shim_path}; if [ -x "$P" ]; then exec "$P" "$@"; else exec "$@"; fi'
+    return "/bin/sh", ["-c", script, WRAPPER_SENTINEL, original_command, *original_args]
 
 
 def compute_server_hash(server: StdioServer) -> str:
@@ -205,50 +266,16 @@ def _resolve_servers(config: dict) -> dict | None:
     return None
 
 
-async def repair_broken_shim(config_path: str) -> list[str]:
-    """
-    If the config has shimmed servers whose shim command no longer exists
-    on disk, uninstall those servers to restore working configs.
-
-    Returns the list of server names that were repaired.
-    """
-    path = Path(config_path).expanduser()
-    if not path.exists():
-        return []
-
-    try:
-        raw = path.read_text(encoding="utf-8")
-        config = pyjson5.loads(raw) if raw.strip() else {}
-    except Exception:
-        logger.exception("Failed to parse config: %s", path)
-        return []
-
-    servers = _resolve_servers(config)
-    if not servers:
-        return []
-
-    needs_repair = False
-    for server in servers.values():
-        if not isinstance(server, dict):
-            continue
-        if _is_shimmed_raw(server) and not Path(server["command"]).exists():
-            needs_repair = True
-            break
-
-    if not needs_repair:
-        return []
-
-    logger.warning(
-        "Config %s has shimmed servers pointing to a missing shim script — restoring original commands",
-        path,
-    )
-    return await uninstall_shim_from_config(config_path)
-
-
 async def install_shim_into_config(config_path: str) -> list[str]:
     """
     Install the shim into a single config file.
-    Returns a list of server names that were shimmed.
+
+    Wraps each stdio server's ``command`` + ``args`` in an inline shell
+    conditional that exec's the shim when it exists and falls through to
+    the original command otherwise. The shim disappearing from /tmp is a
+    silent no-op at runtime — the server keeps working without capture.
+
+    Returns the list of server names that were (re)shimmed.
 
     If the shim cannot be materialized (``_get_shim_path()`` returns
     ``None``), this acts as a cleanup directive: any existing shim wrapping
@@ -264,8 +291,6 @@ async def install_shim_into_config(config_path: str) -> list[str]:
         # Can't install. Make sure we don't leave a stale shim in this config.
         return await uninstall_shim_from_config(config_path)
     shim_path = str(shim_script.resolve())
-
-    await repair_broken_shim(config_path)
 
     stdio_names = await _get_stdio_server_names(config_path)
     if not stdio_names:
@@ -288,18 +313,21 @@ async def install_shim_into_config(config_path: str) -> list[str]:
             continue
         if name not in stdio_names:
             continue
-        if _is_shimmed_raw(server):
-            if server.get("command") == shim_path:
-                continue
-            # Stale shim path — update command in place, args already wrapped
-            server["command"] = shim_path
-            shimmed.append(name)
+
+        existing = _unwrap_shimmed(server)
+        if existing is not None:
+            orig_command, orig_args = existing
+        else:
+            orig_command = server.get("command", "")
+            orig_args = list(server.get("args", []) or [])
+
+        new_command, new_args = _wrap_command(shim_path, orig_command, orig_args)
+        if server.get("command") == new_command and list(server.get("args", []) or []) == new_args:
+            # Already in target form with the current shim path — no rewrite needed.
             continue
 
-        old_command = server.get("command", "")
-        old_args = server.get("args", [])
-        server["command"] = shim_path
-        server["args"] = [old_command] + (old_args or [])
+        server["command"] = new_command
+        server["args"] = new_args
         shimmed.append(name)
 
     if not shimmed:
@@ -333,14 +361,12 @@ async def uninstall_shim_from_config(config_path: str) -> list[str]:
     for name, server in servers.items():
         if not isinstance(server, dict):
             continue
-        if not _is_shimmed_raw(server):
+        unwrapped = _unwrap_shimmed(server)
+        if unwrapped is None:
             continue
-        args = server.get("args", [])
-        if not args:
-            logger.warning("%s is shimmed but has no args", name)
-            continue
-        server["command"] = args[0]
-        server["args"] = args[1:]
+        orig_command, orig_args = unwrapped
+        server["command"] = orig_command
+        server["args"] = orig_args
         unshimmed.append(name)
 
     if not unshimmed:
@@ -436,7 +462,13 @@ def get_signature_for_server(server: StdioServer) -> ServerSignature | None:
     Look up a cached shim signature for a StdioServer.
     Returns a ServerSignature if found and non-empty, else None.
     """
-    parts = server.args if SHIM_MARKER in server.command else [server.command, *server.args]
+    server_dict = {"command": server.command, "args": list(server.args)}
+    unwrapped = _unwrap_shimmed(server_dict)
+    if unwrapped is not None:
+        orig_command, orig_args = unwrapped
+        parts = [orig_command, *orig_args]
+    else:
+        parts = [server.command, *server.args]
 
     blob = b"".join(p.encode() + b"\x00" for p in parts)
     h = hashlib.sha256(blob).hexdigest()[:12]
