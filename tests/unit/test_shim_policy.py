@@ -28,7 +28,15 @@ from agent_scan.shim_installer import (
     SHIM_MARKER,
     _is_shimmed_raw,
     _unwrap_shimmed,
+    _wrap_command,
 )
+
+
+def _wrapped_server(orig_cmd: str, orig_args: list[str]) -> dict:
+    """Build a server dict already in the conditional-wrapper form."""
+    cmd, args = _wrap_command(f"/tmp/{SHIM_MARKER}.HASH.sh", orig_cmd, orig_args)
+    return {"command": cmd, "args": args}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -143,14 +151,7 @@ class TestShimPolicyInRunScan:
         removes any existing shim from the config file."""
         set_runtime_config(RuntimeConfig(config={RUNTIME_CONFIG_SHIM_FLAG: False}, source="bootstrap"))
 
-        config = {
-            "mcpServers": {
-                "srv": {
-                    "command": f"/old/path/{SHIM_MARKER}.sh",
-                    "args": ["uv", "run", "server.py"],
-                }
-            }
-        }
+        config = {"mcpServers": {"srv": _wrapped_server("uv", ["run", "server.py"])}}
         cfg_path = _write_config(tmp_path, config)
 
         args = _scan_args(files=[str(cfg_path)])
@@ -168,14 +169,7 @@ class TestShimPolicyInRunScan:
         are cleaned up (safe default)."""
         set_runtime_config(RuntimeConfig(config={}, source="bootstrap"))
 
-        config = {
-            "mcpServers": {
-                "srv": {
-                    "command": f"/old/path/{SHIM_MARKER}.sh",
-                    "args": ["uv", "run", "server.py"],
-                }
-            }
-        }
+        config = {"mcpServers": {"srv": _wrapped_server("uv", ["run", "server.py"])}}
         cfg_path = _write_config(tmp_path, config)
 
         args = _scan_args(files=[str(cfg_path)])
@@ -194,14 +188,7 @@ class TestShimPolicyInRunScan:
         set_runtime_config(RuntimeConfig())
         assert get_runtime_config().source == "default"
 
-        config = {
-            "mcpServers": {
-                "srv": {
-                    "command": f"/old/path/{SHIM_MARKER}.sh",
-                    "args": ["uv", "run", "server.py"],
-                }
-            }
-        }
+        config = {"mcpServers": {"srv": _wrapped_server("uv", ["run", "server.py"])}}
         cfg_path = _write_config(tmp_path, config)
 
         args = _scan_args(files=[str(cfg_path)])
@@ -298,8 +285,8 @@ class TestShimPolicyInRunScan:
         """When flag is absent, all configs get their shims removed."""
         set_runtime_config(RuntimeConfig(config={}, source="bootstrap"))
 
-        config1 = {"mcpServers": {"a": {"command": f"/old/{SHIM_MARKER}.sh", "args": ["cmd_a", "--flag"]}}}
-        config2 = {"mcpServers": {"b": {"command": f"/old/{SHIM_MARKER}.sh", "args": ["cmd_b"]}}}
+        config1 = {"mcpServers": {"a": _wrapped_server("cmd_a", ["--flag"])}}
+        config2 = {"mcpServers": {"b": _wrapped_server("cmd_b", [])}}
         path1 = _write_config(tmp_path, config1, "config1.json")
         path2 = _write_config(tmp_path, config2, "config2.json")
 
@@ -562,10 +549,7 @@ class TestFullShimPolicyE2E:
         # Config on disk: stdio server is currently shimmed (leftover from a previous run)
         config = {
             "mcpServers": {
-                "my-stdio": {
-                    "command": f"/old/path/{SHIM_MARKER}.sh",
-                    "args": ["uv", "run", "server.py"],
-                },
+                "my-stdio": _wrapped_server("uv", ["run", "server.py"]),
                 "my-remote": {"url": "http://localhost:9999/mcp"},
             }
         }
@@ -640,14 +624,12 @@ class TestFullShimPolicyE2E:
             tools=[Tool(name="remote_tool", inputSchema={"type": "object"})],
         )
 
-        # Config on disk: stdio was shimmed in a previous run, but the shim
-        # script has since been deleted (stale path).
+        # Config on disk: stdio was shimmed in a previous run; this scenario
+        # simulates _get_shim_path() returning None so the wrapper gets
+        # removed entirely.
         config = {
             "mcpServers": {
-                "my-stdio": {
-                    "command": f"/gone/{SHIM_MARKER}.sh",
-                    "args": ["uv", "run", "server.py"],
-                },
+                "my-stdio": _wrapped_server("uv", ["run", "server.py"]),
                 "my-remote": {"url": "http://localhost:9999/mcp"},
             }
         }

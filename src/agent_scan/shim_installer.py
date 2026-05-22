@@ -164,22 +164,18 @@ def _get_shim_path() -> Path | None:
 
 
 def _is_shimmed_raw(server: dict) -> bool:
-    """True if the server is wrapped by our shim, either form (legacy
-    direct-exec or the conditional sh/cmd wrapper)."""
-    if SHIM_MARKER in server.get("command", ""):
-        return True
+    """True if the server is wrapped by our conditional shim wrapper."""
     return any(isinstance(a, str) and SHIM_MARKER in a for a in server.get("args", []) or [])
 
 
 def _unwrap_shimmed(server: dict) -> tuple[str, list[str]] | None:
     """Extract (original_command, original_args) from a shimmed entry.
 
-    Handles both forms produced by past and current versions:
-      * Legacy direct-exec: ``command=<shim_path>``, ``args=[orig_cmd, *orig_args]``
-      * Conditional Unix:   ``command="/bin/sh"``,
-                            ``args=["-c", <script>, <sentinel>, orig_cmd, *orig_args]``
-      * Conditional Windows: ``command="cmd"``,
-                            ``args=["/d","/s","/c", <script>, orig_cmd, *orig_args]``
+    The expected form is the conditional wrapper produced by ``_wrap_command``:
+      * Unix:    ``command="/bin/sh"``,
+                 ``args=["-c", <script>, <sentinel>, orig_cmd, *orig_args]``
+      * Windows: ``command="cmd"``,
+                 ``args=["/d","/s","/c", <script>, orig_cmd, *orig_args]``
     Returns None if the entry is not recognised as shimmed.
     """
     if not _is_shimmed_raw(server):
@@ -188,7 +184,7 @@ def _unwrap_shimmed(server: dict) -> tuple[str, list[str]] | None:
     command = server.get("command", "")
     args = list(server.get("args", []) or [])
 
-    # Conditional Unix wrapper
+    # Unix wrapper
     if (
         command in ("/bin/sh", "sh")
         and len(args) >= 4
@@ -199,7 +195,7 @@ def _unwrap_shimmed(server: dict) -> tuple[str, list[str]] | None:
     ):
         return args[3], args[4:]
 
-    # Conditional Windows wrapper
+    # Windows wrapper
     if (
         command.lower() in ("cmd", "cmd.exe")
         and len(args) >= 5
@@ -208,10 +204,6 @@ def _unwrap_shimmed(server: dict) -> tuple[str, list[str]] | None:
         and SHIM_MARKER in args[3]
     ):
         return args[4], args[5:]
-
-    # Legacy direct-exec wrapper
-    if SHIM_MARKER in command and args:
-        return args[0], args[1:]
 
     return None
 

@@ -89,9 +89,6 @@ class TestIsShimmedRaw:
     def test_not_shimmed(self):
         assert not _is_shimmed_raw({"command": "uv", "args": ["run"]})
 
-    def test_shimmed_legacy_direct_exec(self):
-        assert _is_shimmed_raw({"command": f"/path/to/{SHIM_MARKER}.sh", "args": ["uv", "run"]})
-
     def test_shimmed_conditional_unix(self):
         server = {
             "command": "/bin/sh",
@@ -132,14 +129,7 @@ class TestUnwrapShimmed:
     def test_unshimmed_returns_none(self):
         assert _unwrap_shimmed({"command": "uv", "args": ["run", "server.py"]}) is None
 
-    def test_legacy_direct_exec(self):
-        server = {
-            "command": f"/tmp/{SHIM_MARKER}.HASH.sh",
-            "args": ["uv", "run", "server.py"],
-        }
-        assert _unwrap_shimmed(server) == ("uv", ["run", "server.py"])
-
-    def test_conditional_unix(self):
+    def test_conditional_wrapper_round_trip(self):
         shim_path = f"/tmp/{SHIM_MARKER}.HASH.sh"
         cmd, args = _wrap_command(shim_path, "uv", ["run", "server.py"])
         assert _unwrap_shimmed({"command": cmd, "args": args}) == ("uv", ["run", "server.py"])
@@ -264,30 +254,6 @@ class TestInstallShim:
         assert cfg_path.stat().st_mtime == mtime_before
 
     @pytest.mark.asyncio
-    async def test_upgrades_legacy_direct_exec_to_conditional(self, tmp_path, shim_path):
-        """A config in the legacy direct-exec form gets re-wrapped to the
-        conditional form on install."""
-        config = {
-            "mcpServers": {
-                "weather": {
-                    "command": f"/old/path/{SHIM_MARKER}.sh",
-                    "args": ["uv", "run", "weather.py"],
-                },
-            }
-        }
-        cfg_path = _write_config(tmp_path, config)
-
-        with _patch_shim(shim_path), _patch_stdio_names({"weather"}):
-            shimmed = await install_shim_into_config(str(cfg_path))
-
-        assert shimmed == ["weather"]
-        result = _read_config(cfg_path)
-        weather = result["mcpServers"]["weather"]
-        assert _unwrap_shimmed(weather) == ("uv", ["run", "weather.py"])
-        # And it's no longer in the legacy form
-        assert SHIM_MARKER not in weather["command"]
-
-    @pytest.mark.asyncio
     async def test_skips_non_stdio_servers(self, tmp_path, shim_path):
         config = {
             "mcpServers": {
@@ -390,17 +356,18 @@ class TestInstallShim:
 # ---------------------------------------------------------------------------
 
 
+def _wrapped_server(
+    orig_cmd: str, orig_args: list[str], shim_path: str = "/tmp/snyk_mcp_stdio_local_proxy.HASH.sh", **extra
+) -> dict:
+    """Build a server dict already in the conditional-wrapper form."""
+    cmd, args = _wrap_command(shim_path, orig_cmd, orig_args)
+    return {"command": cmd, "args": args, **extra}
+
+
 class TestUninstallShim:
     @pytest.mark.asyncio
     async def test_uninstall_restores_command(self, tmp_path):
-        config = {
-            "mcpServers": {
-                "weather": {
-                    "command": f"/path/to/{SHIM_MARKER}.sh",
-                    "args": ["uv", "run", "weather.py"],
-                }
-            }
-        }
+        config = {"mcpServers": {"weather": _wrapped_server("uv", ["run", "weather.py"])}}
         cfg_path = _write_config(tmp_path, config)
 
         unshimmed = await uninstall_shim_from_config(str(cfg_path))
@@ -432,14 +399,8 @@ class TestUninstallShim:
     async def test_uninstall_preserves_other_servers(self, tmp_path):
         config = {
             "mcpServers": {
-                "shimmed": {
-                    "command": f"/path/{SHIM_MARKER}.sh",
-                    "args": ["original_cmd", "--flag"],
-                },
-                "untouched": {
-                    "command": "other",
-                    "args": ["--arg"],
-                },
+                "shimmed": _wrapped_server("original_cmd", ["--flag"]),
+                "untouched": {"command": "other", "args": ["--arg"]},
             }
         }
         cfg_path = _write_config(tmp_path, config)
@@ -452,15 +413,7 @@ class TestUninstallShim:
 
     @pytest.mark.asyncio
     async def test_uninstall_preserves_env(self, tmp_path):
-        config = {
-            "mcpServers": {
-                "srv": {
-                    "command": f"/path/{SHIM_MARKER}.sh",
-                    "args": ["uv", "run"],
-                    "env": {"KEY": "val"},
-                }
-            }
-        }
+        config = {"mcpServers": {"srv": _wrapped_server("uv", ["run"], env={"KEY": "val"})}}
         cfg_path = _write_config(tmp_path, config)
 
         await uninstall_shim_from_config(str(cfg_path))
@@ -470,16 +423,7 @@ class TestUninstallShim:
 
     @pytest.mark.asyncio
     async def test_uninstall_vscode_format(self, tmp_path):
-        config = {
-            "mcp": {
-                "servers": {
-                    "srv": {
-                        "command": f"/path/{SHIM_MARKER}.sh",
-                        "args": ["node", "index.js"],
-                    }
-                }
-            }
-        }
+        config = {"mcp": {"servers": {"srv": _wrapped_server("node", ["index.js"])}}}
         cfg_path = _write_config(tmp_path, config)
 
         unshimmed = await uninstall_shim_from_config(str(cfg_path))
@@ -488,29 +432,6 @@ class TestUninstallShim:
         result = _read_config(cfg_path)
         assert result["mcp"]["servers"]["srv"]["command"] == "node"
         assert result["mcp"]["servers"]["srv"]["args"] == ["index.js"]
-
-    @pytest.mark.asyncio
-    async def test_uninstall_stale_shim_path(self, tmp_path, shim_path):
-        """If the shim path has changed (e.g. package updated), uninstall should restore the original command."""
-        old_shim = f"/old/path/to/{SHIM_MARKER}.sh"
-        config = {
-            "mcpServers": {
-                "weather": {
-                    "command": old_shim,
-                    "args": ["uv", "run", "weather.py"],
-                }
-            }
-        }
-        cfg_path = _write_config(tmp_path, config)
-
-        unshimmed = await uninstall_shim_from_config(str(cfg_path))
-
-        assert unshimmed == ["weather"]
-        result = _read_config(cfg_path)
-        weather = result["mcpServers"]["weather"]
-        assert weather["command"] == "uv"
-        assert weather["args"] == ["run", "weather.py"]
-        assert SHIM_MARKER not in weather["command"]
 
 
 # ---------------------------------------------------------------------------
@@ -544,35 +465,6 @@ class TestRoundTrip:
         assert result["mcpServers"]["remote"] == {"url": "https://example.com"}
 
     @pytest.mark.asyncio
-    async def test_install_upgrades_legacy_to_conditional(self, tmp_path, shim_path):
-        """A legacy direct-exec shimmed entry gets upgraded to the conditional
-        wrapper form on re-install."""
-        old_shim = f"/old/path/to/{SHIM_MARKER}.sh"
-        config = {
-            "mcpServers": {
-                "weather": {
-                    "command": old_shim,
-                    "args": ["uv", "run", "weather.py"],
-                }
-            }
-        }
-        cfg_path = _write_config(tmp_path, config)
-
-        with _patch_shim(shim_path), _patch_stdio_names({"weather"}):
-            shimmed = await install_shim_into_config(str(cfg_path))
-
-        assert shimmed == ["weather"]
-        result = _read_config(cfg_path)
-        weather = result["mcpServers"]["weather"]
-        # Original command is recoverable via the unwrap helper
-        assert _unwrap_shimmed(weather) == ("uv", ["run", "weather.py"])
-        # And the old shim path is no longer embedded anywhere
-        assert old_shim not in weather["command"]
-        for a in weather["args"]:
-            if isinstance(a, str):
-                assert old_shim not in a
-
-    @pytest.mark.asyncio
     async def test_double_install_is_idempotent(self, tmp_path, shim_path):
         config = {"mcpServers": {"srv": {"command": "uv", "args": ["run"]}}}
         cfg_path = _write_config(tmp_path, config)
@@ -589,14 +481,7 @@ class TestRoundTrip:
 
     @pytest.mark.asyncio
     async def test_double_uninstall_is_idempotent(self, tmp_path, shim_path):
-        config = {
-            "mcpServers": {
-                "srv": {
-                    "command": f"/path/{SHIM_MARKER}.sh",
-                    "args": ["uv", "run"],
-                }
-            }
-        }
+        config = {"mcpServers": {"srv": _wrapped_server("uv", ["run"])}}
         cfg_path = _write_config(tmp_path, config)
 
         first = await uninstall_shim_from_config(str(cfg_path))
@@ -943,14 +828,7 @@ class TestInstallShimWhenShimUnavailable:
 
     @pytest.mark.asyncio
     async def test_removes_existing_shim_when_get_shim_path_is_none(self, tmp_path):
-        config = {
-            "mcpServers": {
-                "weather": {
-                    "command": f"/somewhere/{SHIM_MARKER}.sh",
-                    "args": ["uv", "run", "weather.py"],
-                }
-            }
-        }
+        config = {"mcpServers": {"weather": _wrapped_server("uv", ["run", "weather.py"])}}
         cfg_path = _write_config(tmp_path, config)
 
         with patch("agent_scan.shim_installer._get_shim_path", return_value=None):
@@ -958,7 +836,7 @@ class TestInstallShimWhenShimUnavailable:
 
         assert result == ["weather"]
         on_disk = _read_config(cfg_path)
-        assert SHIM_MARKER not in on_disk["mcpServers"]["weather"]["command"]
+        assert not _is_shimmed_raw(on_disk["mcpServers"]["weather"])
         assert on_disk["mcpServers"]["weather"]["command"] == "uv"
         assert on_disk["mcpServers"]["weather"]["args"] == ["run", "weather.py"]
 
@@ -987,14 +865,7 @@ class TestInstallShimWhenShimUnavailable:
         tampered = tmp_path / f"snyk_mcp_stdio_local_proxy.{digest}{suffix}"
         tampered.write_bytes(b"not the bundled source")
 
-        config = {
-            "mcpServers": {
-                "weather": {
-                    "command": f"/somewhere/{SHIM_MARKER}.sh",
-                    "args": ["uv", "run"],
-                }
-            }
-        }
+        config = {"mcpServers": {"weather": _wrapped_server("uv", ["run"])}}
         cfg_path = _write_config(tmp_path, config, name="mcp.json")
 
         result = await install_shim_into_config(str(cfg_path))
