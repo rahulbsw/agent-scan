@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import sys
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -11,10 +13,13 @@ if TYPE_CHECKING:
 
 import pytest
 
+from agent_scan import shim_installer
 from agent_scan.models import StdioServer
 from agent_scan.shim_installer import (
     SHIM_MARKER,
+    _get_shim_path,
     _is_shimmed_raw,
+    _read_shim_source_bytes,
     _resolve_servers,
     compute_server_hash,
     install_shim_into_config,
@@ -823,3 +828,159 @@ class TestRepairBrokenShim:
         result = _read_config(cfg_path)
         assert result["mcpServers"]["srv"]["command"] == "uv"
         assert result["mcpServers"]["srv"]["env"] == {"API_KEY": "secret"}
+
+
+# ---------------------------------------------------------------------------
+# _get_shim_path (content-addressed installer)
+# ---------------------------------------------------------------------------
+
+
+class TestGetShimPath:
+    """The new content-addressed _get_shim_path() installer."""
+
+    def test_idempotent(self, tmp_path, monkeypatch):
+        """Two calls return the same path."""
+        monkeypatch.setattr(shim_installer, "_get_shim_target_dir", lambda: tmp_path)
+        path1 = _get_shim_path()
+        path2 = _get_shim_path()
+        assert path1 is not None
+        assert path1 == path2
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-only file mode check")
+    def test_file_mode_0o755_on_unix(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(shim_installer, "_get_shim_target_dir", lambda: tmp_path)
+        path = _get_shim_path()
+        assert path is not None
+        mode = path.stat().st_mode & 0o777
+        assert mode == 0o755
+
+    def test_file_contents_match_bundled_source(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(shim_installer, "_get_shim_target_dir", lambda: tmp_path)
+        path = _get_shim_path()
+        assert path is not None
+        assert path.read_bytes() == _read_shim_source_bytes()
+
+    def test_path_filename_encodes_source_digest(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(shim_installer, "_get_shim_target_dir", lambda: tmp_path)
+        source = _read_shim_source_bytes()
+        digest = hashlib.sha256(source).hexdigest()[:12]
+        path = _get_shim_path()
+        assert path is not None
+        assert digest in path.name
+
+    def test_returns_none_when_target_exists_with_different_bytes(self, tmp_path, monkeypatch):
+        """Foreign-owned tamper: target file exists but contents don't match bundled source."""
+        monkeypatch.setattr(shim_installer, "_get_shim_target_dir", lambda: tmp_path)
+        source = _read_shim_source_bytes()
+        digest = hashlib.sha256(source).hexdigest()[:12]
+        suffix = ".cmd" if sys.platform == "win32" else ".sh"
+        tampered = tmp_path / f"snyk_mcp_stdio_local_proxy.{digest}{suffix}"
+        tampered.write_bytes(b"#!/bin/sh\necho 'tampered'\n")
+        assert _get_shim_path() is None
+
+    def test_returns_none_when_not_executable(self, tmp_path, monkeypatch):
+        """os.access(target, os.X_OK) is False (e.g. /tmp mounted noexec)."""
+        monkeypatch.setattr(shim_installer, "_get_shim_target_dir", lambda: tmp_path)
+
+        real_access = shim_installer.os.access
+
+        def fake_access(p, mode):
+            if mode == shim_installer.os.X_OK:
+                return False
+            return real_access(p, mode)
+
+        monkeypatch.setattr(shim_installer.os, "access", fake_access)
+        assert _get_shim_path() is None
+
+    def test_returns_none_when_target_dir_missing(self, tmp_path, monkeypatch):
+        """Target directory doesn't exist or isn't writable."""
+        nonexistent = tmp_path / "does" / "not" / "exist"
+        monkeypatch.setattr(shim_installer, "_get_shim_target_dir", lambda: nonexistent)
+        assert _get_shim_path() is None
+
+    def test_returns_existing_target_without_rewriting(self, tmp_path, monkeypatch):
+        """If a matching file is already at the target, return it (idempotent read path)."""
+        monkeypatch.setattr(shim_installer, "_get_shim_target_dir", lambda: tmp_path)
+        source = _read_shim_source_bytes()
+        digest = hashlib.sha256(source).hexdigest()[:12]
+        suffix = ".cmd" if sys.platform == "win32" else ".sh"
+        target = tmp_path / f"snyk_mcp_stdio_local_proxy.{digest}{suffix}"
+        target.write_bytes(source)
+        if sys.platform != "win32":
+            target.chmod(0o755)
+        mtime_before = target.stat().st_mtime
+        path = _get_shim_path()
+        assert path == target
+        assert target.stat().st_mtime == mtime_before
+
+
+# ---------------------------------------------------------------------------
+# install_shim_into_config: cleanup-on-failure when _get_shim_path() is None
+# ---------------------------------------------------------------------------
+
+
+class TestInstallShimWhenShimUnavailable:
+    """When _get_shim_path() returns None, install acts as a cleanup directive."""
+
+    @pytest.mark.asyncio
+    async def test_removes_existing_shim_when_get_shim_path_is_none(self, tmp_path):
+        config = {
+            "mcpServers": {
+                "weather": {
+                    "command": f"/somewhere/{SHIM_MARKER}.sh",
+                    "args": ["uv", "run", "weather.py"],
+                }
+            }
+        }
+        cfg_path = _write_config(tmp_path, config)
+
+        with patch("agent_scan.shim_installer._get_shim_path", return_value=None):
+            result = await install_shim_into_config(str(cfg_path))
+
+        assert result == ["weather"]
+        on_disk = _read_config(cfg_path)
+        assert SHIM_MARKER not in on_disk["mcpServers"]["weather"]["command"]
+        assert on_disk["mcpServers"]["weather"]["command"] == "uv"
+        assert on_disk["mcpServers"]["weather"]["args"] == ["run", "weather.py"]
+
+    @pytest.mark.asyncio
+    async def test_unshimmed_config_untouched_when_get_shim_path_is_none(self, tmp_path):
+        """A config that has no shim wrapping is not modified."""
+        config = {"mcpServers": {"srv": {"command": "uv", "args": ["run", "server.py"]}}}
+        cfg_path = _write_config(tmp_path, config)
+        mtime_before = cfg_path.stat().st_mtime
+
+        with patch("agent_scan.shim_installer._get_shim_path", return_value=None):
+            result = await install_shim_into_config(str(cfg_path))
+
+        assert result == []
+        on_disk = _read_config(cfg_path)
+        assert on_disk["mcpServers"]["srv"]["command"] == "uv"
+        assert cfg_path.stat().st_mtime == mtime_before
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_target_has_foreign_bytes(self, tmp_path, monkeypatch):
+        """End-to-end via real _get_shim_path: planted tamper → install cleans up."""
+        monkeypatch.setattr(shim_installer, "_get_shim_target_dir", lambda: tmp_path)
+        source = _read_shim_source_bytes()
+        digest = hashlib.sha256(source).hexdigest()[:12]
+        suffix = ".cmd" if sys.platform == "win32" else ".sh"
+        tampered = tmp_path / f"snyk_mcp_stdio_local_proxy.{digest}{suffix}"
+        tampered.write_bytes(b"not the bundled source")
+
+        config = {
+            "mcpServers": {
+                "weather": {
+                    "command": f"/somewhere/{SHIM_MARKER}.sh",
+                    "args": ["uv", "run"],
+                }
+            }
+        }
+        cfg_path = _write_config(tmp_path, config, name="mcp.json")
+
+        result = await install_shim_into_config(str(cfg_path))
+        # The tampered file makes _get_shim_path() return None; the existing
+        # shim wrapping in the config should be removed.
+        assert result == ["weather"]
+        on_disk = _read_config(cfg_path)
+        assert on_disk["mcpServers"]["weather"]["command"] == "uv"

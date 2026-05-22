@@ -651,9 +651,8 @@ class TestFullShimPolicyE2E:
         }
         cfg_path = _write_config(tmp_path, config)
 
-        # Flag is on, but point _get_shim_path to a nonexistent file
-        missing_shim = tmp_path / "nonexistent" / "snyk_mcp_stdio_local_proxy.sh"
-
+        # Flag is on, but _get_shim_path() reports the shim could not be
+        # materialized (broken install / target dir refuses writes / etc.)
         set_runtime_config(RuntimeConfig(config={RUNTIME_CONFIG_SHIM_FLAG: True}, source="bootstrap"))
 
         args = _scan_args(files=[str(cfg_path)])
@@ -668,7 +667,7 @@ class TestFullShimPolicyE2E:
         check_server_mock = AsyncMock(side_effect=check_server_side_effect)
 
         with (
-            patch("agent_scan.shim_installer._get_shim_path", return_value=missing_shim),
+            patch("agent_scan.shim_installer._get_shim_path", return_value=None),
             patch(
                 "agent_scan.shim_installer._get_stdio_server_names",
                 new_callable=AsyncMock,

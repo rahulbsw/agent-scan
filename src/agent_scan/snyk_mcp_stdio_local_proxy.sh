@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -eu
+umask 077
 
 hash=$(printf '%s\0' "$@" | shasum -a 256 | cut -c1-12)
 log=$(mktemp "/tmp/snyk_mcp_stdio_local_proxy.${hash}.XXXXXX")

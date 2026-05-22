@@ -9,10 +9,15 @@ the servers itself.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
+import os
+import subprocess
 import sys
+import tempfile
+from importlib.resources import files as _resource_files
 from pathlib import Path
 
 import pyjson5
@@ -29,16 +34,132 @@ from agent_scan.models import ServerSignature, StdioServer
 
 logger = logging.getLogger(__name__)
 
-SHIM_SCRIPT_UNIX = Path(__file__).parent / "snyk_mcp_stdio_local_proxy.sh"
-SHIM_SCRIPT_WINDOWS = Path(__file__).parent / "snyk_mcp_stdio_local_proxy.cmd"
 SHIM_MARKER = "snyk_mcp_stdio_local_proxy"
 RUNTIME_CONFIG_SHIM_FLAG = "enable-local-stdio-proxy"
+# Suffixes used for the materialized shim itself. read_signatures() must
+# exclude these so the shim file isn't mistaken for a capture log.
+_SHIM_FILE_SUFFIXES = (".sh", ".cmd")
+
+_SHIM_RESOURCE_UNIX = "snyk_mcp_stdio_local_proxy.sh"
+_SHIM_RESOURCE_WINDOWS = "snyk_mcp_stdio_local_proxy.cmd"
 
 
-def _get_shim_path() -> Path:
+def _shim_resource_name() -> str:
+    return _SHIM_RESOURCE_WINDOWS if sys.platform == "win32" else _SHIM_RESOURCE_UNIX
+
+
+def _shim_target_suffix() -> str:
+    return ".cmd" if sys.platform == "win32" else ".sh"
+
+
+def _read_shim_source_bytes() -> bytes | None:
+    """Read the bundled shim script bytes from the package."""
+    try:
+        return _resource_files("agent_scan").joinpath(_shim_resource_name()).read_bytes()
+    except Exception:
+        logger.warning("Failed to read bundled shim script %s", _shim_resource_name(), exc_info=True)
+        return None
+
+
+def _get_shim_target_dir() -> Path:
+    """Directory the shim is installed into. Hardcoded per-platform."""
     if sys.platform == "win32":
-        return SHIM_SCRIPT_WINDOWS
-    return SHIM_SCRIPT_UNIX
+        return Path(os.environ.get("PUBLIC") or r"C:\Users\Public")
+    return Path("/tmp")
+
+
+def _smoke_test_shim(target: Path) -> bool:
+    """Exec smoke test: run the shim with no stdin and a short timeout.
+
+    Any capture artifact written by the shim during this no-op invocation
+    is removed afterwards so the smoke test does not pollute the log dir.
+    """
+    log_dir = _get_shim_log_dir()
+    before = {p for p in log_dir.glob(f"{SHIM_MARKER}.*") if p.suffix not in _SHIM_FILE_SUFFIXES}
+    try:
+        subprocess.run(
+            [str(target)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+        return True
+    except Exception:
+        logger.warning("Shim smoke test failed for %s", target, exc_info=True)
+        return False
+    finally:
+        for stray in log_dir.glob(f"{SHIM_MARKER}.*"):
+            if stray.suffix in _SHIM_FILE_SUFFIXES or stray in before:
+                continue
+            with contextlib.suppress(OSError):
+                stray.unlink()
+
+
+def _get_shim_path() -> Path | None:
+    """
+    Materialize the bundled shim at a content-addressed, multi-user-readable
+    location and return its path.  Returns None if the contract (machine-wide
+    read+execute, owner-only modify/delete, no elevation) can't be satisfied.
+
+    Callers must treat None as a directive to skip installation and clean up
+    any existing shim wrapping in the target config.
+    """
+    source = _read_shim_source_bytes()
+    if source is None:
+        return None
+
+    digest = hashlib.sha256(source).hexdigest()[:12]
+    target_dir = _get_shim_target_dir()
+    if not target_dir.exists() or not os.access(target_dir, os.W_OK):
+        logger.warning("Shim target dir %s missing or not writable", target_dir)
+        return None
+
+    target = target_dir / f"{SHIM_MARKER}.{digest}{_shim_target_suffix()}"
+
+    if target.exists():
+        try:
+            existing = target.read_bytes()
+        except OSError:
+            logger.warning("Failed to read existing shim at %s", target, exc_info=True)
+            return None
+        if existing != source:
+            logger.warning(
+                "Shim target %s exists with content that does not match bundled source — refusing to install",
+                target,
+            )
+            return None
+    else:
+        tmp_name: str | None = None
+        try:
+            fd, tmp_name = tempfile.mkstemp(prefix=f"{SHIM_MARKER}.", suffix=_shim_target_suffix(), dir=str(target_dir))
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(source)
+            except Exception:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                raise
+            if sys.platform != "win32":
+                os.chmod(tmp_name, 0o755)
+            os.replace(tmp_name, target)
+            tmp_name = None
+        except OSError:
+            logger.warning("Failed to write shim to %s", target, exc_info=True)
+            if tmp_name is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_name)
+            return None
+
+    if not os.access(target, os.X_OK):
+        logger.warning("Shim at %s is not executable (X_OK denied)", target)
+        return None
+
+    if not _smoke_test_shim(target):
+        return None
+
+    return target
 
 
 def _is_shimmed_raw(server: dict) -> bool:
@@ -128,19 +249,23 @@ async def install_shim_into_config(config_path: str) -> list[str]:
     """
     Install the shim into a single config file.
     Returns a list of server names that were shimmed.
+
+    If the shim cannot be materialized (``_get_shim_path()`` returns
+    ``None``), this acts as a cleanup directive: any existing shim wrapping
+    in ``config_path`` is removed and an empty list is returned.
     """
     path = Path(config_path).expanduser()
     if not path.exists():
         logger.warning("Config file not found: %s", path)
         return []
 
-    await repair_broken_shim(config_path)
-
     shim_script = _get_shim_path()
+    if shim_script is None:
+        # Can't install. Make sure we don't leave a stale shim in this config.
+        return await uninstall_shim_from_config(config_path)
     shim_path = str(shim_script.resolve())
-    if not shim_script.exists():
-        logger.error("Shim script not found: %s", shim_path)
-        return []
+
+    await repair_broken_shim(config_path)
 
     stdio_names = await _get_stdio_server_names(config_path)
     if not stdio_names:
@@ -227,8 +352,6 @@ async def uninstall_shim_from_config(config_path: str) -> list[str]:
 
 def _get_shim_log_dir() -> Path:
     if sys.platform == "win32":
-        import tempfile
-
         return Path(tempfile.gettempdir())
     return Path("/tmp")
 
@@ -250,7 +373,9 @@ def read_signatures() -> dict[str, ServerCapture]:
     Returns a dict mapping server hash -> ServerCapture.
     """
     tmp = _get_shim_log_dir()
-    log_files = list(tmp.glob("snyk_mcp_stdio_local_proxy.*"))
+    # Exclude the materialized shim itself, which now lives alongside the
+    # captures at /tmp/snyk_mcp_stdio_local_proxy.<hash>.sh (or .cmd).
+    log_files = [f for f in tmp.glob(f"{SHIM_MARKER}.*") if f.suffix not in _SHIM_FILE_SUFFIXES]
 
     if not log_files:
         return {}

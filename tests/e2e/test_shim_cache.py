@@ -20,16 +20,23 @@ import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from agent_scan.shim_installer import SHIM_MARKER, SHIM_SCRIPT_UNIX
+from agent_scan.shim_installer import SHIM_MARKER, _get_shim_path
 from agent_scan.utils import TempFile
 
-SHIM_PATH = str(SHIM_SCRIPT_UNIX.resolve())
+_shim = _get_shim_path()
+assert _shim is not None, "Shim could not be materialized for e2e tests"
+SHIM_PATH = str(_shim)
 MATH_SERVER_PATH = str(Path("tests/mcp_servers/math_server.py").resolve())
 WEATHER_SERVER_PATH = str(Path("tests/mcp_servers/weather_server.py").resolve())
 
 
 def _cleanup_shim_logs():
+    # Captures share the snyk_mcp_stdio_local_proxy.* prefix but never have
+    # the .sh/.cmd suffix of the materialized shim itself, so leave the
+    # shim file in place.
     for f in glob.glob("/tmp/snyk_mcp_stdio_local_proxy.*"):
+        if f.endswith((".sh", ".cmd")):
+            continue
         with contextlib.suppress(OSError):
             os.remove(f)
 
@@ -71,8 +78,9 @@ class TestShimCacheE2E:
         # Step 1: Simulate a client running the server through the shim
         asyncio.run(_run_server_through_shim("uv", ["run", "python", MATH_SERVER_PATH]))
 
-        # Verify shim log files were created and non-empty
-        shim_logs = glob.glob("/tmp/snyk_mcp_stdio_local_proxy.*")
+        # Verify shim log files were created and non-empty (excluding the
+        # materialized shim itself, which lives alongside the captures).
+        shim_logs = [f for f in glob.glob("/tmp/snyk_mcp_stdio_local_proxy.*") if not f.endswith((".sh", ".cmd"))]
         assert len(shim_logs) > 0, "No shim log files found"
         non_empty = [f for f in shim_logs if os.path.getsize(f) > 0]
         assert len(non_empty) > 0, "All shim log files are empty"
