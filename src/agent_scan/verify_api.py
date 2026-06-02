@@ -141,6 +141,7 @@ async def analyze_machine(
     skip_ssl_verify: bool = False,
     raise_on_error: bool = False,
     scan_context: dict | None = None,
+    scanned_usernames: list[str] | None = None,
 ) -> list[ScanPathResult]:
     """
     Analyze the scan paths with the analysis server.
@@ -155,13 +156,13 @@ async def analyze_machine(
         max_retries: Maximum number of retry attempts
         skip_ssl_verify: Whether to skip SSL verification
         scan_context: Optional dict containing scan metadata to include in the request
+        scanned_usernames: List of usernames detected during the scan. When provided, used instead of the current OS username.
     """
     logger.debug(f"Analyzing scan path with URL: {analysis_url}")
 
-    # for analysis server we never push personal information
     user_info = ScanUserInfo(
-        hostname=None,
-        username=None,
+        hostname=get_hostname(),
+        username=scanned_usernames if scanned_usernames else [get_username()],
         identifier=identifier,
         ip_address=None,
         anonymous_identifier=None,
