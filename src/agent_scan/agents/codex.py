@@ -58,7 +58,9 @@ class CodexDiscoverer(AgentDiscoverer):
 
     * **User** — ``<codex_home>/config.toml`` MCP servers + profile config files
       ``<codex_home>/<name>.config.toml`` MCP servers; user ``~/.agents/skills``.
-    * **Managed (enterprise)** — ``/etc/codex/managed_config.toml`` MCP servers.
+    * **System (machine-wide)** — the system ``config.toml``
+      (``/etc/codex/config.toml`` on Unix, ``%ProgramData%\\OpenAI\\Codex\\config.toml``
+      on Windows) MCP servers.
     * **Admin / machine** — admin ``/etc/codex/skills`` skills.
     * **Plugins** — the ``<codex_home>/plugins/<subdir>`` trees (see
       :attr:`_plugin_subdirs`) are walked for bundled ``.mcp.json`` MCP servers and
@@ -80,12 +82,16 @@ class CodexDiscoverer(AgentDiscoverer):
     Deliberately not covered:
 
     * ``requirements.toml`` (``/etc/codex/requirements.toml`` /
-      ``%ProgramData%\\OpenAI\\Codex\\requirements.toml``): it only *allowlists* MCP
-      servers, it does not define them — nothing to discover.
-    * The macOS-MDM managed-config preference domain (``com.openai.codex``) and the
-      Windows ``managed_config.toml`` location: non-filesystem / undocumented path.
-    * OpenAI-bundled "system" skills and a Windows admin-skills path: no concrete
-      path is documented.
+      ``%ProgramData%\\OpenAI\\Codex\\requirements.toml``) and the legacy
+      ``managed_config.toml`` it subsumes: both are admin *constraint/allowlist*
+      layers (servers matched on ``command``/``url``), not server-*defining* configs —
+      nothing launchable to inventory.
+    * The cloud ``EnterpriseManaged`` config bundle and the macOS-MDM managed-config
+      preference domain (``com.openai.codex``): delivered out-of-band (MDM / base64),
+      not a readable on-disk file.
+    * OpenAI-bundled "system" skills (``<codex_home>/skills/.system``, per
+      ``codex-rs/skills/src/lib.rs``) and a Windows admin-skills path: not surfaced
+      here (the embedded-skills cache is OpenAI-managed, not user/admin config).
     * The ``[[skills.config]]`` / ``enabled = false`` disable flags are not honored —
       configured-but-disabled skills/servers are still surfaced (an inventory choice).
     """
@@ -123,13 +129,13 @@ class CodexDiscoverer(AgentDiscoverer):
         return None
 
     def discover_mcp_servers(self) -> McpConfigsResult:
-        """MCP servers across every config layer Codex reads: the user config, profile
-        config files, the enterprise managed config, installed plugins, and each
-        registered project's config."""
+        """MCP servers across every on-disk config layer Codex reads: the user config,
+        profile config files, the machine-wide system config, installed plugins, and
+        each registered project's config."""
         result: McpConfigsResult = {}
         result.update(self._discover_user_mcp_servers())
         result.update(self._discover_profile_mcp_servers())
-        result.update(self._discover_managed_mcp_servers())
+        result.update(self._discover_system_mcp_servers())
         result.update(self._discover_plugin_mcp_servers())
         result.update(self._discover_project_mcp_servers())
         return result
@@ -171,33 +177,48 @@ class CodexDiscoverer(AgentDiscoverer):
             result.update(self._mcp_servers_from_data(self._load_toml_file(profile_file), profile_file))
         return result
 
-    def _discover_managed_mcp_servers(self) -> McpConfigsResult:
-        """Parse ``mcp_servers`` from the enterprise managed config (per-OS system path).
+    def _discover_system_mcp_servers(self) -> McpConfigsResult:
+        """Parse ``mcp_servers`` from Codex's machine-wide *system* ``config.toml``.
 
-        ``managed_config.toml`` holds admin-pushed ``managed defaults`` in the same
-        shape as ``config.toml`` (the macOS-MDM form ships it as ``config_toml_base64``),
-        so it can define ``[mcp_servers]``. This is the Codex analogue of Claude Code's
-        machine-level ``managed-mcp.json`` (see ``ClaudeCodeDiscoverer._managed_mcp_path``);
-        it is a fixed system path, identical across homes on one machine, and keyed by
-        absolute path so duplicates collapse. The ``requirements.toml`` layer only
-        *allowlists* servers (it doesn't define them), so it is intentionally not read.
+        Codex's lowest-precedence on-disk layer is the system config at
+        ``/etc/codex/config.toml`` (Unix) or ``%ProgramData%\\OpenAI\\Codex\\config.toml``
+        (Windows) — the same shape as the user ``config.toml``, so it can carry a
+        ``[mcp_servers]`` table (Codex config loader: ``codex-rs/config/src/loader/mod.rs``).
+        It is a fixed machine-level path, identical across homes on one machine, and
+        keyed by absolute path so duplicates collapse under ``--scan-all-users``.
+
+        The legacy ``managed_config.toml`` is deliberately *not* read: current Codex
+        treats it as a being-phased-out spelling of ``requirements.toml`` — a
+        constraint/allowlist layer (servers matched on ``command``/``url``), not a
+        server-*defining* config — so parsing its ``mcp_servers`` as launchable servers
+        would be the same category error already avoided for ``requirements.toml``. The
+        cloud ``EnterpriseManaged`` config bundle is delivered out-of-band (MDM /
+        base64), not as a readable on-disk file, so it is out of scope here too.
         """
-        path = self._managed_config_path()
+        path = self._system_config_path()
         if path is None:
             return {}
         return self._mcp_servers_from_data(self._load_toml_file(path), path)
 
-    def _managed_config_path(self) -> Path | None:
-        """Per-OS absolute path to the enterprise ``managed_config.toml``, or ``None``
-        on platforms where it isn't documented. See
-        https://developers.openai.com/codex/enterprise/managed-configuration."""
+    def _system_config_path(self) -> Path | None:
+        """Per-OS absolute path to Codex's machine-wide *system* ``config.toml``.
+
+        * Unix (macOS/Linux): ``/etc/codex/config.toml``.
+        * Windows: ``%ProgramData%\\OpenAI\\Codex\\config.toml`` — ``ProgramData`` is read
+          from the env var (it can sit on a non-system drive), defaulting to
+          ``C:\\ProgramData``. This is a machine-global location, so honoring the
+          scanning process's env is correct even under ``--scan-all-users`` (mirrors
+          ``ClaudeCodeDiscoverer._managed_mcp_path``).
+
+        Mirrors the system-config resolution in ``codex-rs/config/src/loader/mod.rs``.
+        """
         if sys.platform in ("darwin", "linux", "linux2"):
-            return Path("/etc/codex/managed_config.toml")
-        # On Windows the managed-defaults file location is not clearly documented
-        # (``requirements.toml`` lives under ``%ProgramData%\\OpenAI\\Codex`` but the
-        # managed_config.toml path is ambiguous), so it is left as a flagged gap rather
-        # than guessed. The macOS-MDM preference domain (``com.openai.codex``) is a
-        # separate, non-filesystem mechanism and is likewise not read.
+            return Path("/etc/codex/config.toml")
+        if sys.platform == "win32":
+            # Python uppercases ``os.environ`` keys on Windows, so the canonical
+            # mixed-case ``ProgramData`` var resolves via ``PROGRAMDATA`` here.
+            program_data = os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
+            return Path(program_data) / "OpenAI" / "Codex" / "config.toml"
         return None
 
     # --- private: plugin discovery (mirrors ClaudeCodeDiscoverer's plugin walk) ---

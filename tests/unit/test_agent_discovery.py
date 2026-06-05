@@ -6094,25 +6094,26 @@ def test_codex_discoverer_discovers_profile_mcp_servers(tmp_path):
     assert {"user_srv", "profile_srv"} <= all_names
 
 
-def test_codex_discoverer_discovers_managed_mcp_servers(tmp_path, monkeypatch):
-    """The enterprise managed config (``/etc/codex/managed_config.toml``) can define
+def test_codex_discoverer_discovers_system_mcp_servers(tmp_path, monkeypatch):
+    """The machine-wide *system* config (``/etc/codex/config.toml`` on Unix /
+    ``%ProgramData%\\OpenAI\\Codex\\config.toml`` on Windows) can define
     ``[mcp_servers]``; retargeted to a tmp file here."""
     from agent_scan.agents import CodexDiscoverer
 
-    managed = tmp_path / "managed_config.toml"
-    managed.write_text('[mcp_servers.managed_srv]\ncommand = "m"\n')
-    monkeypatch.setattr(CodexDiscoverer, "_managed_config_path", lambda self: managed)
+    system = tmp_path / "system-config.toml"
+    system.write_text('[mcp_servers.system_srv]\ncommand = "s"\n')
+    monkeypatch.setattr(CodexDiscoverer, "_system_config_path", lambda self: system)
 
     (tmp_path / ".codex").mkdir()
 
     mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
 
-    keys = [k for k in mcp_configs if k.endswith("/managed_config.toml")]
+    keys = [k for k in mcp_configs if k.endswith("/system-config.toml")]
     assert len(keys) == 1
-    assert mcp_configs[keys[0]][0][0] == "managed_srv"
+    assert mcp_configs[keys[0]][0][0] == "system_srv"
 
 
-def test_codex_managed_config_path_is_per_os(monkeypatch):
+def test_codex_system_config_path_is_per_os(monkeypatch):
     from pathlib import Path
 
     from agent_scan.agents import codex as codex_module
@@ -6120,10 +6121,18 @@ def test_codex_managed_config_path_is_per_os(monkeypatch):
     disc = codex_module.CodexDiscoverer(None)
     for plat in ("linux", "linux2", "darwin"):
         monkeypatch.setattr(codex_module.sys, "platform", plat)
-        assert disc._managed_config_path() == Path("/etc/codex/managed_config.toml")
-    # Windows managed-config path is not clearly documented -> no path (flagged gap).
+        assert disc._system_config_path() == Path("/etc/codex/config.toml")
+    # Windows: %ProgramData%\OpenAI\Codex\config.toml, ProgramData from the env var.
     monkeypatch.setattr(codex_module.sys, "platform", "win32")
-    assert disc._managed_config_path() is None
+    monkeypatch.setenv("PROGRAMDATA", "/program-data")
+    win_path = disc._system_config_path()
+    assert win_path is not None
+    assert win_path.as_posix().endswith("/program-data/OpenAI/Codex/config.toml")
+    # ProgramData defaults to C:\ProgramData when the env var is absent.
+    monkeypatch.delenv("PROGRAMDATA", raising=False)
+    win_default = disc._system_config_path()
+    assert win_default is not None
+    assert win_default.as_posix().endswith("OpenAI/Codex/config.toml")
 
 
 # --- CodexDiscoverer: plugin discovery (~/.codex/plugins/cache + marketplace sources) ---
