@@ -5800,6 +5800,20 @@ def test_codex_discoverer_extra_codex_keys_do_not_sink_validation(tmp_path):
     assert server.command == "npx"
 
 
+def test_codex_discoverer_degrades_without_toml_support(tmp_path, monkeypatch):
+    """With no TOML decoder available (Python < 3.11 and no ``tomli`` backport),
+    Codex TOML discovery degrades to no servers rather than raising."""
+    from agent_scan.agents import codex as codex_module
+
+    monkeypatch.setattr(codex_module, "tomllib", None)
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text('[mcp_servers.ctx]\ncommand = "npx"\n')
+
+    mcp_configs = codex_module.CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert mcp_configs == {}
+
+
 # --- CodexDiscoverer: CODEX_HOME relocation ---
 
 
