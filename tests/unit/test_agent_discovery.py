@@ -4231,6 +4231,74 @@ def test_antigravity_extension_skills_discovers_skills_dir(tmp_path):
     assert len(matching) == 1
 
 
+# --- Per-fork extension-root conventions (subclass overrides of the
+# manifest gate; see KiroDiscoverer / AntigravityDiscoverer
+# ``_installed_extension_dirs``). Standard VSCode/OpenVSX dirs are gated by
+# ``extensions.json``; fork trees that don't use that convention are scanned
+# wholesale. ---
+
+
+def test_kiro_powers_dir_scanned_wholesale_ignoring_manifest(tmp_path):
+    """Kiro Powers (``~/.kiro/powers/installed``) use no ``extensions.json`` — the
+    ``installed/`` segment is the install marker — so the whole tree is scanned.
+    A stray empty ``extensions.json`` must NOT gate (suppress) Powers discovery.
+    """
+    from agent_scan.agents import KiroDiscoverer
+
+    powers = tmp_path / ".kiro" / "powers" / "installed"
+    power = powers / "databricks"
+    power.mkdir(parents=True)
+    (power / "mcp.json").write_text('{"mcpServers": {"power-srv": {"command": "p"}}}')
+    # A stray manifest that lists nothing would suppress the Power if this root
+    # were treated as manifest-gated — the override must keep it wholesale.
+    (powers / "extensions.json").write_text("[]")
+
+    mcp_configs = KiroDiscoverer(tmp_path).discover_mcp_servers()
+
+    names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert "power-srv" in names
+
+
+def test_kiro_extensions_dir_is_manifest_gated(tmp_path):
+    """``~/.kiro/extensions`` is the standard OpenVSX tree, so it IS gated by its
+    ``extensions.json`` — a leftover dir not listed there is skipped (the Powers
+    override must not relax gating for this sibling root)."""
+    from agent_scan.agents import KiroDiscoverer
+
+    exts = tmp_path / ".kiro" / "extensions"
+    installed = exts / "pub.kept-1.0.0"
+    leftover = exts / "pub.left-0.9.0"
+    installed.mkdir(parents=True)
+    leftover.mkdir(parents=True)
+    (installed / "mcp.json").write_text('{"mcpServers": {"kept-srv": {"command": "k"}}}')
+    (leftover / "mcp.json").write_text('{"mcpServers": {"left-srv": {"command": "l"}}}')
+    (exts / "extensions.json").write_text('[{"relativeLocation": "pub.kept-1.0.0"}]')
+
+    mcp_configs = KiroDiscoverer(tmp_path).discover_mcp_servers()
+
+    names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert "kept-srv" in names
+    assert "left-srv" not in names
+
+
+def test_antigravity_gemini_extensions_scanned_wholesale_ignoring_manifest(tmp_path):
+    """Antigravity's ``~/.gemini/extensions`` is the Gemini-CLI-shared tree with
+    no ``extensions.json`` convention, so it is scanned wholesale — a stray empty
+    ``extensions.json`` must not suppress its extensions."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    exts = tmp_path / ".gemini" / "extensions"
+    ext = exts / "v.ag-1.0.0"
+    ext.mkdir(parents=True)
+    (ext / "mcp.json").write_text('{"mcpServers": {"ag-srv": {"command": "a"}}}')
+    (exts / "extensions.json").write_text("[]")
+
+    mcp_configs = AntigravityDiscoverer(tmp_path).discover_mcp_servers()
+
+    names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert "ag-srv" in names
+
+
 # --- VSCode: profile-specific MCP discovery ---
 #
 # VSCode profiles live at ``<userdata>/User/profiles/<id>/`` and each profile

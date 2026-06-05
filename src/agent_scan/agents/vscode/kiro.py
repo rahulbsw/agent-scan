@@ -1,8 +1,10 @@
 """Kiro discoverer."""
 
+from pathlib import Path
 from typing import ClassVar
 
 from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
+from agent_scan.well_known_clients import expand_path
 
 
 class KiroDiscoverer(VSCodeFamilyDiscoverer):
@@ -55,12 +57,14 @@ class KiroDiscoverer(VSCodeFamilyDiscoverer):
         ".agents/skills",  # inferred — verify (undocumented for Kiro)
     )
     # Kiro is a VSCode fork using OpenVSX — installed extensions live under
-    # ``~/.kiro/extensions/`` and can contribute ``mcp.json`` / ``skills/``.
-    # Installed Kiro Powers live under ``~/.kiro/powers/installed/<name>/``,
+    # ``~/.kiro/extensions/``, tracked by that dir's ``extensions.json`` install
+    # manifest, so it is scanned manifest-gated like any VSCode-family extensions
+    # dir. Installed Kiro Powers live under ``~/.kiro/powers/installed/<name>/``,
     # each shipping its as-authored ``mcp.json`` + ``steering/`` (the official
     # kirodotdev/powers repo documents this layout, e.g. databricks/POWER.md).
-    # Walking that tree the same way as extensions picks them up. Powers are
-    # user-global only — no documented project-scoped equivalent.
+    # Powers use NO ``extensions.json`` manifest — the ``installed/`` segment is
+    # itself the install marker — so that tree is scanned wholesale; see the
+    # ``_installed_extension_dirs`` override below. Powers are user-global only.
     _extension_paths = (
         "~/.kiro/extensions",
         "~/.kiro/powers/installed",
@@ -80,3 +84,13 @@ class KiroDiscoverer(VSCodeFamilyDiscoverer):
         # linux: NO STABLE PATH — Kiro distributes an AppImage/tarball with no
         # documented fixed install root, so Linux built-in discovery is omitted.
     }
+
+    def _installed_extension_dirs(self, base: Path) -> list[Path] | None:
+        """Kiro Powers (``~/.kiro/powers/installed``) ship no ``extensions.json``
+        manifest — each installed Power is just a present subdir — so that root is
+        scanned wholesale (returning ``None`` tells the base walk to scan every
+        subdir). ``~/.kiro/extensions`` is the standard OpenVSX tree and stays
+        manifest-gated via ``super()``."""
+        if base == expand_path(Path("~/.kiro/powers/installed"), self.home_directory):
+            return None
+        return super()._installed_extension_dirs(base)

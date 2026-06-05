@@ -80,7 +80,10 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
         ".gemini/mcp_config.json",  # inferred — verify (undocumented for Antigravity)
     )
     # Installed extensions live under ``~/.gemini/extensions/`` (shared with
-    # the Gemini CLI; not under the ``antigravity/`` subdir).
+    # the Gemini CLI; not under the ``antigravity/`` subdir). The Gemini CLI
+    # manages this tree with its own per-extension layout — there is NO central
+    # ``extensions.json`` install manifest — so it is scanned wholesale rather
+    # than manifest-gated (see the ``_installed_extension_dirs`` override below).
     _extension_paths = ("~/.gemini/extensions",)
     # Built-in (bundled) extensions shipped inside the Antigravity application.
     # ENTIRELY INFERRED — verify: Antigravity was not available to verify on
@@ -103,6 +106,16 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
             "/opt/antigravity/resources/app/extensions",  # inferred — verify (may be packed in app.asar)
         ),
     }
+
+    def _installed_extension_dirs(self, base: Path) -> list[Path] | None:
+        """``~/.gemini/extensions`` is the Gemini-CLI-shared tree with no
+        ``extensions.json`` manifest, so it is scanned wholesale (returning
+        ``None`` tells the base walk to scan every subdir). Any other root (the
+        built-in/bundled dirs) falls through to the manifest-gated base logic."""
+        if base == expand_path(Path("~/.gemini/extensions"), self.home_directory):
+            return None
+        return super()._installed_extension_dirs(base)
+
     # Antigravity's own opened-workspace registry. Each opened folder is recorded
     # as a ``<id>.json`` file here, with the root under
     # ``projectResources.resources[].folderUri`` (a ``file://`` URI). Shared by the
