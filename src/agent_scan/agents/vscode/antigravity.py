@@ -82,9 +82,11 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
     # Installed extensions live under ``~/.gemini/extensions/`` (shared with
     # the Gemini CLI; not under the ``antigravity/`` subdir). The Gemini CLI
     # manages this tree with its own per-extension layout — there is NO central
-    # ``extensions.json`` install manifest — so it is scanned wholesale rather
-    # than manifest-gated (see the ``_installed_extension_dirs`` override below).
+    # ``extensions.json`` install manifest — so it is scanned wholesale via
+    # ``_unmanaged_extension_paths`` (see ``_installed_extension_dirs`` below).
     _extension_paths = ("~/.gemini/extensions",)
+    # Subset of ``_extension_paths`` with no ``extensions.json`` install manifest.
+    _unmanaged_extension_paths: ClassVar[tuple[str, ...]] = ("~/.gemini/extensions",)
     # Built-in (bundled) extensions shipped inside the Antigravity application.
     # ENTIRELY INFERRED — verify: Antigravity was not available to verify on
     # disk, and Google has not published install paths. The macOS bundle name is
@@ -108,11 +110,15 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
     }
 
     def _installed_extension_dirs(self, base: Path) -> list[Path]:
-        """``~/.gemini/extensions`` is the Gemini-CLI-shared tree with no
-        ``extensions.json`` manifest, so it returns its immediate subdirs (every
-        present extension is scanned). Any other root (the built-in/bundled dirs)
-        falls through to the manifest-gated base logic."""
-        if base == expand_path(Path("~/.gemini/extensions"), self.home_directory):
+        """Roots in ``_unmanaged_extension_paths`` ship no ``extensions.json``
+        manifest, so those roots return their immediate subdirs (every present
+        extension is scanned). All other roots (e.g. built-in/bundled dirs) stay
+        manifest-gated via ``super()``."""
+        unmanaged = {
+            expand_path(Path(raw), self.home_directory)
+            for raw in self._unmanaged_extension_paths
+        }
+        if base in unmanaged:
             return self._immediate_subdirs(base)
         return super()._installed_extension_dirs(base)
 

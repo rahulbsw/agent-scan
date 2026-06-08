@@ -63,12 +63,15 @@ class KiroDiscoverer(VSCodeFamilyDiscoverer):
     # each shipping its as-authored ``mcp.json`` + ``steering/`` (the official
     # kirodotdev/powers repo documents this layout, e.g. databricks/POWER.md).
     # Powers use NO ``extensions.json`` manifest — the ``installed/`` segment is
-    # itself the install marker — so that tree is scanned wholesale; see the
-    # ``_installed_extension_dirs`` override below. Powers are user-global only.
+    # itself the install marker — so that tree is scanned wholesale via
+    # ``_unmanaged_extension_paths`` (see ``_installed_extension_dirs`` below).
+    # Powers are user-global only.
     _extension_paths = (
         "~/.kiro/extensions",
         "~/.kiro/powers/installed",
     )
+    # Subset of ``_extension_paths`` with no ``extensions.json`` install manifest.
+    _unmanaged_extension_paths: ClassVar[tuple[str, ...]] = ("~/.kiro/powers/installed",)
     # Built-in (bundled) extensions shipped inside the Kiro application.
     # ENTIRELY INFERRED — verify: Kiro was not available to verify on disk and
     # its docs only say "follow the installer". The macOS bundle name and the
@@ -86,10 +89,14 @@ class KiroDiscoverer(VSCodeFamilyDiscoverer):
     }
 
     def _installed_extension_dirs(self, base: Path) -> list[Path]:
-        """Kiro Powers (``~/.kiro/powers/installed``) ship no ``extensions.json``
-        manifest — each installed Power is just a present subdir — so that root
-        returns its immediate subdirs (every Power is scanned). ``~/.kiro/extensions``
-        is the standard OpenVSX tree and stays manifest-gated via ``super()``."""
-        if base == expand_path(Path("~/.kiro/powers/installed"), self.home_directory):
+        """Roots in ``_unmanaged_extension_paths`` ship no ``extensions.json``
+        manifest — each installed Power is just a present subdir — so those roots
+        return their immediate subdirs (every Power is scanned). All other roots
+        (e.g. ``~/.kiro/extensions``) stay manifest-gated via ``super()``."""
+        unmanaged = {
+            expand_path(Path(raw), self.home_directory)
+            for raw in self._unmanaged_extension_paths
+        }
+        if base in unmanaged:
             return self._immediate_subdirs(base)
         return super()._installed_extension_dirs(base)
