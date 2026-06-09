@@ -6707,3 +6707,163 @@ def test_codex_discoverer_discovers_config_plugin_mcp_servers(tmp_path):
     assert set(by_name) == {"defined"}  # overlay_only skipped (no command/url)
     assert isinstance(by_name["defined"], StdioServer)
     assert by_name["defined"].command == "acme-mcp"
+
+
+# --- CodexDiscoverer: plugin-manifest path overrides (mcpServers + skills) ---
+
+
+def _write_codex_manifest(plugin_dir, body, *, relpath=".codex-plugin/plugin.json"):
+    """(Re)write a plugin's manifest at ``relpath`` with the given JSON ``body``."""
+    manifest = plugin_dir / relpath
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(body)
+    return manifest
+
+
+def test_codex_discoverer_honors_manifest_mcp_servers_override(tmp_path):
+    """A manifest ``mcpServers`` key relocates the MCP config to a ``./``-relative file
+    under the plugin root; that file is parsed even though it isn't named ``.mcp.json``."""
+    from agent_scan.agents import CodexDiscoverer
+
+    cache = tmp_path / ".codex" / "plugins" / "cache"
+    plugin_dir = _make_codex_plugin(cache, "mkt", "override-plugin", "1.0.0")
+    _write_codex_manifest(plugin_dir, '{"name": "override-plugin", "mcpServers": "./cfg/servers.json"}')
+    (plugin_dir / "cfg").mkdir()
+    (plugin_dir / "cfg" / "servers.json").write_text('{"relocated": {"command": "r-mcp"}}')
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/override-plugin/1.0.0/cfg/servers.json")]
+    assert len(keys) == 1
+    name, server = mcp_configs[keys[0]][0]
+    assert name == "relocated"
+    assert isinstance(server, StdioServer)
+    assert server.command == "r-mcp"
+
+
+def test_codex_discoverer_manifest_override_is_additive_to_default_mcp_json(tmp_path):
+    """When both the default ``.mcp.json`` and a manifest-overridden file exist, the
+    scanner surfaces BOTH (a deliberate superset of what Codex itself loads)."""
+    from agent_scan.agents import CodexDiscoverer
+
+    cache = tmp_path / ".codex" / "plugins" / "cache"
+    plugin_dir = _make_codex_plugin(cache, "mkt", "both-plugin", "2.0.0")
+    _write_codex_manifest(plugin_dir, '{"name": "both-plugin", "mcpServers": "./alt.json"}')
+    (plugin_dir / ".mcp.json").write_text('{"default_srv": {"command": "d"}}')
+    (plugin_dir / "alt.json").write_text('{"alt_srv": {"command": "a"}}')
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    all_names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert {"default_srv", "alt_srv"} <= all_names
+    assert any(k.endswith("/both-plugin/2.0.0/.mcp.json") for k in mcp_configs)
+    assert any(k.endswith("/both-plugin/2.0.0/alt.json") for k in mcp_configs)
+
+
+def test_codex_discoverer_honors_claude_plugin_manifest_fallback(tmp_path):
+    """When only ``.claude-plugin/plugin.json`` exists (no ``.codex-plugin``), its
+    ``mcpServers`` override is still honored (Codex's Claude-compat fallback)."""
+    from agent_scan.agents import CodexDiscoverer
+
+    cache = tmp_path / ".codex" / "plugins" / "cache"
+    plugin_dir = cache / "mkt" / "claude-compat" / "1.0.0"
+    plugin_dir.mkdir(parents=True)
+    _write_codex_manifest(
+        plugin_dir,
+        '{"name": "claude-compat", "mcpServers": "./servers.json"}',
+        relpath=".claude-plugin/plugin.json",
+    )
+    (plugin_dir / "servers.json").write_text('{"compat_srv": {"command": "c"}}')
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/claude-compat/1.0.0/servers.json")]
+    assert len(keys) == 1
+    assert mcp_configs[keys[0]][0][0] == "compat_srv"
+
+
+@pytest.mark.parametrize(
+    "override",
+    ["servers.json", "../escape.json", "/etc/abs.json", "./", ""],
+)
+def test_codex_discoverer_rejects_invalid_mcp_override_paths(tmp_path, override):
+    """A manifest ``mcpServers`` that isn't a safe ``./``-relative path (no prefix,
+    ``..`` escape, absolute, or empty) is ignored -- no server surfaced, no crash."""
+    from agent_scan.agents import CodexDiscoverer
+
+    cache = tmp_path / ".codex" / "plugins" / "cache"
+    plugin_dir = _make_codex_plugin(cache, "mkt", "bad-override", "1.0.0")
+    _write_codex_manifest(plugin_dir, f'{{"name": "bad-override", "mcpServers": "{override}"}}')
+    # Plant a same-named file at the escape target to prove it is NOT read.
+    (plugin_dir / "servers.json").write_text('{"should_not_appear": {"command": "x"}}')
+    (tmp_path / "escape.json").write_text('{"should_not_appear": {"command": "x"}}')
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    all_names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert "should_not_appear" not in all_names
+
+
+def test_codex_discoverer_honors_manifest_skills_override(tmp_path):
+    """A manifest ``skills`` key adds an extra skills root (additive): a non-default
+    dir named other than ``skills/`` is scanned, and the default ``skills/`` still is."""
+    from agent_scan.agents import CodexDiscoverer
+
+    cache = tmp_path / ".codex" / "plugins" / "cache"
+    plugin_dir = _make_codex_plugin(cache, "mkt", "skill-plugin", "1.0.0")
+    _write_codex_manifest(plugin_dir, '{"name": "skill-plugin", "skills": "./extra-skills"}')
+    # Default skills/ root.
+    default_skill = plugin_dir / "skills" / "default-skill"
+    default_skill.mkdir(parents=True)
+    (default_skill / "SKILL.md").write_text("---\nname: default-skill\ndescription: d\n---\n\nB.\n")
+    # Manifest-declared extra root.
+    extra_skill = plugin_dir / "extra-skills" / "extra-skill"
+    extra_skill.mkdir(parents=True)
+    (extra_skill / "SKILL.md").write_text("---\nname: extra-skill\ndescription: d\n---\n\nB.\n")
+
+    disc = CodexDiscoverer(tmp_path)
+    disc._admin_skills_dir = str(tmp_path / "no-admin")
+    skills_dirs = disc.discover_skills()
+
+    extra_keys = [k for k in skills_dirs if k.endswith("/skill-plugin/1.0.0/extra-skills")]
+    assert len(extra_keys) == 1
+    assert {n for n, _ in skills_dirs[extra_keys[0]]} == {"extra-skill"}
+    default_keys = [k for k in skills_dirs if k.endswith("/skill-plugin/1.0.0/skills")]
+    assert len(default_keys) == 1
+    assert {n for n, _ in skills_dirs[default_keys[0]]} == {"default-skill"}
+
+
+def test_codex_discoverer_rejects_invalid_skills_override_path(tmp_path):
+    """A manifest ``skills`` value that escapes the plugin root (``..``) is ignored."""
+    from agent_scan.agents import CodexDiscoverer
+
+    cache = tmp_path / ".codex" / "plugins" / "cache"
+    plugin_dir = _make_codex_plugin(cache, "mkt", "bad-skill", "1.0.0")
+    _write_codex_manifest(plugin_dir, '{"name": "bad-skill", "skills": "../escape-skills"}')
+    escape_skill = plugin_dir.parent / "escape-skills" / "leaked"
+    escape_skill.mkdir(parents=True)
+    (escape_skill / "SKILL.md").write_text("---\nname: leaked\ndescription: d\n---\n\nB.\n")
+
+    disc = CodexDiscoverer(tmp_path)
+    disc._admin_skills_dir = str(tmp_path / "no-admin")
+    skills_dirs = disc.discover_skills()
+
+    all_names = {n for v in skills_dirs.values() if isinstance(v, list) for n, _ in v}
+    assert "leaked" not in all_names
+
+
+def test_codex_discoverer_malformed_manifest_does_not_break_default_walk(tmp_path):
+    """A manifest with malformed JSON (or no override keys) is skipped gracefully; the
+    default ``.mcp.json`` plugin walk still works."""
+    from agent_scan.agents import CodexDiscoverer
+
+    cache = tmp_path / ".codex" / "plugins" / "cache"
+    plugin_dir = _make_codex_plugin(cache, "mkt", "broken-manifest", "1.0.0")
+    _write_codex_manifest(plugin_dir, '{"name": "broken-manifest", "mcpServers": ')  # truncated JSON
+    (plugin_dir / ".mcp.json").write_text('{"default_srv": {"command": "d"}}')
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert any(k.endswith("/broken-manifest/1.0.0/.mcp.json") for k in mcp_configs)
+    all_names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert "default_srv" in all_names

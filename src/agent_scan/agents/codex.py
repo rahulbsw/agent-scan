@@ -54,7 +54,10 @@ class CodexDiscoverer(AgentDiscoverer):
     * **System** — the machine-wide ``config.toml`` (``/etc/codex`` on Unix,
       ``%ProgramData%\\OpenAI\\Codex`` on Windows) and ``/etc/codex/skills``.
     * **Plugins** — ``<codex_home>/plugins`` walked for ``.mcp.json`` + ``skills/``,
-      plus servers defined inline under ``[plugins.<name>.mcp_servers.*]``.
+      plus servers defined inline under ``[plugins.<name>.mcp_servers.*]``. A plugin
+      manifest (``.codex-plugin/plugin.json``, or the ``.claude-plugin`` fallback) may
+      relocate its MCP config (``mcpServers``) or add a skills root (``skills``); those
+      ``./``-relative overrides are honored additively.
     * **Project** — each ``[projects]`` entry and its ancestors, scanned for
       ``.codex/config.toml`` servers and ``.agents/skills``. ``trust_level`` is
       never read — every listed project is scanned regardless of trust.
@@ -71,6 +74,11 @@ class CodexDiscoverer(AgentDiscoverer):
 
     _install_path = "~/.codex"
     _config_filename = "config.toml"
+    # Plugin manifest dirs Codex reads, in precedence order: the native
+    # ``.codex-plugin`` then the Claude-compat ``.claude-plugin`` fallback. The
+    # manifest file inside each is ``plugin.json``.
+    _plugin_manifest_dirs = (".codex-plugin", ".claude-plugin")
+    _plugin_manifest_filename = "plugin.json"
     # Documented skill dirs (developers.openai.com/codex/skills): user (home-relative,
     # cross-agent convention) + admin (absolute, machine-wide).
     _user_skills_relative = "~/.agents/skills"
@@ -95,6 +103,7 @@ class CodexDiscoverer(AgentDiscoverer):
         result.update(self._discover_profile_mcp_servers())
         result.update(self._discover_system_mcp_servers())
         result.update(self._discover_plugin_mcp_servers())
+        result.update(self._discover_plugin_manifest_mcp_servers())
         result.update(self._discover_config_plugin_mcp_servers())
         result.update(self._discover_project_mcp_servers())
         return result
@@ -105,6 +114,7 @@ class CodexDiscoverer(AgentDiscoverer):
         result: SkillsDirsResult = {}
         result.update(self._discover_global_skills())
         result.update(self._discover_plugin_skills())
+        result.update(self._discover_plugin_manifest_skills())
         result.update(self._discover_project_skills())
         return result
 
@@ -177,8 +187,88 @@ class CodexDiscoverer(AgentDiscoverer):
         return result
 
     def _discover_plugin_skills(self) -> SkillsDirsResult:
-        """Scan ``skills/`` subdirs under every plugin tree."""
+        """Scan ``skills/`` subdirs under every plugin tree (the default location). A
+        manifest may declare an *additional* skills root; see
+        :meth:`_discover_plugin_manifest_skills`."""
         return self._discover_skill_and_command_dirs(self._plugin_base_dirs(), "skills", inspect_skills_dir)
+
+    def _plugin_manifests(self) -> list[tuple[Path, dict]]:
+        """Locate installed plugin manifests under the plugins root, returning
+        ``(plugin_root, manifest_data)`` for each.
+
+        A manifest lives at ``<plugin_root>/.codex-plugin/plugin.json`` (preferred) or
+        ``<plugin_root>/.claude-plugin/plugin.json`` (Claude-compat fallback). We walk
+        for ``plugin.json`` files, keep those whose parent dir is one of the manifest
+        dirs, and prefer the higher-precedence dir when a plugin root has both.
+        Unparseable / non-dict manifests are skipped.
+        """
+        precedence = self._plugin_manifest_dirs
+        by_root: dict[Path, Path] = {}
+        for base in self._plugin_base_dirs():
+            for manifest_path in _walk_under_depth(
+                base, self._plugin_manifest_filename, _MAX_PLUGIN_RGLOB_DEPTH, want_file=True
+            ):
+                dir_name = manifest_path.parent.name
+                if dir_name not in precedence:
+                    continue
+                plugin_root = manifest_path.parent.parent
+                existing = by_root.get(plugin_root)
+                if existing is None or precedence.index(dir_name) < precedence.index(existing.parent.name):
+                    by_root[plugin_root] = manifest_path
+        result: list[tuple[Path, dict]] = []
+        for plugin_root, manifest_path in by_root.items():
+            data = self._load_json_file(manifest_path)
+            if isinstance(data, dict):
+                result.append((plugin_root, data))
+        return result
+
+    def _resolve_manifest_relative_path(self, plugin_root: Path, value: object) -> Path | None:
+        """Resolve a manifest path value (``mcpServers`` / ``skills``) to an absolute
+        path under ``plugin_root``, mirroring Codex's rules: the value must be a string
+        starting with ``./`` and must not be absolute or contain a ``..`` component.
+        Anything else returns ``None`` (the override is ignored).
+        """
+        if not isinstance(value, str) or not value.startswith("./"):
+            return None
+        relative = value[2:].strip()
+        if not relative:
+            return None
+        candidate = Path(relative)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            return None
+        return plugin_root / candidate
+
+    def _discover_plugin_manifest_mcp_servers(self) -> McpConfigsResult:
+        """Honor a plugin manifest's ``mcpServers`` path override: when a manifest
+        relocates its MCP config to a ``./``-relative file, parse that file too.
+        Additive to the default ``.mcp.json`` walk (keyed by path, so an override
+        pointing back at ``.mcp.json`` dedups with it).
+        """
+        result: McpConfigsResult = {}
+        for plugin_root, manifest in self._plugin_manifests():
+            resolved = self._resolve_manifest_relative_path(plugin_root, manifest.get("mcpServers"))
+            if resolved is None:
+                continue
+            parsed = self._parse_plugin_mcp_json(resolved)
+            if not parsed:
+                continue
+            result[resolved.as_posix()] = parsed
+        return result
+
+    def _discover_plugin_manifest_skills(self) -> SkillsDirsResult:
+        """Honor a plugin manifest's ``skills`` path override: scan an extra
+        ``./``-relative skills root declared in the manifest. Additive to the default
+        ``skills/`` walk (keyed by path, so an override naming ``./skills`` dedups).
+        """
+        result: SkillsDirsResult = {}
+        for plugin_root, manifest in self._plugin_manifests():
+            resolved = self._resolve_manifest_relative_path(plugin_root, manifest.get("skills"))
+            if resolved is None:
+                continue
+            entries = self._scan_skills_dir(resolved)
+            if entries is not None:
+                result[resolved.as_posix()] = entries
+        return result
 
     def _discover_config_plugin_mcp_servers(self) -> McpConfigsResult:
         """Surface plugin servers *defined* inline in ``config.toml`` under
