@@ -257,7 +257,10 @@ async def check_server(
     else:
         logger.debug(f"Remote server with url: {server_config.url}, type: {server_config.type or 'none'}")
         strategy: list[tuple[Literal["sse", "http"], str]] = []
-        base_url = server_config.url.rstrip("/")
+        original_url = server_config.url.rstrip("/")
+        original_type = server_config.type
+
+        base_url = original_url
         url_path = urlparse(base_url).path
         if url_path.endswith("/sse"):
             base_url = base_url[: -len("/sse")]
@@ -310,6 +313,12 @@ async def check_server(
                 logger.debug("Server check failed")
                 exceptions.append(e)
                 continue
+
+        # No strategy worked. Reset server_config to the URL the user originally
+        # configured (trailing slash stripped) and the original transport, so
+        # callers don't see it stuck on the last-tried mutated URL.
+        server_config.url = original_url
+        server_config.type = original_type
 
         # if python 3.11 or higher, use ExceptionGroup
         if sys.version_info >= (3, 11):

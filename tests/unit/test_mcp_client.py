@@ -145,6 +145,12 @@ async def test_remote_url_candidates_have_no_double_slash_and_include_clean(inpu
             break
     assert expected_clean in tried, f"clean URL {expected_clean!r} not tried; tried={tried}"
 
+    # After all strategies fail, server_config must be reset to the URL the
+    # user originally configured (trailing slash stripped) and the original
+    # type — not left on whatever the last attempt mutated it to.
+    assert server.url == input_url.rstrip("/"), f"server.url not reset to original: {server.url!r}"
+    assert server.type is None
+
 
 @pytest.mark.asyncio
 async def test_math_server():
