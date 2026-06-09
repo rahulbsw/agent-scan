@@ -49,7 +49,8 @@ class CodexDiscoverer(AgentDiscoverer):
     Scopes covered:
 
     * **User** — ``<codex_home>/config.toml`` + profile overlays
-      ``<codex_home>/<name>.config.toml``; ``~/.agents/skills``.
+      ``<codex_home>/<name>.config.toml``; skills in ``~/.agents/skills`` and the
+      deprecated-but-still-loaded ``<codex_home>/skills``.
     * **System** — the machine-wide ``config.toml`` (``/etc/codex`` on Unix,
       ``%ProgramData%\\OpenAI\\Codex`` on Windows) and ``/etc/codex/skills``.
     * **Plugins** — ``<codex_home>/plugins`` walked for ``.mcp.json`` + ``skills/``. A
@@ -332,11 +333,17 @@ class CodexDiscoverer(AgentDiscoverer):
     # --- private: skills discovery ---
 
     def _discover_global_skills(self) -> SkillsDirsResult:
-        """Scan the user (``~/.agents/skills``) and admin (``/etc/codex/skills``) skill
-        dirs via :meth:`_scan_skills_dir` (missing/file/unreadable dirs are skipped).
+        """Scan the user (``~/.agents/skills``), the deprecated-but-still-loaded
+        ``<codex_home>/skills`` (Codex keeps it "for backward compatibility"), and admin
+        (``/etc/codex/skills``) skill dirs via :meth:`_scan_skills_dir` (missing/file/
+        unreadable dirs are skipped). ``<codex_home>/skills`` follows ``CODEX_HOME`` so a
+        relocated home is covered — the legacy pipeline only scans the literal
+        ``~/.codex/skills``. (The OpenAI-embedded ``<codex_home>/skills/.system`` cache is
+        a level deeper and so is not surfaced by this one-level scan.)
         """
         result: SkillsDirsResult = {}
         skills_dirs = (
+            self._codex_home() / "skills",
             expand_path(Path(self._user_skills_relative), self.home_directory),
             Path(self._admin_skills_dir),
         )

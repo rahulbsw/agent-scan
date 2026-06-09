@@ -6342,6 +6342,45 @@ def test_codex_discoverer_returns_empty_skills_when_no_dirs(tmp_path, monkeypatc
     assert skills_dirs == {}
 
 
+def test_codex_discoverer_discovers_codex_home_skills_default(tmp_path):
+    """``<codex_home>/skills`` is the deprecated user skill root Codex still loads
+    (``core-skills/loader.rs``, "kept for backward compatibility"). The discoverer scans
+    it itself, not only via the legacy ``well_known_clients`` ``~/.codex/skills`` entry."""
+    from agent_scan.agents import CodexDiscoverer
+
+    skill = tmp_path / ".codex" / "skills" / "home-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: home-skill\ndescription: d\n---\n\nB.\n")
+
+    disc = CodexDiscoverer(tmp_path)
+    disc._admin_skills_dir = str(tmp_path / "no-admin")
+    skills_dirs = disc.discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/.codex/skills")]
+    assert len(keys) == 1
+    assert {n for n, _ in skills_dirs[keys[0]]} == {"home-skill"}
+
+
+def test_codex_discoverer_discovers_codex_home_skills_under_relocation(tmp_path, monkeypatch):
+    """The ``<codex_home>/skills`` root follows ``CODEX_HOME`` on an own-home scan. The
+    legacy pipeline only scans the hardcoded ``~/.codex/skills``, so without this the
+    relocated location is missed by every phase (the real coverage gap)."""
+    from agent_scan.agents import CodexDiscoverer
+
+    cfg = tmp_path / "relocated-codex"
+    skill = cfg / "skills" / "legacy-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: legacy-skill\ndescription: d\n---\n\nB.\n")
+    monkeypatch.setenv("CODEX_HOME", str(cfg))
+    monkeypatch.setattr(CodexDiscoverer, "_admin_skills_dir", str(tmp_path / "no-admin"))
+
+    skills_dirs = CodexDiscoverer(None).discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/relocated-codex/skills")]
+    assert len(keys) == 1
+    assert {n for n, _ in skills_dirs[keys[0]]} == {"legacy-skill"}
+
+
 # --- CodexDiscoverer: full discover() + registry ---
 
 
