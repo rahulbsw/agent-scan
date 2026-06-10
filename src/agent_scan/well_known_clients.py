@@ -39,7 +39,7 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_paths=["~/.copilot/skills"],
     ),
     CandidateClient(
-        name="Claude Desktop",
+        name="claude desktop",
         client_exists_paths=["~/Library/Application Support/Claude"],
         mcp_config_paths=["~/Library/Application Support/Claude/claude_desktop_config.json"],
         skills_dir_paths=[],
@@ -226,7 +226,7 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_paths=["~/.copilot/skills"],
     ),
     CandidateClient(
-        name="Claude Desktop",
+        name="claude desktop",
         client_exists_paths=["~/AppData/Roaming/Claude"],
         mcp_config_paths=["~/AppData/Roaming/Claude/claude_desktop_config.json"],
         skills_dir_paths=[],

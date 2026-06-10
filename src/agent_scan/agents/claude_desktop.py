@@ -18,10 +18,10 @@ file itself belongs to the Claude Desktop chat surface and is only discovered
 here -- which is why this is a separate discoverer rather than part of
 ``ClaudeCodeDiscoverer``. See https://code.claude.com/docs/en/desktop.
 
-These two paths already exist as the Phase-A ``"Claude Desktop"`` rows in
+These two paths already exist as the Phase-A ``"claude desktop"`` rows in
 ``well_known_clients.py``; this discoverer is the Phase-B (code-driven) analogue,
 mirroring how ``ClaudeCodeDiscoverer`` lives in both phases. Both use
-``name = "Claude Desktop"`` so ``pipelines.discover_clients_to_inspect`` merges them
+``name = "claude desktop"`` so ``pipelines.discover_clients_to_inspect`` merges them
 onto a single client (keyed by ``(name, username)`` + absolute config path).
 
 Deliberately not covered (no officially-documented filesystem path -- not guessed
@@ -80,14 +80,14 @@ class ClaudeDesktopDiscoverer(AgentDiscoverer):
     file is multi-purpose (e.g. ``globalShortcut``).
     """
 
-    # MUST match the "Claude Desktop" entry in ``well_known_clients.py`` so the
+    # MUST match the "claude desktop" entry in ``well_known_clients.py`` so the
     # Phase-A (data-driven) / Phase-B (this discoverer) merge in
     # ``pipelines.discover_clients_to_inspect`` lines up on a single client.
-    name = "Claude Desktop"
+    name = "claude desktop"
 
     _config_filename = "claude_desktop_config.json"
     # Documented per-OS install/config directories (the same paths the Phase-A
-    # ``well_known_clients`` "Claude Desktop" rows use). ``~`` is expanded against the
+    # ``well_known_clients`` "claude desktop" rows use). ``~`` is expanded against the
     # discoverer's bound home, so it resolves correctly per-home under
     # ``--scan-all-users``.
     _macos_dir = "~/Library/Application Support/Claude"

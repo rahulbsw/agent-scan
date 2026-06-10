@@ -1187,7 +1187,7 @@ def test_DISCOVERERS_registers_claude_code_and_vscode_family():
         "kiro",
         "antigravity",
         "codex",
-        "Claude Desktop",
+        "claude desktop",
     }
 
 
@@ -7120,9 +7120,9 @@ def test_claude_desktop_discoverer_discover_assembles_client_to_inspect(tmp_path
     cti = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path).discover()
 
     assert isinstance(cti, ClientToInspect)
-    # Must match the Phase-A ``well_known_clients`` "Claude Desktop" entry so the two
+    # Must match the Phase-A ``well_known_clients`` "claude desktop" entry so the two
     # phases merge onto a single client in ``pipelines.discover_clients_to_inspect``.
-    assert cti.name == "Claude Desktop"
+    assert cti.name == "claude desktop"
     assert cti.client_path.endswith("/Library/Application Support/Claude")
 
 
