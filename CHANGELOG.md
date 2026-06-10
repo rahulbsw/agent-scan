@@ -83,3 +83,4 @@
 - `0.5.6` Per-agent discovery refactor with Claude Code support. Bundle all detect_secrets plugins in PyInstaller binary. Starlette security update.
 - `0.5.8` Reverting changes.
 - `0.5.9` Don't handshake (launch) stdio MCP servers by default. Add VSCode family discoverers (VSCode, Cursor, Windsurf, Kiro, Antigravity); only scan installed extensions and plugins. Upgrade aiohttp to fix CVEs.
+- `0.5.10` Add Codex discoverer for MCP servers and skills. Add Claude Desktop support. Attach config-file path to each MCP server on upload. Fix remote URL handling. Stop probing host tool versions and enumerating home directories during bootstrap.
