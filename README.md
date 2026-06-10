@@ -92,7 +92,7 @@ Legend: **✓** detected · **✗** the agent supports this but Agent Scan does 
 | Claude Desktop | ✗ | N/A | ✗ | ✓ | N/A | N/A | N/A | ✗ |
 | Claude Code | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Gemini CLI | N/A | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
-| OpenClaw | N/A | N/A | ✓ | ✗ | ✓ | N/A | ✗ | N/A |
+| OpenClaw | N/A | N/A | ✓ | ✗ | ✓ † | N/A | ✗ | N/A |
 | Amp | N/A | ✗ | ✓ | ✗ | ✓ | ✗ | ✗ | ✗ |
 | Kiro | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | OpenCode | N/A | ✗ | ✗ | ✗ | ✗ | ✗ | N/A | N/A |
@@ -100,13 +100,7 @@ Legend: **✓** detected · **✗** the agent supports this but Agent Scan does 
 | Codex | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Amazon Q | N/A | N/A | N/A | ✓ | N/A | ✗ | N/A | N/A |
 
-Notes:
-
-- **Claude Code** discovers slash commands at the user, project, and plugin scopes (scanned alongside skills). Its enterprise/managed skills tier has no documented directory, so system skills are not scanned (✗), while system servers (`managed-mcp.json`) are.
-- **Claude Desktop** supports skills (personal and org-wide) stored in the cloud and `.mcpb` Desktop Extensions installed on disk at an undocumented path; both are supported but not scanned yet (✗). Only its user-level `claude_desktop_config.json` MCP servers are scanned. It has no project/workspace scope, and skills are not extension-distributed (N/A).
-- **Codex** stores MCP servers in TOML (`config.toml`); the other agents use JSON.
-- **Gemini CLI, Amp, OpenCode, OpenClaw, and Amazon Q** expose servers and/or skills at scopes Agent Scan does not read yet (shown as ✗) — for example project-level and extension-bundled configuration.
-- Several agents gate MCP at the admin level with a server-side allowlist or registry rather than a local config file; those have no scannable system-server file (N/A).
+† OpenClaw has no opened-project enumeration: its project/workspace skills are found only at the fixed `~/.openclaw/workspace/skills`
 
 ## Quick Start
 
