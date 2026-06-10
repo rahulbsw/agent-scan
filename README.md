@@ -89,18 +89,20 @@ Legend: **✓** detected · **✗** the agent supports this but Agent Scan does 
 | Windsurf | ✓ | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Cursor | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | VS Code | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Claude Desktop | ✗ | N/A | ✗ | ✓ | N/A | N/A | N/A | ✗ |
+| Claude Desktop | N/A | N/A | ✗ | ✓ | N/A | N/A | N/A | ✗ |
 | Claude Code | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Gemini CLI | N/A | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
-| OpenClaw | N/A | N/A | ✓ | ✗ | ✓ † | N/A | ✗ | N/A |
-| Amp | N/A | ✗ | ✓ | ✗ | ✓ | ✗ | ✗ | ✗ |
+| OpenClaw | N/A | N/A | ✓ | ✗ | ✓ † | N/A | ✗ | ✗ |
+| Amp | N/A | ✗ | ✓ | ✗ | ✗ ‡ | ✗ | ✗ | ✗ |
 | Kiro | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | OpenCode | N/A | ✗ | ✗ | ✗ | ✗ | ✗ | N/A | N/A |
-| Antigravity | N/A | N/A | ✓ | ✓ | ✓ | N/A | ✓ | ✓ |
+| Antigravity | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Codex | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Amazon Q | N/A | N/A | N/A | ✓ | N/A | ✗ | N/A | N/A |
 
 † OpenClaw has no opened-project enumeration: its project/workspace skills are found only at the fixed `~/.openclaw/workspace/skills`
+
+‡ Amp stores project/workspace skills at `.agents/skills` (and the `.claude/skills` compatibility path); only the user-scope `~/.config/agents/skills` is detected today, so project-scope skills are supported but not yet scanned.
 
 ## Quick Start
 
