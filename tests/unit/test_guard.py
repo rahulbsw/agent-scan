@@ -1536,9 +1536,9 @@ _DIFF_REMOVED = {
     "removed": {"OldEvent": [{"hooks": [{"type": "command", "command": "old-cmd"}]}]},
 }
 
-_DIFF_EMPTY = {"added": {}, "modified": {}, "removed": {}}
+_DIFF_EMPTY: dict[str, dict[str, list[dict[str, object]]]] = {"added": {}, "modified": {}, "removed": {}}
 
-_PREPARED = {"hooks": {"SessionStart": []}}
+_PREPARED: dict[str, dict[str, list[object]]] = {"hooks": {"SessionStart": []}}
 
 
 class TestInstallHooksOrchestration:

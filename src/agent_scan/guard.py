@@ -295,13 +295,17 @@ def _install_hooks(
 
     # Write config to disk
     if client == "claude":
+        assert prepared_config is not None
         config_written = _write_claude_config(prepared_config, config_path, preserved)
     elif client == "cursor":
+        assert prepared_config is not None
         config_written = _write_cursor_config(prepared_config, config_path, preserved)
     elif client == "codex":
         if _is_codex_requirements_toml(config_path):
+            assert prepared_content is not None
             config_written = _write_codex_managed_config(prepared_content, config_path)
         else:
+            assert prepared_config is not None
             config_written = _write_codex_config(prepared_config, config_path, preserved)
 
     if script_updated or config_written or minted:
