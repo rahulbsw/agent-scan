@@ -305,12 +305,13 @@ def _install_hooks(
         client, command, config_path
     )
 
+    first_install = not script_existed
     config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
-    first_install = not config_path.exists() or not script_existed
     run_test = first_install or minted or getattr(args, "test", False)
 
     if run_test and not _send_test_event(
         push_key, url, hook_client, dest_path,
+        first_install=first_install,
         config_changed=config_changed, hooks_diff=hooks_diff,
     ):
         if not script_existed:
@@ -343,8 +344,9 @@ def _prepare_claude_config(command: str, path: Path) -> tuple[dict, dict, int]:
     settings = _read_json_or_empty(path)
     old_hooks = settings.get("hooks", {})
 
-    preserved = _count_non_agent_scan_claude(old_hooks)
-    hooks = _filter_claude_hooks(old_hooks)
+    filtered = _filter_claude_hooks(old_hooks)
+    preserved = sum(len(filtered.get(event, [])) for event in CLAUDE_HOOK_EVENTS)
+    hooks = {}
 
     for event in CLAUDE_HOOK_EVENTS:
         entry = {"type": "command", "command": command}
@@ -353,7 +355,7 @@ def _prepare_claude_config(command: str, path: Path) -> tuple[dict, dict, int]:
         group: dict = {"hooks": [entry]}
         if event in CLAUDE_EVENTS_WITH_MATCHER:
             group["matcher"] = "*"
-        existing = hooks.get(event, [])
+        existing = list(filtered.get(event, []))
         existing.append(group)
         hooks[event] = existing
 
@@ -381,11 +383,12 @@ def _prepare_cursor_config(command: str, path: Path) -> tuple[dict, dict, int]:
         data["version"] = 1
     old_hooks = data.get("hooks", {})
 
-    preserved = _count_non_agent_scan_cursor(old_hooks)
-    hooks = _filter_cursor_hooks(old_hooks)
+    filtered = _filter_cursor_hooks(old_hooks)
+    preserved = sum(len(filtered.get(event, [])) for event in CURSOR_HOOK_EVENTS)
+    hooks = {}
 
     for event in CURSOR_HOOK_EVENTS:
-        existing = hooks.get(event, [])
+        existing = list(filtered.get(event, []))
         existing.append({"command": command})
         hooks[event] = existing
 
@@ -412,12 +415,13 @@ def _prepare_codex_config(command: str, path: Path) -> tuple[dict, dict, int]:
     data = _read_json_or_empty(path)
     old_hooks = data.get("hooks", {})
 
-    preserved = _count_non_agent_scan_claude(old_hooks)
-    hooks = _filter_claude_hooks(old_hooks)
+    filtered = _filter_claude_hooks(old_hooks)
+    preserved = sum(len(filtered.get(event, [])) for event in CODEX_HOOK_EVENTS)
+    hooks = {}
 
     for event in CODEX_HOOK_EVENTS:
         entry = {"type": "command", "command": command}
-        existing = hooks.get(event, [])
+        existing = list(filtered.get(event, []))
         existing.append({"hooks": [entry]})
         hooks[event] = existing
 
@@ -497,11 +501,13 @@ def _prepare_codex_managed_config(command: str, path: Path) -> tuple[str, dict]:
     old_event_set = set(old_events)
     new_event_set = set(CODEX_HOOK_EVENTS)
 
-    added = {e: [{"type": "command", "command": command}] for e in sorted(new_event_set - old_event_set)}
-    removed = {e: [{"type": "command", "command": old_cmd or ""}] for e in sorted(old_event_set - new_event_set)}
+    removed = {e: [{"type": "command", "command": command}] for e in sorted(new_event_set - old_event_set)}
+    added = {e: [{"type": "command", "command": old_cmd or ""}] for e in sorted(old_event_set - new_event_set)}
     modified = {}
     if old_cmd is not None and old_cmd != command:
-        modified = {e: [{"type": "command", "command": command}] for e in sorted(old_event_set & new_event_set)}
+        expected = [{"type": "command", "command": command}]
+        actual = [{"type": "command", "command": old_cmd}]
+        modified = {e: {"expected_value": expected, "actual_value": actual} for e in sorted(old_event_set & new_event_set)}
 
     diff = {"added": added, "modified": modified, "removed": removed}
     return new_content, diff
@@ -862,6 +868,7 @@ def _send_test_event(
     hook_client: str,
     script_path: Path,
     *,
+    first_install: bool = False,
     config_changed: bool = False,
     hooks_diff: dict | None = None,
 ) -> bool:
@@ -873,11 +880,13 @@ def _send_test_event(
         payload_dict["session_id"] = "hooks-setup"
     else:
         payload_dict["conversation_id"] = "hooks-setup"
-    payload_dict["config_changed"] = config_changed
-    if hooks_diff:
-        payload_dict["added"] = hooks_diff.get("added", {})
-        payload_dict["modified"] = hooks_diff.get("modified", {})
-        payload_dict["removed"] = hooks_diff.get("removed", {})
+    payload_dict["first_install"] = first_install
+    if not first_install:
+        payload_dict["config_changed"] = config_changed
+        if hooks_diff:
+            payload_dict["added"] = hooks_diff.get("added", {})
+            payload_dict["modified"] = hooks_diff.get("modified", {})
+            payload_dict["removed"] = hooks_diff.get("removed", {})
     payload = json.dumps(payload_dict)
 
     if IS_WINDOWS:
@@ -930,22 +939,25 @@ def _send_test_event(
 
 
 def _compute_hooks_diff(old_hooks: dict, new_hooks: dict) -> dict:
-    """Compare two hooks dicts at the event-key level.
+    """Compare existing hooks (old) against expected hooks (new).
 
-    Returns {"added": {...}, "modified": {...}, "removed": {...}} where keys
-    are event names and values are the hook entries from new_hooks (or
-    old_hooks for removed).
+    The diff reflects what someone changed in the existing config relative to
+    what we expect:
+    - "removed": expected keys missing from the existing config
+    - "added": unexpected keys present in the existing config
+    - "modified": keys present in both but with different values
+      (each entry has "expected_value" and "actual_value")
     """
     added = {}
     modified = {}
     removed = {}
     for key in set(old_hooks) | set(new_hooks):
         if key not in old_hooks:
-            added[key] = new_hooks[key]
+            removed[key] = new_hooks[key]
         elif key not in new_hooks:
-            removed[key] = old_hooks[key]
+            added[key] = old_hooks[key]
         elif old_hooks[key] != new_hooks[key]:
-            modified[key] = new_hooks[key]
+            modified[key] = {"expected_value": new_hooks[key], "actual_value": old_hooks[key]}
     return {"added": added, "modified": modified, "removed": removed}
 
 
@@ -973,22 +985,6 @@ def _filter_cursor_hooks(hooks: dict) -> dict:
     return result
 
 
-def _count_non_agent_scan_claude(hooks: dict) -> int:
-    n = 0
-    for groups in hooks.values():
-        for g in groups:
-            if not any(_is_agent_scan_command(h.get("command", "")) for h in g.get("hooks", [])):
-                n += 1
-    return n
-
-
-def _count_non_agent_scan_cursor(hooks: dict) -> int:
-    n = 0
-    for entries in hooks.values():
-        for e in entries:
-            if not _is_agent_scan_command(e.get("command", "")):
-                n += 1
-    return n
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ from agent_scan.guard import (
     CLAUDE_HOOK_EVENTS,
     CLAUDE_MANAGED_SETTINGS_PATH,
     CLAUDE_SETTINGS_PATH,
+    _compute_hooks_diff,
     CODEX_HOOK_EVENTS,
     CODEX_HOOKS_PATH,
     CODEX_MANAGED_HOOKS_PATH,
@@ -1126,7 +1127,7 @@ class TestCodexManagedRequirementsToml:
         path.write_text('command = "C:\\Users\\bad"\n')
         content, diff = _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path)
         assert "[features]" in content
-        assert diff["added"]
+        assert diff["removed"]
 
 
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")
@@ -1536,25 +1537,30 @@ class TestRunInstallCallsEnsureGuardEnabled:
 
 _G = "agent_scan.guard"
 
-_DIFF_CHANGED = {
-    "added": {"SessionStart": [{"hooks": [{"type": "command", "command": "cmd"}]}]},
+_DIFF_REMOVED = {
+    "added": {},
     "modified": {},
-    "removed": {},
+    "removed": {"SessionStart": [{"hooks": [{"type": "command", "command": "cmd"}]}]},
 }
 
 _DIFF_MODIFIED = {
     "added": {},
-    "modified": {"PreToolUse": [{"hooks": [{"type": "command", "command": "new-cmd"}]}]},
+    "modified": {
+        "PreToolUse": {
+            "expected_value": [{"hooks": [{"type": "command", "command": "new-cmd"}]}],
+            "actual_value": [{"hooks": [{"type": "command", "command": "old-cmd"}]}],
+        }
+    },
     "removed": {},
 }
 
-_DIFF_REMOVED = {
-    "added": {},
+_DIFF_ADDED = {
+    "added": {"OldEvent": [{"hooks": [{"type": "command", "command": "old-cmd"}]}]},
     "modified": {},
-    "removed": {"OldEvent": [{"hooks": [{"type": "command", "command": "old-cmd"}]}]},
+    "removed": {},
 }
 
-_DIFF_EMPTY: dict[str, dict[str, list[dict[str, object]]]] = {"added": {}, "modified": {}, "removed": {}}
+_DIFF_EMPTY: dict = {"added": {}, "modified": {}, "removed": {}}
 
 _PREPARED: dict[str, dict[str, list[object]]] = {"hooks": {"SessionStart": []}}
 
@@ -1573,10 +1579,10 @@ class TestInstallHooksOrchestration:
         targets = {
             "copy": (f"{_G}._copy_hook_script", (dest, True, False)),
             "build": (f"{_G}._build_hook_command", "test-cmd"),
-            "prep_claude": (f"{_G}._prepare_claude_config", (_PREPARED, _DIFF_CHANGED, 0)),
-            "prep_cursor": (f"{_G}._prepare_cursor_config", (_PREPARED, _DIFF_CHANGED, 0)),
-            "prep_codex": (f"{_G}._prepare_codex_config", (_PREPARED, _DIFF_CHANGED, 0)),
-            "prep_codex_managed": (f"{_G}._prepare_codex_managed_config", ("toml-content", _DIFF_CHANGED)),
+            "prep_claude": (f"{_G}._prepare_claude_config", (_PREPARED, _DIFF_REMOVED, 0)),
+            "prep_cursor": (f"{_G}._prepare_cursor_config", (_PREPARED, _DIFF_REMOVED, 0)),
+            "prep_codex": (f"{_G}._prepare_codex_config", (_PREPARED, _DIFF_REMOVED, 0)),
+            "prep_codex_managed": (f"{_G}._prepare_codex_managed_config", ("toml-content", _DIFF_REMOVED)),
             "is_toml": (f"{_G}._is_codex_requirements_toml", False),
             "test_event": (f"{_G}._send_test_event", True),
             "write_claude": (f"{_G}._write_claude_config", True),
@@ -1657,27 +1663,27 @@ class TestInstallHooksOrchestration:
     # ---------------------------------------------------------------
 
     def test_config_changed_true_when_additions(self, ctx, tmp_path):
-        ctx["prep_claude"].return_value = (_PREPARED, _DIFF_CHANGED, 0)
-        self._call(tmp_path)
+        ctx["prep_claude"].return_value = (_PREPARED, _DIFF_REMOVED, 0)
+        self._call(tmp_path, minted=True, config_exists=True)
         ctx["test_event"].assert_called_once()
         _, kwargs = ctx["test_event"].call_args
         assert kwargs["config_changed"] is True
 
     def test_config_changed_true_when_modifications(self, ctx, tmp_path):
         ctx["prep_claude"].return_value = (_PREPARED, _DIFF_MODIFIED, 0)
-        self._call(tmp_path)
+        self._call(tmp_path, minted=True, config_exists=True)
         _, kwargs = ctx["test_event"].call_args
         assert kwargs["config_changed"] is True
 
     def test_config_changed_true_when_removals(self, ctx, tmp_path):
-        ctx["prep_claude"].return_value = (_PREPARED, _DIFF_REMOVED, 0)
-        self._call(tmp_path)
+        ctx["prep_claude"].return_value = (_PREPARED, _DIFF_ADDED, 0)
+        self._call(tmp_path, minted=True, config_exists=True)
         _, kwargs = ctx["test_event"].call_args
         assert kwargs["config_changed"] is True
 
     def test_config_changed_false_when_diff_empty(self, ctx, tmp_path):
         ctx["prep_claude"].return_value = (_PREPARED, _DIFF_EMPTY, 0)
-        self._call(tmp_path)
+        self._call(tmp_path, minted=True, config_exists=True)
         _, kwargs = ctx["test_event"].call_args
         assert kwargs["config_changed"] is False
 
@@ -1685,16 +1691,13 @@ class TestInstallHooksOrchestration:
     # Test event: send conditions
     # ---------------------------------------------------------------
 
-    def test_test_event_sent_when_config_file_missing(self, ctx, tmp_path):
-        """first_install=True because config_path does not exist."""
-        self._call(tmp_path, config_exists=False)
-        ctx["test_event"].assert_called_once()
-
     def test_test_event_sent_when_script_new(self, ctx, tmp_path):
         """first_install=True because script did not exist prior."""
         ctx["copy"].return_value = (ctx["dest"], False, True)
         self._call(tmp_path, config_exists=True)
         ctx["test_event"].assert_called_once()
+        _, kwargs = ctx["test_event"].call_args
+        assert kwargs["first_install"] is True
 
     def test_test_event_sent_when_minted(self, ctx, tmp_path):
         self._call(tmp_path, minted=True, config_exists=True)
@@ -1714,27 +1717,44 @@ class TestInstallHooksOrchestration:
     # ---------------------------------------------------------------
 
     def test_test_event_receives_diff(self, ctx, tmp_path):
-        ctx["prep_claude"].return_value = (_PREPARED, _DIFF_CHANGED, 0)
+        ctx["prep_claude"].return_value = (_PREPARED, _DIFF_REMOVED, 0)
+        ctx["copy"].return_value = (ctx["dest"], False, True)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
             "https://api.snyk.io",
             "claude-code",
             ctx["dest"],
+            first_install=True,
             config_changed=True,
-            hooks_diff=_DIFF_CHANGED,
+            hooks_diff=_DIFF_REMOVED,
         )
 
     def test_test_event_receives_empty_diff(self, ctx, tmp_path):
         ctx["prep_claude"].return_value = (_PREPARED, _DIFF_EMPTY, 0)
+        ctx["copy"].return_value = (ctx["dest"], False, True)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
             "https://api.snyk.io",
             "claude-code",
             ctx["dest"],
+            first_install=True,
             config_changed=False,
             hooks_diff=_DIFF_EMPTY,
+        )
+
+    def test_test_event_not_first_install(self, ctx, tmp_path):
+        ctx["prep_claude"].return_value = (_PREPARED, _DIFF_REMOVED, 0)
+        self._call(tmp_path, minted=True, config_exists=True)
+        ctx["test_event"].assert_called_once_with(
+            "pk-test",
+            "https://api.snyk.io",
+            "claude-code",
+            ctx["dest"],
+            first_install=False,
+            config_changed=True,
+            hooks_diff=_DIFF_REMOVED,
         )
 
     # ---------------------------------------------------------------
@@ -1744,12 +1764,12 @@ class TestInstallHooksOrchestration:
     def test_test_event_failure_raises_system_exit(self, ctx, tmp_path):
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
-            self._call(tmp_path)
+            self._call(tmp_path, minted=True, config_exists=True)
 
     def test_test_event_failure_revokes_when_minted(self, ctx, tmp_path):
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
-            self._call(tmp_path, minted=True)
+            self._call(tmp_path, minted=True, config_exists=True)
         ctx["revoke"].assert_called_once_with(
             "https://api.snyk.io",
             "tid-1",
@@ -1758,9 +1778,10 @@ class TestInstallHooksOrchestration:
         )
 
     def test_test_event_failure_no_revoke_when_not_minted(self, ctx, tmp_path):
+        ctx["copy"].return_value = (ctx["dest"], False, True)
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
-            self._call(tmp_path, minted=False)
+            self._call(tmp_path, minted=False, config_exists=True)
         ctx["revoke"].assert_not_called()
 
     def test_test_event_failure_cleans_new_script(self, ctx, tmp_path):
@@ -1774,13 +1795,13 @@ class TestInstallHooksOrchestration:
         ctx["copy"].return_value = (ctx["dest"], True, False)
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
-            self._call(tmp_path)
+            self._call(tmp_path, minted=True, config_exists=True)
         ctx["dest"].unlink.assert_not_called()
 
     def test_test_event_failure_does_not_write_config(self, ctx, tmp_path):
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
-            self._call(tmp_path)
+            self._call(tmp_path, minted=True, config_exists=True)
         ctx["write_claude"].assert_not_called()
         ctx["write_cursor"].assert_not_called()
         ctx["write_codex"].assert_not_called()
@@ -1792,25 +1813,25 @@ class TestInstallHooksOrchestration:
 
     def test_write_receives_prepared_claude_config(self, ctx, tmp_path):
         prepared = {"hooks": {"PreToolUse": [{"test": True}]}}
-        ctx["prep_claude"].return_value = (prepared, _DIFF_CHANGED, 2)
+        ctx["prep_claude"].return_value = (prepared, _DIFF_REMOVED, 2)
         config = self._call(tmp_path, config_exists=True)
         ctx["write_claude"].assert_called_once_with(prepared, config, 2)
 
     def test_write_receives_prepared_cursor_config(self, ctx, tmp_path):
         prepared = {"version": 1, "hooks": {"stop": [{"command": "x"}]}}
-        ctx["prep_cursor"].return_value = (prepared, _DIFF_CHANGED, 1)
+        ctx["prep_cursor"].return_value = (prepared, _DIFF_REMOVED, 1)
         config = self._call(tmp_path, client="cursor", hook_client="cursor", config_exists=True)
         ctx["write_cursor"].assert_called_once_with(prepared, config, 1)
 
     def test_write_receives_prepared_codex_config(self, ctx, tmp_path):
         prepared = {"hooks": {"Stop": [{"hooks": []}]}}
-        ctx["prep_codex"].return_value = (prepared, _DIFF_CHANGED, 3)
+        ctx["prep_codex"].return_value = (prepared, _DIFF_REMOVED, 3)
         config = self._call(tmp_path, client="codex", hook_client="codex", config_exists=True)
         ctx["write_codex"].assert_called_once_with(prepared, config, 3)
 
     def test_write_receives_prepared_codex_managed_content(self, ctx, tmp_path):
         ctx["is_toml"].return_value = True
-        ctx["prep_codex_managed"].return_value = ("toml-data-xyz", _DIFF_CHANGED)
+        ctx["prep_codex_managed"].return_value = ("toml-data-xyz", _DIFF_REMOVED)
         config = self._call(tmp_path, client="codex", hook_client="codex", config_exists=True)
         ctx["write_codex_managed"].assert_called_once_with("toml-data-xyz", config)
 
@@ -1844,3 +1865,166 @@ class TestInstallHooksOrchestration:
         ctx["write_claude"].return_value = False
         self._call(tmp_path, minted=False, config_exists=True)
         assert any("up to date" in m for m in self._print_messages(ctx))
+
+
+# ===================================================================
+# _compute_hooks_diff
+# ===================================================================
+
+
+class TestComputeHooksDiff:
+    def test_both_empty(self):
+        result = _compute_hooks_diff({}, {})
+        assert result == {"added": {}, "modified": {}, "removed": {}}
+
+    def test_identical(self):
+        hooks = {"PreToolUse": [{"hooks": [{"type": "command", "command": "cmd"}]}]}
+        result = _compute_hooks_diff(hooks, hooks)
+        assert result == {"added": {}, "modified": {}, "removed": {}}
+
+    def test_key_only_in_new_is_removed(self):
+        old = {}
+        new = {"PreToolUse": [{"hooks": [{"type": "command", "command": "cmd"}]}]}
+        result = _compute_hooks_diff(old, new)
+        assert result["removed"] == new
+        assert result["added"] == {}
+        assert result["modified"] == {}
+
+    def test_key_only_in_old_is_added(self):
+        old = {"Stop": [{"hooks": [{"type": "command", "command": "old-cmd"}]}]}
+        new = {}
+        result = _compute_hooks_diff(old, new)
+        assert result["added"] == old
+        assert result["removed"] == {}
+        assert result["modified"] == {}
+
+    def test_same_key_different_value_is_modified(self):
+        old_val = [{"hooks": [{"type": "command", "command": "old-cmd"}]}]
+        new_val = [{"hooks": [{"type": "command", "command": "new-cmd"}]}]
+        result = _compute_hooks_diff({"PreToolUse": old_val}, {"PreToolUse": new_val})
+        assert result["modified"] == {
+            "PreToolUse": {"expected_value": new_val, "actual_value": old_val}
+        }
+        assert result["added"] == {}
+        assert result["removed"] == {}
+
+    def test_multiple_removed(self):
+        new = {
+            "PreToolUse": [{"hooks": [{"command": "a"}]}],
+            "Stop": [{"hooks": [{"command": "b"}]}],
+        }
+        result = _compute_hooks_diff({}, new)
+        assert set(result["removed"]) == {"PreToolUse", "Stop"}
+
+    def test_multiple_added(self):
+        old = {
+            "PreToolUse": [{"hooks": [{"command": "a"}]}],
+            "Stop": [{"hooks": [{"command": "b"}]}],
+        }
+        result = _compute_hooks_diff(old, {})
+        assert set(result["added"]) == {"PreToolUse", "Stop"}
+
+    def test_added_removed_and_modified_combined(self):
+        old_val = [{"hooks": [{"command": "old"}]}]
+        new_val = [{"hooks": [{"command": "new"}]}]
+        old = {
+            "PreToolUse": old_val,
+            "ExtraEvent": [{"hooks": [{"command": "extra"}]}],
+        }
+        new = {
+            "PreToolUse": new_val,
+            "Stop": [{"hooks": [{"command": "stop"}]}],
+        }
+        result = _compute_hooks_diff(old, new)
+        assert result["added"] == {"ExtraEvent": [{"hooks": [{"command": "extra"}]}]}
+        assert result["removed"] == {"Stop": [{"hooks": [{"command": "stop"}]}]}
+        assert result["modified"] == {
+            "PreToolUse": {"expected_value": new_val, "actual_value": old_val}
+        }
+
+    def test_unchanged_keys_excluded_from_all_categories(self):
+        shared = [{"hooks": [{"command": "same"}]}]
+        old = {"PreToolUse": shared, "Extra": [{"hooks": [{"command": "x"}]}]}
+        new = {"PreToolUse": shared, "Stop": [{"hooks": [{"command": "s"}]}]}
+        result = _compute_hooks_diff(old, new)
+        assert "PreToolUse" not in result["added"]
+        assert "PreToolUse" not in result["removed"]
+        assert "PreToolUse" not in result["modified"]
+
+    def test_old_empty_new_has_keys(self):
+        new = {"A": [1], "B": [2], "C": [3]}
+        result = _compute_hooks_diff({}, new)
+        assert result["removed"] == new
+        assert result["added"] == {}
+        assert result["modified"] == {}
+
+    def test_new_empty_old_has_keys(self):
+        old = {"A": [1], "B": [2]}
+        result = _compute_hooks_diff(old, {})
+        assert result["added"] == old
+        assert result["removed"] == {}
+        assert result["modified"] == {}
+
+    def test_value_type_difference_is_modified(self):
+        result = _compute_hooks_diff({"K": "string"}, {"K": ["list"]})
+        assert result["modified"] == {
+            "K": {"expected_value": ["list"], "actual_value": "string"}
+        }
+
+    def test_nested_value_difference_is_modified(self):
+        old_val = [{"hooks": [{"type": "command", "command": "cmd", "timeout": 10}]}]
+        new_val = [{"hooks": [{"type": "command", "command": "cmd", "timeout": 30}]}]
+        result = _compute_hooks_diff({"PreToolUse": old_val}, {"PreToolUse": new_val})
+        assert "PreToolUse" in result["modified"]
+        assert result["modified"]["PreToolUse"]["expected_value"] == new_val
+        assert result["modified"]["PreToolUse"]["actual_value"] == old_val
+
+
+# ===================================================================
+# Prepare functions: unknown-event hooks must not leak into new config
+# ===================================================================
+
+
+class TestPrepareDropsUnknownEvents:
+    """Hooks on events not in *_HOOK_EVENTS must be excluded from the
+    prepared config so the diff surfaces them as 'added' (unexpected)."""
+
+    def test_claude_drops_unknown_event_non_agent_scan(self, tmp_path):
+        path = tmp_path / "settings.json"
+        _write(path, {"hooks": {"UnknownEvent": [_claude_group(OTHER_CMD)]}})
+        settings, diff, preserved = _prepare_claude_config(AGENT_SCAN_CMD, path)
+        assert "UnknownEvent" not in settings["hooks"]
+        assert "UnknownEvent" in diff["added"]
+        assert preserved == 0
+
+    def test_claude_drops_unknown_event_agent_scan(self, tmp_path):
+        path = tmp_path / "settings.json"
+        _write(path, {"hooks": {"UnknownEvent": [_claude_group(AGENT_SCAN_CMD)]}})
+        settings, _, _ = _prepare_claude_config(AGENT_SCAN_CMD, path)
+        assert "UnknownEvent" not in settings["hooks"]
+
+    def test_claude_preserves_known_event_other_hooks(self, tmp_path):
+        path = tmp_path / "settings.json"
+        _write(path, {"hooks": {"PreToolUse": [_claude_group(OTHER_CMD, "*")]}})
+        settings, _, preserved = _prepare_claude_config(AGENT_SCAN_CMD, path)
+        commands = [
+            h["command"] for g in settings["hooks"]["PreToolUse"] for h in g.get("hooks", [])
+        ]
+        assert OTHER_CMD in commands
+        assert preserved == 1
+
+    def test_cursor_drops_unknown_event(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(path, {"version": 1, "hooks": {"unknownEvent": [_cursor_entry(CURSOR_OTHER_CMD)]}})
+        data, diff, preserved = _prepare_cursor_config(CURSOR_AGENT_SCAN_CMD, path)
+        assert "unknownEvent" not in data["hooks"]
+        assert "unknownEvent" in diff["added"]
+        assert preserved == 0
+
+    def test_codex_drops_unknown_event(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(path, {"hooks": {"UnknownEvent": [_claude_group(OTHER_CMD)]}})
+        data, diff, preserved = _prepare_codex_config(CODEX_AGENT_SCAN_CMD, path)
+        assert "UnknownEvent" not in data["hooks"]
+        assert "UnknownEvent" in diff["added"]
+        assert preserved == 0
