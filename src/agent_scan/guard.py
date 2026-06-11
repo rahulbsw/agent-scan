@@ -238,6 +238,53 @@ def _run_install(args) -> None:
         raise
 
 
+def _prepare_client_config(
+    client: str, command: str, config_path: Path
+) -> tuple[dict | None, str | None, dict, int]:
+    """Dispatch to the client-specific config preparation function.
+
+    Returns (prepared_config, prepared_content, hooks_diff, preserved).
+    """
+    prepared_content: str | None = None
+    prepared_config: dict | None = None
+    preserved = 0
+    if client == "claude":
+        prepared_config, hooks_diff, preserved = _prepare_claude_config(command, config_path)
+    elif client == "cursor":
+        prepared_config, hooks_diff, preserved = _prepare_cursor_config(command, config_path)
+    elif client == "codex":
+        if _is_codex_requirements_toml(config_path):
+            prepared_content, hooks_diff = _prepare_codex_managed_config(command, config_path)
+        else:
+            prepared_config, hooks_diff, preserved = _prepare_codex_config(command, config_path)
+    else:
+        raise ValueError(f"Unknown client: {client}")
+    return prepared_config, prepared_content, hooks_diff, preserved
+
+
+def _write_client_config(
+    client: str,
+    config_path: Path,
+    prepared_config: dict | None,
+    prepared_content: str | None,
+    preserved: int,
+) -> bool:
+    """Dispatch to the client-specific config writing function."""
+    if client == "claude":
+        assert prepared_config is not None
+        return _write_claude_config(prepared_config, config_path, preserved)
+    if client == "cursor":
+        assert prepared_config is not None
+        return _write_cursor_config(prepared_config, config_path, preserved)
+    if client == "codex":
+        if _is_codex_requirements_toml(config_path):
+            assert prepared_content is not None
+            return _write_codex_managed_config(prepared_content, config_path)
+        assert prepared_config is not None
+        return _write_codex_config(prepared_config, config_path, preserved)
+    raise ValueError(f"Unknown client: {client}")
+
+
 def _install_hooks(
     args,
     client: str,
@@ -252,61 +299,30 @@ def _install_hooks(
     snyk_token: str,
 ) -> None:
     """Post-mint install steps.  Extracted so _run_install can revoke on failure."""
-    # Copy hook script first so we can use it for the test event
     dest_path, script_existed, script_updated = _copy_hook_script(client, config_path)
-
-    # Build command and detect config changes before writing
     command = _build_hook_command(push_key, url, dest_path, hook_client, tenant_id=tenant_id)
-
-    prepared_content: str | None = None
-    prepared_config: dict | None = None
-    preserved = 0
-    if client == "claude":
-        prepared_config, hooks_diff, preserved = _prepare_claude_config(command, config_path)
-    elif client == "cursor":
-        prepared_config, hooks_diff, preserved = _prepare_cursor_config(command, config_path)
-    elif client == "codex":
-        if _is_codex_requirements_toml(config_path):
-            prepared_content, hooks_diff = _prepare_codex_managed_config(command, config_path)
-        else:
-            prepared_config, hooks_diff, preserved = _prepare_codex_config(command, config_path)
+    prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
+        client, command, config_path
+    )
 
     config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
-
     first_install = not config_path.exists() or not script_existed
     run_test = first_install or minted or getattr(args, "test", False)
 
-    # Verify connectivity by invoking the actual hook script
     if run_test and not _send_test_event(
-        push_key,
-        url,
-        hook_client,
-        dest_path,
-        config_changed=config_changed,
-        hooks_diff=hooks_diff,
+        push_key, url, hook_client, dest_path,
+        config_changed=config_changed, hooks_diff=hooks_diff,
     ):
-        # Clean up copied script only if it didn't exist before
         if not script_existed:
             dest_path.unlink(missing_ok=True)
         if minted:
             _revoke_after_failure(url, tenant_id, snyk_token, push_key)
-        rich.print("[bold red]Aborting install — test event failed.[/bold red]")
+        rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
         raise SystemExit(1)
 
-    # Write config to disk
-    if client == "claude":
-        assert prepared_config is not None
-        config_written = _write_claude_config(prepared_config, config_path, preserved)
-    elif client == "cursor":
-        assert prepared_config is not None
-        config_written = _write_cursor_config(prepared_config, config_path, preserved)
-    elif client == "codex":
-        if _is_codex_requirements_toml(config_path):
-            assert prepared_content is not None
-            config_written = _write_codex_managed_config(prepared_content, config_path)
-        else:
-            assert prepared_config is not None
-            config_written = _write_codex_config(prepared_config, config_path, preserved)
+    config_written = _write_client_config(
+        client, config_path, prepared_config, prepared_content, preserved
+    )
 
     if script_updated or config_written or minted:
         rich.print(f"[green]\u2713[/green]  {scope.title()} hooks installed for [bold]{label}[/bold]")
