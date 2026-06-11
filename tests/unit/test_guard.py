@@ -1115,8 +1115,8 @@ class TestCodexManagedRequirementsToml:
     def test_parse_backslash_path_no_unicode_escape(self):
         toml = (
             "[[hooks.PreToolUse.hooks]]\n"
-            "type = \"command\"\n"
-            'command = "PUSH_KEY=\'pk\' bash \'C:\\\\Users\\\\me\\\\hooks\\\\snyk-agent-guard.sh\' --client codex"\n'
+            'type = "command"\n'
+            "command = \"PUSH_KEY='pk' bash 'C:\\\\Users\\\\me\\\\hooks\\\\snyk-agent-guard.sh' --client codex\"\n"
         )
         events, cmd = _parse_codex_requirements_toml(toml)
         assert "PreToolUse" in events
@@ -1902,9 +1902,7 @@ class TestComputeHooksDiff:
         old_val = [{"hooks": [{"type": "command", "command": "old-cmd"}]}]
         new_val = [{"hooks": [{"type": "command", "command": "new-cmd"}]}]
         result = _compute_hooks_diff({"PreToolUse": old_val}, {"PreToolUse": new_val})
-        assert result["modified"] == {
-            "PreToolUse": {"expected_value": new_val, "actual_value": old_val}
-        }
+        assert result["modified"] == {"PreToolUse": {"expected_value": new_val, "actual_value": old_val}}
         assert result["added"] == {}
         assert result["removed"] == {}
 
@@ -1938,9 +1936,7 @@ class TestComputeHooksDiff:
         result = _compute_hooks_diff(old, new)
         assert result["added"] == {"ExtraEvent": [{"hooks": [{"command": "extra"}]}]}
         assert result["removed"] == {"Stop": [{"hooks": [{"command": "stop"}]}]}
-        assert result["modified"] == {
-            "PreToolUse": {"expected_value": new_val, "actual_value": old_val}
-        }
+        assert result["modified"] == {"PreToolUse": {"expected_value": new_val, "actual_value": old_val}}
 
     def test_unchanged_keys_excluded_from_all_categories(self):
         shared = [{"hooks": [{"command": "same"}]}]
@@ -1967,9 +1963,7 @@ class TestComputeHooksDiff:
 
     def test_value_type_difference_is_modified(self):
         result = _compute_hooks_diff({"K": "string"}, {"K": ["list"]})
-        assert result["modified"] == {
-            "K": {"expected_value": ["list"], "actual_value": "string"}
-        }
+        assert result["modified"] == {"K": {"expected_value": ["list"], "actual_value": "string"}}
 
     def test_nested_value_difference_is_modified(self):
         old_val = [{"hooks": [{"type": "command", "command": "cmd", "timeout": 10}]}]
@@ -2007,9 +2001,7 @@ class TestPrepareDropsUnknownEvents:
         path = tmp_path / "settings.json"
         _write(path, {"hooks": {"PreToolUse": [_claude_group(OTHER_CMD, "*")]}})
         settings, _, preserved = _prepare_claude_config(AGENT_SCAN_CMD, path)
-        commands = [
-            h["command"] for g in settings["hooks"]["PreToolUse"] for h in g.get("hooks", [])
-        ]
+        commands = [h["command"] for g in settings["hooks"]["PreToolUse"] for h in g.get("hooks", [])]
         assert OTHER_CMD in commands
         assert preserved == 1
 

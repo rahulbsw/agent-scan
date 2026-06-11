@@ -238,9 +238,7 @@ def _run_install(args) -> None:
         raise
 
 
-def _prepare_client_config(
-    client: str, command: str, config_path: Path
-) -> tuple[dict | None, str | None, dict, int]:
+def _prepare_client_config(client: str, command: str, config_path: Path) -> tuple[dict | None, str | None, dict, int]:
     """Dispatch to the client-specific config preparation function.
 
     Returns (prepared_config, prepared_content, hooks_diff, preserved).
@@ -301,18 +299,20 @@ def _install_hooks(
     """Post-mint install steps.  Extracted so _run_install can revoke on failure."""
     dest_path, script_existed, script_updated = _copy_hook_script(client, config_path)
     command = _build_hook_command(push_key, url, dest_path, hook_client, tenant_id=tenant_id)
-    prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
-        client, command, config_path
-    )
+    prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(client, command, config_path)
 
     first_install = not script_existed
     config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
     run_test = first_install or minted or getattr(args, "test", False)
 
     if run_test and not _send_test_event(
-        push_key, url, hook_client, dest_path,
+        push_key,
+        url,
+        hook_client,
+        dest_path,
         first_install=first_install,
-        config_changed=config_changed, hooks_diff=hooks_diff,
+        config_changed=config_changed,
+        hooks_diff=hooks_diff,
     ):
         if not script_existed:
             dest_path.unlink(missing_ok=True)
@@ -321,9 +321,7 @@ def _install_hooks(
         rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
         raise SystemExit(1)
 
-    config_written = _write_client_config(
-        client, config_path, prepared_config, prepared_content, preserved
-    )
+    config_written = _write_client_config(client, config_path, prepared_config, prepared_content, preserved)
 
     if script_updated or config_written or minted:
         rich.print(f"[green]\u2713[/green]  {scope.title()} hooks installed for [bold]{label}[/bold]")
@@ -507,7 +505,9 @@ def _prepare_codex_managed_config(command: str, path: Path) -> tuple[str, dict]:
     if old_cmd is not None and old_cmd != command:
         expected = [{"type": "command", "command": command}]
         actual = [{"type": "command", "command": old_cmd}]
-        modified = {e: {"expected_value": expected, "actual_value": actual} for e in sorted(old_event_set & new_event_set)}
+        modified = {
+            e: {"expected_value": expected, "actual_value": actual} for e in sorted(old_event_set & new_event_set)
+        }
 
     diff = {"added": added, "modified": modified, "removed": removed}
     return new_content, diff
@@ -983,8 +983,6 @@ def _filter_cursor_hooks(hooks: dict) -> dict:
         if filtered:
             result[event] = filtered
     return result
-
-
 
 
 # ---------------------------------------------------------------------------
