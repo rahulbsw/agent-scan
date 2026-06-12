@@ -22,6 +22,7 @@ from agent_scan.pushkeys import (
     mint_push_key,
     revoke_push_key,
 )
+from agent_scan.redact import redact_data
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -31,6 +32,11 @@ IS_WINDOWS = sys.platform == "win32"
 
 DEFAULT_REMOTE_URL = "https://api.snyk.io"
 DETECTION_MARKER = "snyk-agent-guard"
+_UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_PUSH_KEY_REDACT_PATTERNS = [
+    re.compile(rf"PUSH_KEY='({_UUID_RE})'", re.IGNORECASE),
+    re.compile(rf"-PushKey\s+'({_UUID_RE})'", re.IGNORECASE),
+]
 _PERMISSION_DENIED = "__permission_denied__"
 
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
@@ -886,6 +892,7 @@ def _send_test_event(
             payload_dict["added"] = hooks_diff.get("added", {})
             payload_dict["modified"] = hooks_diff.get("modified", {})
             payload_dict["removed"] = hooks_diff.get("removed", {})
+    redact_data(payload_dict, _PUSH_KEY_REDACT_PATTERNS)
     payload = json.dumps(payload_dict)
 
     if IS_WINDOWS:
