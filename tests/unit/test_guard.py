@@ -2107,20 +2107,22 @@ class TestComputeHooksDiff:
 
 
 # ===================================================================
-# Prepare functions: unknown-event hooks must not leak into new config
+# Prepare functions: custom hooks on unknown events must be preserved
 # ===================================================================
 
 
-class TestPrepareDropsUnknownEvents:
-    """Hooks on events not in *_HOOK_EVENTS must be excluded from the
-    prepared config so the diff surfaces them as 'added' (unexpected)."""
+class TestPrepareHandlesUnknownEvents:
+    """Custom (non-agent-scan) hooks on events not in *_HOOK_EVENTS must
+    be preserved in the prepared config.  Agent-scan hooks on unknown
+    events are still dropped (filtered out)."""
 
-    def test_claude_drops_unknown_event_non_agent_scan(self, tmp_path):
+    def test_claude_preserves_unknown_event_non_agent_scan(self, tmp_path):
         path = tmp_path / "settings.json"
         _write(path, {"hooks": {"UnknownEvent": [_claude_group(OTHER_CMD)]}})
         settings, diff, preserved = _prepare_claude_config(AGENT_SCAN_CMD, path)
-        assert "UnknownEvent" not in settings["hooks"]
-        assert "UnknownEvent" in diff["added"]
+        assert "UnknownEvent" in settings["hooks"]
+        assert settings["hooks"]["UnknownEvent"] == [_claude_group(OTHER_CMD)]
+        assert "UnknownEvent" not in diff["added"]
         assert preserved == 0
 
     def test_claude_drops_unknown_event_agent_scan(self, tmp_path):
@@ -2137,18 +2139,182 @@ class TestPrepareDropsUnknownEvents:
         assert OTHER_CMD in commands
         assert preserved == 1
 
-    def test_cursor_drops_unknown_event(self, tmp_path):
+    def test_cursor_preserves_unknown_event(self, tmp_path):
         path = tmp_path / "hooks.json"
         _write(path, {"version": 1, "hooks": {"unknownEvent": [_cursor_entry(CURSOR_OTHER_CMD)]}})
         data, diff, preserved = _prepare_cursor_config(CURSOR_AGENT_SCAN_CMD, path)
-        assert "unknownEvent" not in data["hooks"]
-        assert "unknownEvent" in diff["added"]
+        assert "unknownEvent" in data["hooks"]
+        assert data["hooks"]["unknownEvent"] == [_cursor_entry(CURSOR_OTHER_CMD)]
+        assert "unknownEvent" not in diff["added"]
         assert preserved == 0
 
-    def test_codex_drops_unknown_event(self, tmp_path):
+    def test_codex_preserves_unknown_event(self, tmp_path):
         path = tmp_path / "hooks.json"
         _write(path, {"hooks": {"UnknownEvent": [_claude_group(OTHER_CMD)]}})
         data, diff, preserved = _prepare_codex_config(CODEX_AGENT_SCAN_CMD, path)
-        assert "UnknownEvent" not in data["hooks"]
-        assert "UnknownEvent" in diff["added"]
+        assert "UnknownEvent" in data["hooks"]
+        assert data["hooks"]["UnknownEvent"] == [_claude_group(OTHER_CMD)]
+        assert "UnknownEvent" not in diff["added"]
         assert preserved == 0
+
+
+# ===================================================================
+# Install preserves custom hooks (known + unknown events)
+# ===================================================================
+
+
+class TestInstallPreservesCustomHooks:
+    """Installing agent-scan hooks must keep all custom (non-agent-scan)
+    hooks, on both known and unknown events."""
+
+    def test_claude_preserves_custom_hooks_on_known_and_unknown_events(self, tmp_path):
+        path = tmp_path / "settings.json"
+        _write(
+            path,
+            {
+                "hooks": {
+                    "PreToolUse": [_claude_group(OTHER_CMD, "*")],
+                    "CustomEvent": [_claude_group(OTHER_CMD)],
+                }
+            },
+        )
+        settings, _, preserved = _prepare_claude_config(AGENT_SCAN_CMD, path)
+        hooks = settings["hooks"]
+
+        commands_pre = [h["command"] for g in hooks["PreToolUse"] for h in g.get("hooks", [])]
+        assert OTHER_CMD in commands_pre
+        assert any(AGENT_SCAN_CMD in c for c in commands_pre)
+
+        assert "CustomEvent" in hooks
+        assert hooks["CustomEvent"] == [_claude_group(OTHER_CMD)]
+
+        assert preserved == 1
+
+    def test_cursor_preserves_custom_hooks_on_known_and_unknown_events(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(
+            path,
+            {
+                "version": 1,
+                "hooks": {
+                    "stop": [_cursor_entry(CURSOR_OTHER_CMD)],
+                    "customEvent": [_cursor_entry(CURSOR_OTHER_CMD)],
+                },
+            },
+        )
+        data, _, preserved = _prepare_cursor_config(CURSOR_AGENT_SCAN_CMD, path)
+        hooks = data["hooks"]
+
+        commands_stop = [e["command"] for e in hooks["stop"]]
+        assert CURSOR_OTHER_CMD in commands_stop
+        assert CURSOR_AGENT_SCAN_CMD in commands_stop
+
+        assert "customEvent" in hooks
+        assert hooks["customEvent"] == [_cursor_entry(CURSOR_OTHER_CMD)]
+
+        assert preserved == 1
+
+    def test_codex_preserves_custom_hooks_on_known_and_unknown_events(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(
+            path,
+            {
+                "hooks": {
+                    "PreToolUse": [_claude_group(OTHER_CMD)],
+                    "CustomEvent": [_claude_group(OTHER_CMD)],
+                }
+            },
+        )
+        data, _, preserved = _prepare_codex_config(CODEX_AGENT_SCAN_CMD, path)
+        hooks = data["hooks"]
+
+        commands_pre = [h["command"] for g in hooks["PreToolUse"] for h in g.get("hooks", [])]
+        assert OTHER_CMD in commands_pre
+
+        assert "CustomEvent" in hooks
+        assert hooks["CustomEvent"] == [_claude_group(OTHER_CMD)]
+
+        assert preserved == 1
+
+
+# ===================================================================
+# Uninstall preserves custom hooks (known + unknown events)
+# ===================================================================
+
+
+class TestUninstallPreservesCustomHooks:
+    """Uninstalling agent-scan hooks must keep all custom (non-agent-scan)
+    hooks, including those on events not in the agent-scan event list."""
+
+    def test_claude_uninstall_preserves_custom_hooks(self, tmp_path):
+        path = tmp_path / "settings.json"
+        _write(
+            path,
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        _claude_group(OTHER_CMD, "*"),
+                        _claude_group(AGENT_SCAN_CMD, "*"),
+                    ],
+                    "Stop": [_claude_group(AGENT_SCAN_CMD)],
+                    "CustomEvent": [_claude_group(OTHER_CMD)],
+                }
+            },
+        )
+        _uninstall_claude(path)
+
+        data = json.loads(path.read_text())
+        assert len(data["hooks"]["PreToolUse"]) == 1
+        assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == OTHER_CMD
+        assert "Stop" not in data["hooks"]
+        assert "CustomEvent" in data["hooks"]
+        assert data["hooks"]["CustomEvent"] == [_claude_group(OTHER_CMD)]
+
+    def test_cursor_uninstall_preserves_custom_hooks(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(
+            path,
+            {
+                "version": 1,
+                "hooks": {
+                    "stop": [
+                        _cursor_entry(CURSOR_OTHER_CMD),
+                        _cursor_entry(CURSOR_AGENT_SCAN_CMD),
+                    ],
+                    "sessionStart": [_cursor_entry(CURSOR_AGENT_SCAN_CMD)],
+                    "customEvent": [_cursor_entry(CURSOR_OTHER_CMD)],
+                },
+            },
+        )
+        _uninstall_cursor(path)
+
+        data = json.loads(path.read_text())
+        assert len(data["hooks"]["stop"]) == 1
+        assert data["hooks"]["stop"][0]["command"] == CURSOR_OTHER_CMD
+        assert "sessionStart" not in data["hooks"]
+        assert "customEvent" in data["hooks"]
+        assert data["hooks"]["customEvent"] == [_cursor_entry(CURSOR_OTHER_CMD)]
+
+    def test_codex_uninstall_preserves_custom_hooks(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(
+            path,
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        _claude_group(OTHER_CMD),
+                        _claude_group(CODEX_AGENT_SCAN_CMD),
+                    ],
+                    "Stop": [_claude_group(CODEX_AGENT_SCAN_CMD)],
+                    "CustomEvent": [_claude_group(OTHER_CMD)],
+                }
+            },
+        )
+        _uninstall_codex(path)
+
+        data = json.loads(path.read_text())
+        assert len(data["hooks"]["PreToolUse"]) == 1
+        assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == OTHER_CMD
+        assert "Stop" not in data["hooks"]
+        assert "CustomEvent" in data["hooks"]
+        assert data["hooks"]["CustomEvent"] == [_claude_group(OTHER_CMD)]

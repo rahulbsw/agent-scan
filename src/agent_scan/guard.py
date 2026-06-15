@@ -389,6 +389,10 @@ def _prepare_claude_config(command: str, path: Path) -> tuple[dict, dict, int]:
         existing.append(group)
         hooks[event] = existing
 
+    for event, groups in filtered.items():
+        if event not in hooks:
+            hooks[event] = groups
+
     settings["hooks"] = hooks
     diff = _compute_hooks_diff(old_hooks, hooks)
     return settings, diff, preserved
@@ -422,6 +426,10 @@ def _prepare_cursor_config(command: str, path: Path) -> tuple[dict, dict, int]:
         existing.append({"command": command})
         hooks[event] = existing
 
+    for event, entries in filtered.items():
+        if event not in hooks:
+            hooks[event] = entries
+
     data["hooks"] = hooks
     diff = _compute_hooks_diff(old_hooks, hooks)
     return data, diff, preserved
@@ -454,6 +462,10 @@ def _prepare_codex_config(command: str, path: Path) -> tuple[dict, dict, int]:
         existing = list(filtered.get(event, []))
         existing.append({"hooks": [entry]})
         hooks[event] = existing
+
+    for event, groups in filtered.items():
+        if event not in hooks:
+            hooks[event] = groups
 
     data["hooks"] = hooks
     diff = _compute_hooks_diff(old_hooks, hooks)
