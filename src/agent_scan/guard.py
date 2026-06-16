@@ -32,7 +32,10 @@ IS_WINDOWS = sys.platform == "win32"
 # ---------------------------------------------------------------------------
 
 DEFAULT_REMOTE_URL = "https://api.snyk.io"
-DETECTION_MARKER = "snyk-agent-guard"
+_DETECTION_RE = re.compile(
+    r"PUSH_KEY=.*snyk-agent-guard"
+    r"|snyk-agent-guard.*-PushKey\b"
+)
 _UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _PUSH_KEY_REDACT_PATTERNS = [
     re.compile(rf"PUSH_KEY='({_UUID_RE})'", re.IGNORECASE),
@@ -1000,8 +1003,22 @@ def _normalize_push_keys(value: object) -> object:
     return value
 
 
+def _extract_guard_hooks(entries: list) -> list:
+    """Extract only guard (agent-scan) hooks from a list of hook entries/groups."""
+    result = []
+    for item in entries:
+        if isinstance(item, dict) and "hooks" in item:
+            if any(_is_agent_scan_command(h.get("command", "")) for h in item.get("hooks", [])):
+                result.append(item)
+        elif isinstance(item, dict) and _is_agent_scan_command(item.get("command", "")):
+            result.append(item)
+    return result
+
+
 def _compute_hooks_diff(old_hooks: dict, new_hooks: dict) -> dict:
     """Compare existing hooks (old) against expected hooks (new).
+
+    Only guard (agent-scan) hooks are compared; customer hooks are ignored.
 
     The diff reflects what someone changed in the existing config relative to
     what we expect:
@@ -1016,23 +1033,28 @@ def _compute_hooks_diff(old_hooks: dict, new_hooks: dict) -> dict:
     modified = {}
     removed = {}
     for key in set(old_hooks) | set(new_hooks):
-        if key not in old_hooks:
-            removed[key] = copy.deepcopy(new_hooks[key])
-        elif key not in new_hooks:
-            added[key] = copy.deepcopy(old_hooks[key])
+        old_guard = _extract_guard_hooks(old_hooks.get(key, []) if isinstance(old_hooks.get(key), list) else [])
+        new_guard = _extract_guard_hooks(new_hooks.get(key, []) if isinstance(new_hooks.get(key), list) else [])
+
+        if not old_guard and not new_guard:
+            continue
+        if not old_guard and new_guard:
+            removed[key] = copy.deepcopy(new_guard)
+        elif old_guard and not new_guard:
+            added[key] = copy.deepcopy(old_guard)
         else:
-            old_norm = _normalize_push_keys(copy.deepcopy(old_hooks[key]))
-            new_norm = _normalize_push_keys(copy.deepcopy(new_hooks[key]))
+            old_norm = _normalize_push_keys(copy.deepcopy(old_guard))
+            new_norm = _normalize_push_keys(copy.deepcopy(new_guard))
             if old_norm != new_norm:
                 modified[key] = {
-                    "expected_value": copy.deepcopy(new_hooks[key]),
-                    "actual_value": copy.deepcopy(old_hooks[key]),
+                    "expected_value": copy.deepcopy(new_guard),
+                    "actual_value": copy.deepcopy(old_guard),
                 }
     return {"added": added, "modified": modified, "removed": removed}
 
 
 def _is_agent_scan_command(cmd: str) -> bool:
-    return DETECTION_MARKER in cmd
+    return bool(_DETECTION_RE.search(cmd))
 
 
 def _filter_claude_hooks(hooks: dict) -> dict:
