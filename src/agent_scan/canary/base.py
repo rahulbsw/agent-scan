@@ -53,10 +53,24 @@ class ExpectedItem:
     item was found in the right scope; use ``$HOME``/``$PROJECT`` placeholders (the executor normalizes
     detected paths to those)."""
 
-    kind: str  # "mcp" | "skill"
+    kind: str  # "mcp" | "skill" (commands surface as skill-type items too)
     name: str
     scope: str
     path_contains: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FixtureFile:
+    """One committed fixture to materialize into the project before the scan — for scopes no ``claude``
+    CLI writes (a project-local skill/command, or a hand-committed project ``.mcp.json``). ``src`` is a
+    path under the ``agent_scan.canary`` package (the committed ``test_projects/`` tree); ``dest`` is its
+    landing path under the dummy project. Pure data — the executor resolves ``src`` via
+    ``importlib.resources`` and copies it into ``project / dest`` (a directory is copied recursively).
+    Unlike a binary-written scope this cannot catch on-disk *format* drift (we author the file); it gives
+    the no-writer scopes end-to-end ``inspect`` coverage instead."""
+
+    src: str
+    dest: str
 
 
 class Scope(ABC):
@@ -64,12 +78,16 @@ class Scope(ABC):
 
     ``mirrors`` holds the discoverer method OBJECT(s) this scope tests (rename-proof — a rename breaks
     the reference at import; the coverage test compares method objects, no regex). ``commands`` returns
-    the seed commands; ``expected`` the items to detect. A :class:`Gap` overrides neither (no live writer)."""
+    the seed commands; ``files`` the committed fixtures to copy in (for scopes no CLI can write);
+    ``expected`` the items to detect. A :class:`Gap` overrides none (no live writer)."""
 
     label: str
     mirrors: tuple[Callable, ...]
 
     def commands(self, ctx: CanaryContext) -> list[SeedCommand]:
+        return []
+
+    def files(self) -> list[FixtureFile]:
         return []
 
     def expected(self) -> list[ExpectedItem]:
@@ -132,6 +150,27 @@ class PluginScope(Scope):
             for s in self.scopes
         ]
         return cmds
+
+    def expected(self) -> list[ExpectedItem]:
+        return list(self.expected_items)
+
+
+@dataclass(frozen=True)
+class FixtureScope(Scope):
+    """A scope whose on-disk state no ``claude`` CLI writes — a hand-authored project skill/command, or a
+    committed project ``.mcp.json``. Instead of seed commands, the executor copies ``sources`` (committed
+    fixtures) into the project, then ``inspect`` must detect ``expected_items``. This is the canary's one
+    deliberate fixture exception: a :class:`Gap` exists precisely because there is no binary to drive, so a
+    fixture is the only way to give the scope end-to-end coverage (it can't catch format drift, only
+    regressions in agent-scan's own discovery/normalization)."""
+
+    label: str
+    mirrors: tuple[Callable, ...]
+    sources: tuple[FixtureFile, ...]
+    expected_items: tuple[ExpectedItem, ...]
+
+    def files(self) -> list[FixtureFile]:
+        return list(self.sources)
 
     def expected(self) -> list[ExpectedItem]:
         return list(self.expected_items)

@@ -1,9 +1,11 @@
 """ClaudeCodeCanary — the live-test counterpart of :class:`ClaudeCodeDiscoverer`.
 
 One :class:`Scope` per scope-producing ``_discover_*`` method (``mirrors`` references the method object
-itself). The scopes a real ``claude`` can write are enforced (the three ``claude mcp add`` MCP scopes +
-the pinned plugin's MCP/skills); the rest are :class:`Gap` s — represented for fidelity (so the coverage
-test sees them covered) but never seeded or asserted, because no ``claude`` CLI creates them.
+itself). Three tiers: the scopes a real ``claude`` can write are driven live (the three ``claude mcp add``
+MCP scopes + the pinned plugin's MCP/skills); the project-local skill/command/server scopes that no CLI
+writes are :class:`FixtureScope` s (the executor copies a committed fixture into the project, then inspect
+must detect it); the rest are :class:`Gap` s — mirrored for fidelity (so the coverage test sees them
+covered) but never seeded or asserted, because neither a CLI nor a sensible fixture can drive them.
 """
 
 from __future__ import annotations
@@ -12,6 +14,8 @@ from agent_scan.agents.claude_code import ClaudeCodeDiscoverer
 from agent_scan.canary.base import (
     AgentCanary,
     ExpectedItem,
+    FixtureFile,
+    FixtureScope,
     Gap,
     LifecycleStep,
     McpScope,
@@ -28,6 +32,11 @@ CLAUDE_PLUGIN_MARKETPLACE = "claude-plugins-official"
 CLAUDE_PLUGIN_MARKETPLACE_REPO = "anthropics/claude-plugins-official"
 CLAUDE_PLUGIN = "discord"
 CLAUDE_PLUGIN_PIN_SHA = "66bca6b6f62e5023673feff699d9d99451ae9919"
+
+# Committed project fixtures, copied into the (registered) dummy project so inspect can detect the
+# project-local skill/command/server scopes no `claude` CLI writes. The src paths are relative to the
+# `agent_scan.canary` package (shipped via the wheel force-include); the executor resolves + copies them.
+_FIXTURE_ROOT = "test_projects/proj"
 
 _D = ClaudeCodeDiscoverer  # the scope methods this canary mirrors, by object reference
 
@@ -71,13 +80,57 @@ class ClaudeCodeCanary(AgentCanary):
                     ExpectedItem("skill", "configure", "skill/plugin", ("$HOME/.claude/plugins/", "skills/configure")),
                 ),
             ),
-            # --- Gaps: real discoverer scopes with no live writer (no claude CLI creates them); seeding
-            #     them would need a synthetic fixture, which this canary refuses. Mirrored so the coverage
-            #     test counts their method as covered; surfaced in the report as known coverage gaps.
+            # --- Fixture scopes: project-local skill/command/server that no `claude` CLI writes. The
+            #     executor copies the committed fixture into the (registered) project, then inspect must
+            #     detect it. Project skills/commands surface as skill-type items (path distinguishes the
+            #     scope). The server fixture shares <project>/.mcp.json with the mcp/project-file CLI write
+            #     — `claude mcp add` merges into the pre-written file, so both servers are detected.
+            FixtureScope(
+                "skill/project",
+                (_D._discover_project_skills,),
+                (
+                    FixtureFile(
+                        f"{_FIXTURE_ROOT}/.claude/skills/canary-project-skill", ".claude/skills/canary-project-skill"
+                    ),
+                ),
+                (
+                    ExpectedItem(
+                        "skill",
+                        "canary-project-skill",
+                        "skill/project",
+                        ("$PROJECT/.claude/skills/", "canary-project-skill"),
+                    ),
+                ),
+            ),
+            FixtureScope(
+                "command/project",
+                (_D._discover_project_commands,),
+                (
+                    FixtureFile(
+                        f"{_FIXTURE_ROOT}/.claude/commands/canary-project-command.md",
+                        ".claude/commands/canary-project-command.md",
+                    ),
+                ),
+                (
+                    ExpectedItem(
+                        "skill",
+                        "canary-project-command",
+                        "command/project",
+                        ("$PROJECT/.claude/commands/", "canary-project-command"),
+                    ),
+                ),
+            ),
+            FixtureScope(
+                "mcp/project-file-fixture",
+                (_D._discover_project_mcp_servers,),
+                (FixtureFile(f"{_FIXTURE_ROOT}/.mcp.json", ".mcp.json"),),
+                (ExpectedItem("mcp", "canary-project-fixture-mcp", "mcp/project-file-fixture"),),
+            ),
+            # --- Gaps: real discoverer scopes with no live writer (no claude CLI creates them) and no
+            #     sensible fixture. Mirrored so the coverage test counts their method as covered; surfaced
+            #     in the report as known coverage gaps.
             Gap("skill/global", (_D._discover_global_skill,), "no claude CLI creates a standalone personal skill"),
-            Gap("skill/project", (_D._discover_project_skills,), "no claude CLI creates a standalone project skill"),
             Gap("command/global", (_D._discover_global_commands,), "no claude CLI creates a slash command"),
-            Gap("command/project", (_D._discover_project_commands,), "no claude CLI creates a slash command"),
             Gap("command/plugin", (_D._discover_plugin_commands,), "the pinned discord plugin bundles no commands"),
             Gap("mcp/managed", (_D._discover_managed_mcp_servers,), "enterprise system path; no CLI writer"),
             Gap(
