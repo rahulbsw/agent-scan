@@ -12,7 +12,7 @@ asserted, because neither a CLI nor a sensible fixture can drive them.
 from __future__ import annotations
 
 from agent_scan.agents.claude_code import ClaudeCodeDiscoverer
-from agent_scan.canary.base import (
+from agent_scan.canary_test_supported_agents.base import (
     AgentCanary,
     ExpectedItem,
     FixtureFile,
@@ -42,7 +42,7 @@ CLAUDE_COMMAND_PLUGIN = "commit-commands"
 
 # Committed project fixtures, copied into the (registered) dummy project so inspect can detect the
 # project-local skill/command/server scopes no `claude` CLI writes. The src paths are relative to the
-# `agent_scan.canary` package (shipped via the wheel force-include); the executor resolves + copies them.
+# `agent_scan.canary_test_supported_agents` package (shipped via the wheel force-include); the executor resolves + copies them.
 _FIXTURE_ROOT = "test_projects/proj"
 
 _D = ClaudeCodeDiscoverer  # the scope methods this canary mirrors, by object reference

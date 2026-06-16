@@ -5,9 +5,9 @@ from __future__ import annotations
 from importlib.resources import files
 from pathlib import Path
 
-from agent_scan.canary import CANARIES, CanaryContext
-from agent_scan.canary.base import ExpectedItem, FixtureScope, Gap, McpScope, PluginScope
-from agent_scan.canary.claude_code import ClaudeCodeCanary
+from agent_scan.canary_test_supported_agents import CANARIES, CanaryContext
+from agent_scan.canary_test_supported_agents.base import ExpectedItem, FixtureScope, Gap, McpScope, PluginScope
+from agent_scan.canary_test_supported_agents.claude_code import ClaudeCodeCanary
 
 CTX = CanaryContext(home=Path("/home"), project=Path("/home/proj"), bin="claude")
 
@@ -142,10 +142,10 @@ def test_project_skill_and_command_are_no_longer_gaps():
 
 
 def test_committed_fixtures_are_packaged_and_locatable():
-    # Mirrors how the executor finds fixtures: importlib.resources over the agent_scan.canary package
+    # Mirrors how the executor finds fixtures: importlib.resources over the agent_scan.canary_test_supported_agents package
     # (works for a dev checkout AND the wheel built with the force-include). A miss here means the
     # backoffice would copy nothing and the scope would fail MISSING in CI.
-    root = files("agent_scan.canary")
+    root = files("agent_scan.canary_test_supported_agents")
     for canary in CANARIES.values():
         for scope in canary.scopes:
             for f in scope.files():
