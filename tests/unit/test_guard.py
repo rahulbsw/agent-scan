@@ -1948,8 +1948,12 @@ class TestComputeHooksDiff:
         assert result["modified"] == {}
 
     def test_same_key_different_value_is_modified(self):
-        old_val = [{"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash '/old/snyk-agent-guard.sh' --client claude"}]}]
-        new_val = [{"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash '/new/snyk-agent-guard.sh' --client claude"}]}]
+        old_val = [
+            {"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash '/old/snyk-agent-guard.sh' --client claude"}]}
+        ]
+        new_val = [
+            {"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash '/new/snyk-agent-guard.sh' --client claude"}]}
+        ]
         result = _compute_hooks_diff({"PreToolUse": old_val}, {"PreToolUse": new_val})
         assert result["modified"] == {"PreToolUse": {"expected_value": new_val, "actual_value": old_val}}
         assert result["added"] == {}
@@ -1983,15 +1987,25 @@ class TestComputeHooksDiff:
             "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/snyk-agent-guard.sh'"}]}],
         }
         result = _compute_hooks_diff(old, new)
-        assert result["added"] == {"ExtraEvent": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh'"}]}]}
-        assert result["removed"] == {"Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/snyk-agent-guard.sh'"}]}]}
+        assert result["added"] == {
+            "ExtraEvent": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh'"}]}]
+        }
+        assert result["removed"] == {
+            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/snyk-agent-guard.sh'"}]}]
+        }
         assert result["modified"] == {"PreToolUse": {"expected_value": new_val, "actual_value": old_val}}
 
     def test_unchanged_keys_excluded_from_all_categories(self):
         cmd = "PUSH_KEY='x' bash '/path/snyk-agent-guard.sh'"
         shared = [{"hooks": [{"command": cmd}]}]
-        old = {"PreToolUse": shared, "Extra": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh'"}]}]}
-        new = {"PreToolUse": shared, "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/snyk-agent-guard.sh'"}]}]}
+        old = {
+            "PreToolUse": shared,
+            "Extra": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh'"}]}],
+        }
+        new = {
+            "PreToolUse": shared,
+            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/snyk-agent-guard.sh'"}]}],
+        }
         result = _compute_hooks_diff(old, new)
         assert "PreToolUse" not in result["added"]
         assert "PreToolUse" not in result["removed"]
