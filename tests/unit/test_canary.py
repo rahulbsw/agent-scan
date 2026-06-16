@@ -45,7 +45,8 @@ def test_mcp_scope_emits_claude_mcp_add():
 def test_plugin_scope_marketplace_pin_then_installs_narrow_to_broad():
     scope = next(s for s in ClaudeCodeCanary().scopes if isinstance(s, PluginScope))
     argvs = [" ".join(c.argv) for c in scope.commands(CTX)]
-    clone = "/home/.claude/plugins/marketplaces/claude-plugins-official"
+    # Build the clone path the same way the code does, so the assertion holds on Windows too (backslashes).
+    clone = str(CTX.home / ".claude" / "plugins" / "marketplaces" / "claude-plugins-official")
     assert argvs == [
         "claude plugin marketplace add anthropics/claude-plugins-official",
         f"git -C {clone} fetch --depth 1 origin {scope.pin_sha}",

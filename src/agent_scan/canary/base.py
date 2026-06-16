@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from agent_scan.agents.base import AgentDiscoverer
+
 
 @dataclass(frozen=True)
 class CanaryContext:
@@ -170,7 +172,7 @@ class AgentCanary(ABC):
     Subclasses set ``discoverer`` (the discoverer class), ``scopes`` (ordered), and optionally
     ``install_commands`` (how to install the agent binary, run with the ambient env)."""
 
-    discoverer: type
+    discoverer: type[AgentDiscoverer]
 
     @property
     def name(self) -> str:
