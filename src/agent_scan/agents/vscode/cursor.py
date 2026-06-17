@@ -82,10 +82,16 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
             for raw in self._builtin_skills_dir_paths.get(key, ())
         ]
 
-    def discover_skills(self) -> SkillsDirsResult:
-        result = super().discover_skills()
+    def _discover_builtin_skills(self) -> SkillsDirsResult:
+        """Scan the Cursor app-bundled skills directories (``resources/app/skills``)."""
+        result: SkillsDirsResult = {}
         for skills_dir in self._builtin_skills_dirs():
             entries = self._scan_skills_dir(skills_dir)
             if entries is not None:
                 result[skills_dir.as_posix()] = entries
+        return result
+
+    def discover_skills(self) -> SkillsDirsResult:
+        result = super().discover_skills()
+        result.update(self._discover_builtin_skills())
         return result
