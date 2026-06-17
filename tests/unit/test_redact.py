@@ -948,5 +948,8 @@ class TestRedactPushKeysInData:
         }
         redact_push_keys_in_data(data)
         assert malformed not in str(data)
-        assert "REMOTE_HOOKS_BASE_URL='https://api.snyk.io'" in data["modified"]["PreToolUse"]["expected_value"][0]["hooks"][0]["command"]
+        assert (
+            "REMOTE_HOOKS_BASE_URL='https://api.snyk.io'"
+            in data["modified"]["PreToolUse"]["expected_value"][0]["hooks"][0]["command"]
+        )
         assert data["session_id"] == "hooks-setup"

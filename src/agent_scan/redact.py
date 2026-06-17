@@ -91,6 +91,7 @@ def redact_push_keys_in_data(data: dict) -> dict:
     _walk(data)
     return data
 
+
 _EXCLUDED_PLUGINS = frozenset({"IPPublicDetector"})
 
 
