@@ -23,7 +23,7 @@ from agent_scan.pushkeys import (
     mint_push_key,
     revoke_push_key,
 )
-from agent_scan.redact import redact_data
+from agent_scan.redact import redact_push_keys, redact_push_keys_in_data
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -36,11 +36,6 @@ _DETECTION_RE = re.compile(
     r"PUSH_KEY=.*snyk-agent-guard"
     r"|snyk-agent-guard.*-PushKey\b"
 )
-_UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-_PUSH_KEY_REDACT_PATTERNS = [
-    re.compile(rf"PUSH_KEY='({_UUID_RE})'", re.IGNORECASE),
-    re.compile(rf"-PushKey\s+'({_UUID_RE})'", re.IGNORECASE),
-]
 _PERMISSION_DENIED = "__permission_denied__"
 
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
@@ -934,7 +929,7 @@ def _send_test_event(
             payload_dict["added"] = hooks_diff.get("added", {})
             payload_dict["modified"] = hooks_diff.get("modified", {})
             payload_dict["removed"] = hooks_diff.get("removed", {})
-    redact_data(payload_dict, _PUSH_KEY_REDACT_PATTERNS)
+    redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)
 
     if IS_WINDOWS:
@@ -989,13 +984,7 @@ def _send_test_event(
 def _normalize_push_keys(value: object) -> object:
     """Replace push-key UUIDs with a placeholder for comparison purposes."""
     if isinstance(value, str):
-        result = value
-        for pattern in _PUSH_KEY_REDACT_PATTERNS:
-            result = pattern.sub(
-                lambda m: m.group(0).replace(m.group(1), "<PUSH_KEY>"),
-                result,
-            )
-        return result
+        return redact_push_keys(value, "<PUSH_KEY>")
     if isinstance(value, dict):
         return {k: _normalize_push_keys(v) for k, v in value.items()}
     if isinstance(value, list):

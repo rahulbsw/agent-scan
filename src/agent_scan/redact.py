@@ -23,6 +23,74 @@ logger = logging.getLogger(__name__)
 
 REDACTED = "**REDACTED**"
 
+_PUSH_KEY_CONTEXTS = [
+    re.compile(r"(PUSH_KEY=')(.*?)(')", re.IGNORECASE),
+    re.compile(r"(-PushKey\s+')(.*?)(')", re.IGNORECASE),
+]
+
+
+_MAX_EXTRA_HEX_DIGITS = 3
+
+
+def _is_uuid_like(s: str) -> bool:
+    """Return True if *s* looks like a (possibly malformed) UUID.
+
+    A well-formed UUID has exactly 32 hex digits.  This helper also matches
+    strings with up to ``_MAX_EXTRA_HEX_DIGITS`` additional hex digits mixed
+    in, because the original UUID can be recovered by brute-forcing which
+    digits to drop (at most C(35, 3) = 6 545 attempts for 3 extra digits).
+
+    Non-hex noise characters (dashes, spaces, underscores, …) are always
+    stripped before counting.
+    """
+    hex_only = re.sub(r"[^0-9a-fA-F]", "", s)
+    return 32 <= len(hex_only) <= 32 + _MAX_EXTRA_HEX_DIGITS
+
+
+def redact_push_keys(text: str, replacement: str = REDACTED) -> str:
+    """Redact push-key values in *text*, including malformed UUIDs.
+
+    Recognises two context patterns (``PUSH_KEY='…'`` and ``-PushKey '…'``)
+    and replaces the value portion when it looks UUID-like — even when the
+    UUID contains noise characters (extra dashes, spaces, underscores, …).
+    """
+    result = text
+    for pattern in _PUSH_KEY_CONTEXTS:
+
+        def _replace(m: re.Match, *, _repl: str = replacement) -> str:
+            value = m.group(2)
+            if _is_uuid_like(value):
+                return m.group(1) + _repl + m.group(3)
+            return m.group(0)
+
+        result = pattern.sub(_replace, result)
+    return result
+
+
+def redact_push_keys_in_data(data: dict) -> dict:
+    """Deep-traverse *data* and apply :func:`redact_push_keys` to every string value.
+
+    Mutates *data* in place **and** returns it for convenience (same
+    contract as :func:`redact_data`).
+    """
+
+    def _walk(obj: object) -> None:
+        if isinstance(obj, dict):
+            for key in obj:
+                if isinstance(obj[key], str):
+                    obj[key] = redact_push_keys(obj[key])
+                else:
+                    _walk(obj[key])
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                if isinstance(item, str):
+                    obj[i] = redact_push_keys(item)
+                else:
+                    _walk(item)
+
+    _walk(data)
+    return data
+
 _EXCLUDED_PLUGINS = frozenset({"IPPublicDetector"})
 
 
