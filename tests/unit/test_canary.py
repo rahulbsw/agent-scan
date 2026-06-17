@@ -5,9 +5,9 @@ from __future__ import annotations
 from importlib.resources import files
 from pathlib import Path
 
-from agent_scan.canary_test_supported_agents import CANARIES, CanaryContext
-from agent_scan.canary_test_supported_agents.base import ExpectedItem, FixtureScope, Gap, McpScope, PluginScope
-from agent_scan.canary_test_supported_agents.claude_code import ClaudeCodeCanary
+from canary_test_supported_agents import CANARIES, CanaryContext
+from canary_test_supported_agents.base import ExpectedItem, FixtureScope, Gap, McpScope, PluginScope
+from canary_test_supported_agents.claude_code import ClaudeCodeCanary
 
 CTX = CanaryContext(home=Path("/home"), project=Path("/home/proj"), bin="claude")
 
@@ -141,13 +141,15 @@ def test_project_skill_and_command_are_no_longer_gaps():
     assert "command/project" not in gap_labels
 
 
-def test_committed_fixtures_are_packaged_and_locatable():
-    # Mirrors how the executor finds fixtures: importlib.resources over the agent_scan.canary_test_supported_agents package
-    # (works for a dev checkout AND the wheel built with the force-include). A miss here means the
-    # backoffice would copy nothing and the scope would fail MISSING in CI.
-    root = files("agent_scan.canary_test_supported_agents")
+def test_committed_fixtures_are_locatable():
+    # Every declared FixtureFile.src must resolve to a real committed path under the package dir — the
+    # same lookup the backoffice executor does (it imports canary_test_supported_agents from the cloned
+    # source tree and resolves src against the package dir). A miss here means the backoffice would copy
+    # nothing and the scope would fail MISSING in CI. These fixtures are test support, not shipped in the
+    # agent_scan wheel, so this guards the source tree (not a built artifact).
+    root = files("canary_test_supported_agents")
     for canary in CANARIES.values():
         for scope in canary.scopes:
             for f in scope.files():
                 src = root / f.src
-                assert src.is_dir() or src.is_file(), f"fixture not packaged: {f.src}"
+                assert src.is_dir() or src.is_file(), f"fixture not locatable: {f.src}"

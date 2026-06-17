@@ -1,4 +1,4 @@
-"""Live-test ("canary") specs, co-located with the discoverers — see :mod:`agent_scan.canary_test_supported_agents`.
+"""Live-test ("canary") specs, co-located with the discoverers under ``tests/`` — see :mod:`canary_test_supported_agents`.
 
 These are **declarative and runner-agnostic**: a :class:`Scope` says how to drive the real agent binary
 to write a detection scope (a list of :class:`SeedCommand`) and what ``inspect`` must then detect
@@ -63,9 +63,9 @@ class ExpectedItem:
 class FixtureFile:
     """One committed fixture to materialize into the project before the scan — for scopes no ``claude``
     CLI writes (a project-local skill/command, or a hand-committed project ``.mcp.json``). ``src`` is a
-    path under the ``agent_scan.canary_test_supported_agents`` package (the committed ``test_projects/`` tree); ``dest`` is its
-    landing path under the dummy project. Pure data — the executor resolves ``src`` via
-    ``importlib.resources`` and copies it into ``project / dest`` (a directory is copied recursively).
+    path under the ``canary_test_supported_agents`` package dir (the committed ``test_projects/`` tree); ``dest`` is its
+    landing path under the dummy project. Pure data — the executor resolves ``src`` against that package
+    dir on disk and copies it into ``project / dest`` (a directory is copied recursively).
     Unlike a binary-written scope this cannot catch on-disk *format* drift (we author the file); it gives
     the no-writer scopes end-to-end ``inspect`` coverage instead."""
 
