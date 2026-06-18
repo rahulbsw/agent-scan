@@ -81,10 +81,7 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
     def _builtin_skills_dirs(self) -> list[Path]:
         """Resolve the per-OS app-bundled skills directories for this install."""
         key = "linux" if sys.platform in ("linux", "linux2") else sys.platform
-        return [
-            expand_path(Path(raw), self.home_directory)
-            for raw in self._builtin_skills_dir_paths.get(key, ())
-        ]
+        return [expand_path(Path(raw), self.home_directory) for raw in self._builtin_skills_dir_paths.get(key, ())]
 
     def _discover_builtin_skills(self) -> SkillsDirsResult:
         """Scan the Cursor app-bundled skills directories (``resources/app/skills``)."""
