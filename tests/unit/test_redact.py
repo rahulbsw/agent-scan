@@ -4,8 +4,16 @@ import re
 from urllib.parse import parse_qsl, urlsplit
 
 import pytest
+from mcp.types import (
+    Implementation,
+    InitializeResult,
+    Prompt,
+    Resource,
+    ServerCapabilities,
+    Tool,
+)
 
-from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, StdioServer
+from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, ServerSignature, StdioServer
 from agent_scan.redact import (
     _is_uuid_like,
     redact_absolute_paths,
@@ -14,14 +22,23 @@ from agent_scan.redact import (
     redact_push_keys,
     redact_push_keys_in_data,
     redact_scan_result,
+    redact_signature,
+    redact_text,
 )
+from tests.unit._secret_fixtures import synthetic_secret
 
-# High-entropy 40-char mixed-case+digit literal that should be flagged by
-# detect-secrets' default high-entropy plugins. NOT a known-prefix token
-# (the user explicitly forbade ghp_/sk-proj-/etc.). If during the red phase
-# this exact string is not flagged by the default plugins, swap to another
-# high-entropy random string of similar shape.
-FAKE_API_KEY = "Xk9mPq2vNwBzRtY7Lc4hJfDsAe6uGiQoVpWbZxMr"
+# High-entropy fake credential that detect-secrets' default high-entropy plugins
+# flag. Derived at runtime (see ``synthetic_secret``) rather than a hardcoded
+# literal so repo secret scanners don't flag a checked-in secret. NOT a
+# known-prefix token (ghp_/sk-proj-/etc. are intentionally avoided).
+FAKE_API_KEY = synthetic_secret()
+
+# Artifactory-format fake token (matches ``AKC[A-Za-z0-9]{10,}``). Built from a
+# synthetic seed so no high-entropy literal is checked in. ArtifactoryDetector
+# anchors on the char *before* ``AKC`` (must be one of ``\s = : " ^``), so a bare
+# token is flagged but a backtick-wrapped one is not -- the edge-strip fallback
+# is what closes that gap.
+FAKE_ARTIFACTORY_TOKEN = "AKC" + synthetic_secret(b"artifactory fixture token")
 
 # Match the **REDACTED_SECRET_<PLUGIN>** marker shape without hardcoding which
 # detect-secrets plugin won the race. The plugin set may change across
@@ -526,6 +543,275 @@ class TestRedactData:
             in data["modified"]["PreToolUse"]["expected_value"][0]["hooks"][0]["command"]
         )
         assert data["session_id"] == "hooks-setup"
+
+
+class TestRedactText:
+    """Unit tests for redact_text (free-text secret + path redaction)."""
+
+    def test_redact_text_none(self):
+        assert redact_text(None) is None
+
+    def test_redact_text_empty(self):
+        assert redact_text("") == ""
+
+    def test_redact_text_preserves_innocuous_content(self):
+        text = "# My Skill\n\nThis skill fetches the weather for a given city.\n"
+        assert redact_text(text) == text
+
+    def test_redact_text_redacts_bare_high_entropy_token(self):
+        text = f"Use this token: {FAKE_API_KEY}\n"
+        result = redact_text(text)
+        assert FAKE_API_KEY not in result
+        assert "**REDACTED_SECRET_" in result
+
+    def test_redact_text_redacts_known_format_token(self):
+        text = "Authenticate with AKIAIOSFODNN7EXAMPLE before running."
+        result = redact_text(text)
+        assert "AKIAIOSFODNN7EXAMPLE" not in result
+        assert "**REDACTED_SECRET_AWSKEYDETECTOR**" in result
+
+    def test_redact_text_redacts_high_entropy_value_in_assignment(self):
+        """A high-entropy value in a quoted assignment is redacted by the
+        entropy detector."""
+        text = f'config = {{"password": "{FAKE_API_KEY}"}}'
+        result = redact_text(text)
+        assert FAKE_API_KEY not in result
+        assert "**REDACTED_SECRET_" in result
+
+    def test_redact_text_preserves_absolute_paths(self):
+        """Skill content (docs/code) routinely references real paths as legitimate
+        context, so redact_text leaves absolute paths intact and only strips
+        secrets. (Tracebacks and server output still get path redaction via
+        redact_server / redact_scan_result.)"""
+        text = "Loading from /Users/alice/project/config.json"
+        result = redact_text(text)
+        assert result == text
+
+    def test_redact_text_preserves_line_structure(self):
+        text = f"line one\n{FAKE_API_KEY}\nline three"
+        result = redact_text(text)
+        lines = result.split("\n")
+        assert lines[0] == "line one"
+        assert is_secret_marker(lines[1])
+        assert lines[2] == "line three"
+
+    def test_redact_text_enters_detect_secrets_context_once(self, monkeypatch):
+        """redact_text must enter the detect-secrets settings context exactly
+        once for the whole text, not once per token.
+
+        Re-entering ``transient_settings`` runs detect-secrets' ``cache_bust``
+        twice each time (~1.3ms), so a per-token re-entry makes redaction
+        O(tokens) -- a large bundled script then takes tens of seconds. The
+        per-token detection path must reuse the already-built plugin set under
+        the single outer context instead.
+        """
+        import contextlib
+
+        import agent_scan.redact as redact_mod
+
+        real_transient_settings = redact_mod.transient_settings
+        entries = 0
+
+        @contextlib.contextmanager
+        def counting_transient_settings(*args, **kwargs):
+            nonlocal entries
+            entries += 1
+            with real_transient_settings(*args, **kwargs) as value:
+                yield value
+
+        monkeypatch.setattr(redact_mod, "transient_settings", counting_transient_settings)
+
+        # Many whitespace tokens across several lines, including a real secret,
+        # so the per-token detection pass runs repeatedly.
+        text = "\n".join("alpha beta gamma delta epsilon zeta" for _ in range(20))
+        text += f"\nthe secret is {FAKE_API_KEY}\n"
+
+        result = redact_mod.redact_text(text)
+
+        assert entries == 1
+        # ...and detection still works under the single-context path.
+        assert FAKE_API_KEY not in result
+        assert "**REDACTED_SECRET_" in result
+
+    @pytest.mark.parametrize(
+        "wrapped",
+        [
+            'key: "the deploy value is {tok}"',  # token last word in a longer quoted string
+            "use `{tok}` now",  # markdown code span
+            "see ({tok}) here",  # parenthesised
+            "see [{tok}] here",  # bracketed
+            "token {tok}. done",  # trailing sentence period
+            "token {tok}, done",  # trailing comma
+        ],
+    )
+    def test_redact_text_redacts_wrapped_high_entropy_token(self, wrapped):
+        """A high-entropy token wrapped in markup/punctuation is still redacted.
+
+        Pass 2 splits on whitespace, so wrapping characters ride along with the
+        token: a trailing ``"`` defeats the entropy plugin's quoted-literal
+        regex, and a long low-entropy quoted string hides the secret from the
+        raw-line scan. The edge-strip fallback recovers the bare core and
+        redacts it. (Fully-quoted single-token forms like ``"<tok>"`` are
+        already covered by the Pass-1 raw-line scan and are not retested here.)
+        """
+        text = wrapped.format(tok=FAKE_API_KEY)
+        result = redact_text(text)
+        assert FAKE_API_KEY not in result
+        assert "**REDACTED_SECRET_" in result
+
+    def test_redact_text_redacts_backtick_wrapped_format_token(self):
+        r"""A boundary-anchored format token (Artifactory) in a markdown code span
+        is redacted via the edge-strip fallback.
+
+        ``ArtifactoryDetector`` requires the char before ``AKC`` to be one of
+        ``\s = : " ^``; a backtick is not, so the raw backtick-wrapped token
+        never matched. Stripping the backticks recovers a detectable core.
+        """
+        text = f"use the token `{FAKE_ARTIFACTORY_TOKEN}` to publish"
+        result = redact_text(text)
+        assert FAKE_ARTIFACTORY_TOKEN not in result
+        assert "**REDACTED_SECRET_ARTIFACTORYDETECTOR**" in result
+
+    def test_redact_text_preserves_wrapped_non_secret(self):
+        """Edge-stripping must not over-redact: non-secret tokens wrapped in
+        punctuation are returned unchanged."""
+        text = "see (example) and `config` here, then stop."
+        assert redact_text(text) == text
+
+    @pytest.mark.parametrize(
+        "embedded",
+        [
+            "https://host/{tok}/more",  # secret as a URL path segment
+            "https://h/p?token={tok}&x=1",  # secret as a URL query value
+            "prefix.{tok}.suffix",  # dot-delimited
+            "scope:{tok}:end",  # colon-delimited
+            "a,{tok},b",  # comma-delimited
+            "user@{tok}@host",  # at-delimited
+        ],
+    )
+    def test_redact_text_redacts_delimiter_embedded_token(self, embedded):
+        """A high-entropy secret separated from surrounding text by a structural
+        delimiter (a URL path/query segment, a dotted or colon-joined value)
+        rides along inside one whitespace token; it is recovered by splitting on
+        those delimiters and redacted."""
+        text = embedded.format(tok=FAKE_API_KEY)
+        result = redact_text(text)
+        assert FAKE_API_KEY not in result
+        assert "**REDACTED_SECRET_" in result
+
+    def test_redact_text_preserves_structure_around_delimited_secret(self):
+        """Only the secret segment is replaced; the surrounding URL structure is
+        left intact."""
+        text = f"https://host/{FAKE_API_KEY}/more"
+        result = redact_text(text)
+        assert FAKE_API_KEY not in result
+        assert result.startswith("https://host/")
+        assert result.endswith("/more")
+
+    def test_redact_text_redacts_multiple_delimited_secrets_in_one_token(self):
+        """Two secrets joined by a delimiter in a single token are both redacted.
+
+        A ``.`` joiner (unlike ``/``) is outside the base64 charset, so the
+        token is not flagged wholesale by the entropy scan -- both halves are
+        recovered by the delimiter split.
+        """
+        second = synthetic_secret(b"second delimiter-embedded probe token")
+        assert second != FAKE_API_KEY
+        text = f"{FAKE_API_KEY}.{second}"
+        result = redact_text(text)
+        assert FAKE_API_KEY not in result
+        assert second not in result
+
+    @pytest.mark.parametrize(
+        "benign",
+        [
+            "/usr/local/bin/python3",  # filesystem path
+            "release 1.22.333.4444 now",  # dotted version
+            "connect to 192.168.10.254 ok",  # IPv4 address
+            "import os.path.join here",  # dotted module path
+            "see https://example.com/docs/guide here",  # plain URL, no secret
+        ],
+    )
+    def test_redact_text_preserves_benign_delimited_text(self, benign):
+        """Splitting on structural delimiters must not over-redact benign
+        delimited text: paths, versions, IPs, dotted names, and secret-free URLs
+        are returned unchanged."""
+        assert redact_text(benign) == benign
+
+
+def _skill_signature(*, instructions="", prompts=None, resources=None, tools=None) -> ServerSignature:
+    return ServerSignature(
+        metadata=InitializeResult(
+            protocolVersion="built-in",
+            instructions=instructions,
+            capabilities=ServerCapabilities(),
+            serverInfo=Implementation(name="skill", version="skills"),
+        ),
+        prompts=prompts or [],
+        resources=resources or [],
+        tools=tools or [],
+    )
+
+
+class TestRedactSignature:
+    """Unit tests for redact_signature (skill ServerSignature redaction)."""
+
+    def test_redact_signature_redacts_instructions(self):
+        sig = _skill_signature(instructions=f"Skill that uses {FAKE_API_KEY}")
+        redact_signature(sig)
+        assert FAKE_API_KEY not in sig.metadata.instructions
+
+    def test_redact_signature_redacts_prompt_description(self):
+        sig = _skill_signature(prompts=[Prompt(name="SKILL.md", description=f"key: {FAKE_API_KEY}")])
+        redact_signature(sig)
+        assert FAKE_API_KEY not in (sig.prompts[0].description or "")
+
+    def test_redact_signature_redacts_resource_and_tool_descriptions(self):
+        sig = _skill_signature(
+            resources=[Resource(name="data", uri="skill://data", description=f"secret {FAKE_API_KEY}")],
+            tools=[
+                Tool(name="run.sh", description=f"Script: run.sh. Code:\nexport TOKEN={FAKE_API_KEY}", inputSchema={})
+            ],
+        )
+        redact_signature(sig)
+        assert FAKE_API_KEY not in (sig.resources[0].description or "")
+        assert FAKE_API_KEY not in (sig.tools[0].description or "")
+        # The non-secret structure around the secret is preserved.
+        assert sig.tools[0].description.startswith("Script: run.sh. Code:")
+
+    def test_redact_signature_preserves_clean_content(self):
+        sig = _skill_signature(
+            instructions="A helpful skill",
+            prompts=[Prompt(name="SKILL.md", description="# Title\nDoes something useful.")],
+        )
+        redact_signature(sig)
+        assert sig.metadata.instructions == "A helpful skill"
+        assert sig.prompts[0].description == "# Title\nDoes something useful."
+
+    def test_redact_signature_preserves_binary_file_hash(self):
+        """The synthetic 'Binary file. Hash: <sha256>' marker is self-generated
+        and secret-free, so redaction must leave the digest intact -- otherwise
+        the 64-char hash trips the hex high-entropy detector and every binary
+        collapses to an identical, useless description."""
+        import hashlib
+
+        digest = hashlib.sha256(b"\x00\x01\x02 binary blob \x80\x81").hexdigest()
+        desc = f"Binary file. Hash: {digest}"
+        sig = _skill_signature(resources=[Resource(name="logo.bin", uri="skill://logo.bin", description=desc)])
+        redact_signature(sig)
+        assert sig.resources[0].description == desc
+
+    def test_redact_signature_still_redacts_text_resembling_binary_marker(self):
+        """The exemption is an exact whole-string match: a description that only
+        starts like the binary marker but carries extra (possibly secret) text
+        is NOT exempt and is still redacted."""
+        import hashlib
+
+        digest = hashlib.sha256(b"blob").hexdigest()
+        desc = f"Binary file. Hash: {digest} -- also token {FAKE_API_KEY}"
+        sig = _skill_signature(resources=[Resource(name="logo.bin", uri="skill://logo.bin", description=desc)])
+        redact_signature(sig)
+        assert FAKE_API_KEY not in (sig.resources[0].description or "")
 
 
 def test_redact_remote_url_query_and_headers():

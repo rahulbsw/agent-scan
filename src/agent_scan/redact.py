@@ -17,7 +17,7 @@ from detect_secrets.plugins.high_entropy_strings import HighEntropyStringsPlugin
 from detect_secrets.plugins.keyword import KeywordDetector
 from detect_secrets.settings import default_settings, get_plugins, transient_settings
 
-from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, StdioServer
+from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, ServerSignature, StdioServer
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +93,13 @@ def redact_push_keys_in_data(data: dict) -> dict:
 
 
 _EXCLUDED_PLUGINS = frozenset({"IPPublicDetector"})
+
+# Matches the synthetic binary-file marker that ``skill_client`` emits for a
+# binary resource (its ``BINARY_FILE_DESCRIPTION_PREFIX`` followed by a sha256
+# hex digest). Compiled lazily on first use: the prefix lives in
+# ``skill_client``, which imports ``redact_signature`` from this module, so
+# importing it at module scope here would create a circular import.
+_BINARY_FILE_DESCRIPTION_RE: re.Pattern[str] | None = None
 
 
 def _build_detect_secrets_config() -> dict:
@@ -175,12 +182,35 @@ def _wrap_for_entropy(value: str) -> str:
     return '"' + value.replace('"', r"\"") + '"'
 
 
-def _detect_secret(value: str) -> str | None:
-    """
-    Return the class name of the first detect-secrets plugin that flags
-    ``value``, or ``None`` if no plugin flags it.
+# Longest pure-ASCII-lowercase token (``^[a-z]+$``) safe to skip without running
+# any plugin: it matches no format detector (all need a digit/uppercase/special/
+# prefix) and no HexHighEntropyString (only [a-f] is hex -> entropy <2.58 < 3.0
+# limit). Base64HighEntropyString (limit 4.5) is bounded by log2(len), so a cap
+# up to 22 is provably safe; 15 is a conservative margin. A lower cap only skips
+# fewer tokens, never one a plugin would flag.
+_PROSE_MAX_LEN = 15
 
-    Two-pass scan to give each plugin family the input format it expects:
+
+def _could_be_secret(value: str) -> bool:
+    """Cheap O(len) pre-filter: ``True`` for every value any plugin could flag,
+    ``False`` only for short pure-ASCII-lowercase tokens (see
+    :data:`_PROSE_MAX_LEN`), which dominate prose/code and match no detector.
+
+    Must never reject a value that would match, or a secret leaks; passing
+    through a non-match is fine (it just falls to the full scan).
+    """
+    return (
+        len(value) > _PROSE_MAX_LEN  # long enough to reach a high-entropy threshold
+        or not value.isalpha()  # has a digit, separator, or other non-letter
+        or not value.islower()  # has an uppercase letter (or no cased letters at all)
+        or not value.isascii()  # has a non-ASCII character
+    )
+
+
+def _detect_secret_in_plugins(value: str, plugins: list) -> str | None:
+    """Two-pass scan of ``value`` against an already-built ``plugins`` list.
+
+    Each plugin family gets the input format it expects:
 
     1. Named-format detectors (``AWSKeyDetector``, ``GitHubTokenDetector``,
        etc.) match self-contained format patterns and work on the raw
@@ -190,25 +220,54 @@ def _detect_secret(value: str) -> str | None:
        wrapped as ``"<value>"``, ``'<value>'``, or ``"<escaped>"`` so
        their regex tokenizes the whole value, then the entropy ``limit``
        filter is applied.
+
+    The caller is responsible for holding an active
+    ``transient_settings(_DETECT_SECRETS_CONFIG)`` context that ``plugins``
+    was built under.
+    """
+    # Cheap pre-filter: skip the full plugin battery for values that provably
+    # match nothing (see :func:`_could_be_secret`). Conservative -- never
+    # rejects a value a plugin would flag -- so output is unchanged.
+    if not _could_be_secret(value):
+        return None
+    # Pass 1: format-based named detectors on the bare value.
+    for plugin in plugins:
+        if isinstance(plugin, HighEntropyStringsPlugin):
+            continue
+        if plugin.analyze_line(filename="adhoc", line=value, line_number=1):
+            return type(plugin).__name__
+    # Pass 2: entropy plugins on the quote-wrapped value.
+    wrapped = _wrap_for_entropy(value)
+    for plugin in plugins:
+        if not isinstance(plugin, HighEntropyStringsPlugin):
+            continue
+        if plugin.analyze_line(filename="adhoc", line=wrapped, line_number=1):
+            return type(plugin).__name__
+    return None
+
+
+def _detect_secret(value: str, plugins: list | None = None) -> str | None:
+    """
+    Return the class name of the first detect-secrets plugin that flags
+    ``value``, or ``None`` if no plugin flags it. See
+    :func:`_detect_secret_in_plugins` for the two-pass detection logic.
+
+    When ``plugins`` is supplied, the caller is assumed to already hold an
+    active ``transient_settings(_DETECT_SECRETS_CONFIG)`` context (as
+    :func:`redact_text` does), so this reuses that plugin set and does NOT
+    re-enter the context. Re-entering it per call runs detect-secrets'
+    ``cache_bust`` twice each time (~1.3ms), so a per-token caller would be
+    O(tokens) in context churn -- tens of seconds for a large bundled script.
+
+    With ``plugins=None`` (the :func:`redact_args` path) it builds and tears
+    down its own context per call, exactly as before.
     """
     if not value:
         return None
+    if plugins is not None:
+        return _detect_secret_in_plugins(value, plugins)
     with transient_settings(_DETECT_SECRETS_CONFIG):
-        plugins = list(get_plugins())
-        # Pass 1: format-based named detectors on the bare value.
-        for plugin in plugins:
-            if isinstance(plugin, HighEntropyStringsPlugin):
-                continue
-            if plugin.analyze_line(filename="adhoc", line=value, line_number=1):
-                return type(plugin).__name__
-        # Pass 2: entropy plugins on the quote-wrapped value.
-        wrapped = _wrap_for_entropy(value)
-        for plugin in plugins:
-            if not isinstance(plugin, HighEntropyStringsPlugin):
-                continue
-            if plugin.analyze_line(filename="adhoc", line=wrapped, line_number=1):
-                return type(plugin).__name__
-    return None
+        return _detect_secret_in_plugins(value, list(get_plugins()))
 
 
 def _detect_keyword(prev_normalized: str, curr_raw: str) -> str | None:
@@ -401,6 +460,189 @@ def redact_args(args: list[str]) -> list[str]:
             flag = args[arg_idx].partition("=")[0]
             out[arg_idx] = f"{flag}={_redaction_marker(mark)}"
     return out
+
+
+# Markup/punctuation that commonly *wraps* a secret in skill docs/code but is
+# never part of the secret itself: matched-pair wrappers (quotes, backticks,
+# brackets, parens, angle brackets) plus trailing sentence punctuation. Used to
+# recover a detectable "core" from a whitespace token whose glued wrappers defeat
+# detection (a trailing ``"`` breaks the entropy plugin's quoted-literal regex; a
+# leading backtick fails a format detector's boundary class). Deliberately
+# excludes ``= + / - _`` (legitimate secret characters); ``.`` is only removed as
+# an edge character (``str.strip`` touches the ends only), never internally.
+_TOKEN_EDGE_CHARS = "`'\"()[]{}<>.,;:!?"
+
+
+def _unwrapped_token_core(token: str) -> str | None:
+    """Return ``token``'s inner core with wrapping markup/punctuation stripped
+    from its edges -- a fresh candidate to re-scan for secrets.
+
+    Returns ``None`` when stripping yields nothing new: either no wrapper was
+    present (the core equals ``token``) or the token was all edge characters
+    (the core is empty). In both cases the caller has already scanned that exact
+    value, so it can skip a redundant re-scan.
+    """
+    core = token.strip(_TOKEN_EDGE_CHARS)
+    return core if core and core != token else None
+
+
+# Structural delimiters that commonly *separate* a secret from surrounding text
+# inside one whitespace token -- URL path/query separators, dotted paths, colon-
+# or comma-joined values. When the whole-token and edge-stripped-core scans both
+# come up clean, the token is split on these and each segment re-checked, so a
+# secret embedded between them is still found. The base64/base64url secret
+# characters ``= + _ -`` are deliberately NOT split on, so a real secret that
+# contains them is never fragmented. ``/`` is split on despite being a base64
+# char: URL-embedded tokens are overwhelmingly base64url/hex/alnum (which never
+# contain ``/``), and because this runs only as a fallback it can add coverage
+# but never remove what the earlier scans already catch.
+_TOKEN_SPLIT_DELIMS = re.compile(r"[/:.,;@?&#|\\]")
+
+
+def _redact_secrets_in_line(line: str, plugins: list) -> str:
+    """Redact secret-bearing substrings within a single line of free text.
+
+    Reuses the detect-secrets plugin set in two complementary passes that each
+    preserve the line's surrounding text and whitespace:
+
+    1. Raw-line scan with the high-entropy plugins only. They report the
+       *complete* secret value via ``secret_value`` (unlike some format
+       detectors -- e.g. the GitHub token detector reports only the ``ghp``
+       prefix), so their value is safe to splice out by substring. They fire on
+       the quoted forms common in skill code snippets (``key = "value"``).
+    2. Whitespace-token scan with :func:`_detect_secret`, which runs format
+       detectors on the bare token and entropy detectors on a quote-wrapped
+       copy. A whole secret-shaped token (AWS key, GitHub token, bare
+       high-entropy string) is therefore replaced wholesale -- no partial
+       prefix can leak. The raw token is tried first; when it is not flagged,
+       an edge-stripped *core* (see :func:`_unwrapped_token_core`) is tried as a
+       fallback, so a secret wrapped in markdown/punctuation (a backtick code
+       span, or a trailing ``"`` from a longer quoted string) is still
+       detected. Only the matched candidate substring is replaced, so the
+       surrounding markup stays intact. When neither the token nor its core is
+       flagged, the token is split on structural delimiters
+       (see :data:`_TOKEN_SPLIT_DELIMS`) and each segment re-checked, so a
+       secret embedded as a URL path/query segment or a dotted/colon-joined
+       value is recovered without disturbing the surrounding structure.
+
+    Replacements are applied longest-first so a secret that is a substring of
+    another does not corrupt the marker inserted for the longer one.
+    """
+    replacements: dict[str, str] = {}
+
+    # Pass 1: high-entropy detectors on the raw line (catches quoted literals).
+    for plugin in plugins:
+        if not isinstance(plugin, HighEntropyStringsPlugin):
+            continue
+        for secret in plugin.analyze_line(filename="adhoc", line=line, line_number=1) or []:
+            value = getattr(secret, "secret_value", None)
+            if value:
+                replacements.setdefault(value, _redaction_marker(type(plugin).__name__))
+
+    # Pass 2: whole-token detection for format/entropy-shaped tokens. Reuse the
+    # caller's already-built ``plugins`` (under its single transient_settings
+    # context) so we don't re-enter that context per token. The raw token is
+    # tried first (preserving prior behaviour); only when it is not flagged is
+    # the edge-stripped core consulted as a fallback.
+    for token in line.split():
+        core = _unwrapped_token_core(token)
+        candidates = [token] if core is None else [token, core]
+        handled = False
+        for candidate in candidates:
+            if candidate in replacements:
+                handled = True
+                break
+            plugin_name = _detect_secret(candidate, plugins)
+            if plugin_name is not None:
+                replacements[candidate] = _redaction_marker(plugin_name)
+                handled = True
+                break
+        if handled:
+            continue
+        # Fallback: a secret separated from surrounding text by a structural
+        # delimiter (a URL path/query segment, a dotted or colon-joined value)
+        # rides along inside one whitespace token and escapes the whole-token
+        # scan above. Split on those delimiters and flag each secret-shaped
+        # segment; only the matched segment is replaced, so the structure stays.
+        for segment in _TOKEN_SPLIT_DELIMS.split(token):
+            if not segment or segment in replacements:
+                continue
+            plugin_name = _detect_secret(segment, plugins)
+            if plugin_name is not None:
+                replacements[segment] = _redaction_marker(plugin_name)
+
+    redacted = line
+    for value in sorted(replacements, key=len, reverse=True):
+        redacted = redacted.replace(value, replacements[value])
+    return redacted
+
+
+def redact_text(text: str | None) -> str | None:
+    """Redact secrets from a block of free text.
+
+    Used for content read out of skill files (SKILL.md, command markdown,
+    bundled scripts, and other resources), which may contain credentials a
+    user pasted into a skill.
+
+    Absolute paths are intentionally left intact: skill content is documentation
+    and code that legitimately references real paths, and stripping them would
+    remove context the downstream analysis relies on. (Path redaction still
+    applies to tracebacks and server output via :func:`redact_server` /
+    :func:`redact_scan_result`, where paths are noise rather than user content.)
+
+    Detection runs line by line so the plugin set is built once and reused;
+    secret values are spliced out in place (see :func:`_redact_secrets_in_line`).
+    Returns ``None`` for ``None`` input and the input unchanged when it is empty.
+    """
+    if not text:
+        return text
+    with transient_settings(_DETECT_SECRETS_CONFIG):
+        plugins = list(get_plugins())
+        return "\n".join(_redact_secrets_in_line(line, plugins) for line in text.split("\n"))
+
+
+def _is_synthetic_binary_description(text: str) -> bool:
+    """True if ``text`` is the synthetic binary-file marker emitted for a binary
+    skill resource (see ``skill_client.BINARY_FILE_DESCRIPTION_PREFIX``).
+
+    Such a description is self-generated (a fixed prefix + sha256 digest) and
+    contains no user content, so it is left untouched by redaction.
+
+    The prefix is imported lazily and the compiled pattern cached, so the
+    per-entity redaction path stays off the import and ``skill_client`` (which
+    imports :func:`redact_signature` from this module) can own the constant
+    without a circular import.
+    """
+    global _BINARY_FILE_DESCRIPTION_RE
+    if _BINARY_FILE_DESCRIPTION_RE is None:
+        from agent_scan.skill_client import BINARY_FILE_DESCRIPTION_PREFIX
+
+        _BINARY_FILE_DESCRIPTION_RE = re.compile(rf"^{re.escape(BINARY_FILE_DESCRIPTION_PREFIX)}[0-9a-f]{{64}}$")
+    return bool(_BINARY_FILE_DESCRIPTION_RE.match(text))
+
+
+def redact_signature(signature: ServerSignature) -> ServerSignature:
+    """Redact secrets from a (skill) ``ServerSignature`` in place.
+
+    Skill signatures embed raw file contents in their prompt / resource / tool
+    ``description`` fields, and the skill's frontmatter description in
+    ``metadata.instructions``. Any of these can carry secrets, so every
+    free-text field is run through :func:`redact_text` before the signature
+    leaves the machine. The one exception is a resource whose description is the
+    synthetic binary-file marker (see :func:`_is_synthetic_binary_description`),
+    which is left intact so the file's hash digest survives.
+
+    This is the single redaction point for skill content: nothing downstream
+    redacts the signature (``redact_scan_result`` / ``redact_server`` only touch
+    the server config and errors, never ``.signature``), so it must be sanitized
+    here. It runs once when the skill is read (in ``skill_client.inspect_skill``).
+    """
+    if signature.metadata is not None and signature.metadata.instructions:
+        signature.metadata.instructions = redact_text(signature.metadata.instructions)
+    for entity in signature.entities:
+        if entity.description and not _is_synthetic_binary_description(entity.description):
+            entity.description = redact_text(entity.description)
+    return signature
 
 
 def redact_server(server_scan_result: ServerScanResult) -> ServerScanResult:
