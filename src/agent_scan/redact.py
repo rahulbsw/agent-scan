@@ -453,6 +453,19 @@ def _strip_token_edges(token: str) -> str | None:
     return core if core and core != token else None
 
 
+# Structural delimiters that commonly *separate* a secret from surrounding text
+# inside one whitespace token -- URL path/query separators, dotted paths, colon-
+# or comma-joined values. When the whole-token and edge-stripped-core scans both
+# come up clean, the token is split on these and each segment re-checked, so a
+# secret embedded between them is still found. The base64/base64url secret
+# characters ``= + _ -`` are deliberately NOT split on, so a real secret that
+# contains them is never fragmented. ``/`` is split on despite being a base64
+# char: URL-embedded tokens are overwhelmingly base64url/hex/alnum (which never
+# contain ``/``), and because this runs only as a fallback it can add coverage
+# but never remove what the earlier scans already catch.
+_TOKEN_SPLIT_DELIMS = re.compile(r"[/:.,;@?&#|\\]")
+
+
 def _redact_secrets_in_line(line: str, plugins: list) -> str:
     """Redact secret-bearing substrings within a single line of free text.
 
@@ -473,7 +486,11 @@ def _redact_secrets_in_line(line: str, plugins: list) -> str:
        fallback, so a secret wrapped in markdown/punctuation (a backtick code
        span, or a trailing ``"`` from a longer quoted string) is still
        detected. Only the matched candidate substring is replaced, so the
-       surrounding markup stays intact.
+       surrounding markup stays intact. When neither the token nor its core is
+       flagged, the token is split on structural delimiters
+       (see :data:`_TOKEN_SPLIT_DELIMS`) and each segment re-checked, so a
+       secret embedded as a URL path/query segment or a dotted/colon-joined
+       value is recovered without disturbing the surrounding structure.
 
     Replacements are applied longest-first so a secret that is a substring of
     another does not corrupt the marker inserted for the longer one.
@@ -495,17 +512,31 @@ def _redact_secrets_in_line(line: str, plugins: list) -> str:
     # tried first (preserving prior behaviour); only when it is not flagged is
     # the edge-stripped core consulted as a fallback.
     for token in line.split():
-        candidates = [token]
         core = _strip_token_edges(token)
-        if core is not None:
-            candidates.append(core)
+        candidates = [token] if core is None else [token, core]
+        handled = False
         for candidate in candidates:
             if candidate in replacements:
+                handled = True
                 break
             plugin_name = _detect_secret(candidate, plugins)
             if plugin_name is not None:
                 replacements[candidate] = _redaction_marker(plugin_name)
+                handled = True
                 break
+        if handled:
+            continue
+        # Fallback: a secret separated from surrounding text by a structural
+        # delimiter (a URL path/query segment, a dotted or colon-joined value)
+        # rides along inside one whitespace token and escapes the whole-token
+        # scan above. Split on those delimiters and flag each secret-shaped
+        # segment; only the matched segment is replaced, so the structure stays.
+        for segment in _TOKEN_SPLIT_DELIMS.split(token):
+            if not segment or segment in replacements:
+                continue
+            plugin_name = _detect_secret(segment, plugins)
+            if plugin_name is not None:
+                replacements[segment] = _redaction_marker(plugin_name)
 
     redacted = line
     for value in sorted(replacements, key=len, reverse=True):

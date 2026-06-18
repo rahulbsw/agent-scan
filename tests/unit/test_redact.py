@@ -678,6 +678,66 @@ class TestRedactText:
         text = "see (example) and `config` here, then stop."
         assert redact_text(text) == text
 
+    @pytest.mark.parametrize(
+        "embedded",
+        [
+            "https://host/{tok}/more",  # secret as a URL path segment
+            "https://h/p?token={tok}&x=1",  # secret as a URL query value
+            "prefix.{tok}.suffix",  # dot-delimited
+            "scope:{tok}:end",  # colon-delimited
+            "a,{tok},b",  # comma-delimited
+            "user@{tok}@host",  # at-delimited
+        ],
+    )
+    def test_redact_text_redacts_delimiter_embedded_token(self, embedded):
+        """A high-entropy secret separated from surrounding text by a structural
+        delimiter (a URL path/query segment, a dotted or colon-joined value)
+        rides along inside one whitespace token; it is recovered by splitting on
+        those delimiters and redacted."""
+        text = embedded.format(tok=FAKE_API_KEY)
+        result = redact_text(text)
+        assert FAKE_API_KEY not in result
+        assert "**REDACTED_SECRET_" in result
+
+    def test_redact_text_preserves_structure_around_delimited_secret(self):
+        """Only the secret segment is replaced; the surrounding URL structure is
+        left intact."""
+        text = f"https://host/{FAKE_API_KEY}/more"
+        result = redact_text(text)
+        assert FAKE_API_KEY not in result
+        assert result.startswith("https://host/")
+        assert result.endswith("/more")
+
+    def test_redact_text_redacts_multiple_delimited_secrets_in_one_token(self):
+        """Two secrets joined by a delimiter in a single token are both redacted.
+
+        A ``.`` joiner (unlike ``/``) is outside the base64 charset, so the
+        token is not flagged wholesale by the entropy scan -- both halves are
+        recovered by the delimiter split.
+        """
+        second = synthetic_secret(b"second delimiter-embedded probe token")
+        assert second != FAKE_API_KEY
+        text = f"{FAKE_API_KEY}.{second}"
+        result = redact_text(text)
+        assert FAKE_API_KEY not in result
+        assert second not in result
+
+    @pytest.mark.parametrize(
+        "benign",
+        [
+            "/usr/local/bin/python3",  # filesystem path
+            "release 1.22.333.4444 now",  # dotted version
+            "connect to 192.168.10.254 ok",  # IPv4 address
+            "import os.path.join here",  # dotted module path
+            "see https://example.com/docs/guide here",  # plain URL, no secret
+        ],
+    )
+    def test_redact_text_preserves_benign_delimited_text(self, benign):
+        """Splitting on structural delimiters must not over-redact benign
+        delimited text: paths, versions, IPs, dotted names, and secret-free URLs
+        are returned unchanged."""
+        assert redact_text(benign) == benign
+
 
 def _skill_signature(*, instructions="", prompts=None, resources=None, tools=None) -> ServerSignature:
     return ServerSignature(
