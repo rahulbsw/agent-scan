@@ -5694,9 +5694,7 @@ def test_cursor_builtin_skills_discovered_in_discover_skills(tmp_path, monkeypat
     )
     loop_skill = app_skills / "loop"
     loop_skill.mkdir(parents=True)
-    (loop_skill / "SKILL.md").write_text(
-        "---\nname: loop\ndescription: Run a prompt on a schedule.\n---\n\nbody\n"
-    )
+    (loop_skill / "SKILL.md").write_text("---\nname: loop\ndescription: Run a prompt on a schedule.\n---\n\nbody\n")
     (tmp_path / ".cursor").mkdir()
 
     discoverer = CursorDiscoverer(tmp_path)
@@ -5726,7 +5724,7 @@ def test_cursor_builtin_skills_absent_dir_not_surfaced(tmp_path, monkeypatch):
     skills_dirs = discoverer.discover_skills()
 
     assert absent.as_posix() not in skills_dirs, (
-        "absent built-in skills dir must not produce a key; got: {list(skills_dirs)}"
+        f"absent built-in skills dir must not produce a key; got: {list(skills_dirs)}"
     )
 
 
@@ -5788,6 +5786,46 @@ def test_cursor_builtin_skills_dirs_empty_on_unsupported_platform(tmp_path, monk
     monkeypatch.setattr(cursor_mod.sys, "platform", "sunos5")
 
     assert CursorDiscoverer(tmp_path)._builtin_skills_dirs() == []
+
+
+# ---------------------------------------------------------------------------
+# Cursor managed/synced skills (``~/.cursor/skills-cursor``)
+# ---------------------------------------------------------------------------
+# Cursor delivers its own built-in/managed skills (``migrate-to-skills``,
+# ``loop``, ``review``, …) by *syncing* them into ``~/.cursor/skills-cursor``,
+# distinct from the user-authored ``~/.cursor/skills``. The dir is declared in
+# ``_skills_dir_paths`` so it flows through the standard home-skills scan
+# (``_discover_home_skills_dirs``) — no bespoke wiring.
+# ---------------------------------------------------------------------------
+
+
+def test_cursor_skills_cursor_declared_in_skills_dir_paths():
+    """``~/.cursor/skills-cursor`` is declared among CursorDiscoverer's home skill
+    paths, alongside the user-authored ``~/.cursor/skills``."""
+    from agent_scan.agents import CursorDiscoverer
+
+    assert "~/.cursor/skills-cursor" in CursorDiscoverer._skills_dir_paths
+    assert "~/.cursor/skills" in CursorDiscoverer._skills_dir_paths
+
+
+def test_cursor_skills_cursor_dir_discovered(tmp_path):
+    """Skills synced into ``~/.cursor/skills-cursor`` are surfaced by
+    ``discover_skills`` under their own key — exercises the real
+    ``_skills_dir_paths`` wiring (no mock), so it guards the path staying live."""
+    from agent_scan.agents import CursorDiscoverer
+
+    skills_cursor = tmp_path / ".cursor" / "skills-cursor"
+    for name in ("migrate-to-skills", "loop"):
+        skill = skills_cursor / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Cursor managed skill {name}.\n---\n\nbody\n")
+
+    skills_dirs = CursorDiscoverer(tmp_path).discover_skills()
+
+    key = skills_cursor.as_posix()
+    assert key in skills_dirs, f"~/.cursor/skills-cursor must be surfaced; got: {list(skills_dirs)}"
+    skill_names = {name for name, _ in skills_dirs[key]}
+    assert {"migrate-to-skills", "loop"} <= skill_names, f"managed skills must be discovered; got: {skill_names}"
 
 
 # --- _walk_under_depth: PermissionError tolerance (--scan-all-users) ---
