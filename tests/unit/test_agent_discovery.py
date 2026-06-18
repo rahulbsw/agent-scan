@@ -5645,67 +5645,71 @@ def test_vscode_builtin_extension_dirs_per_platform(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Cursor built-in (application-bundled) skills
+# Cursor built-in / managed skills (``~/.cursor/skills-cursor``)
 # ---------------------------------------------------------------------------
-# Cursor ships built-in skills (``/migrate-to-skills``, ``/loop``, etc.) directly
-# in the application bundle at ``resources/app/skills``, NOT inside an extension
-# subdir. No other VSCode-family fork does this, so the logic lives entirely in
-# CursorDiscoverer: ``_builtin_skills_dir_paths`` (class-level path map) →
-# ``_builtin_skills_dirs()`` → overridden ``discover_skills()``.
-# See cursor.com/docs/skills ("Migrating rules and commands to skills").
+# Cursor's own first-party skills (``migrate-to-skills``, ``loop``, ``review``,
+# …) are not user-authored: Cursor *syncs* them into ``~/.cursor/skills-cursor``
+# (alongside ``.cursor-managed-skills-manifest.json`` / ``.sync-manifest.json``),
+# distinct from the user-authored ``~/.cursor/skills``. No other VSCode-family
+# fork ships such a dir, so the logic lives entirely in CursorDiscoverer:
+# ``_builtin_skills_dir_paths`` → ``_builtin_skills_dirs()`` → overridden
+# ``discover_skills()``. The dir is deliberately kept OUT of ``_skills_dir_paths``
+# so it is scanned once (by the built-in-skills path), not twice.
+# See cursor.com/docs/skills.
 # ---------------------------------------------------------------------------
 
 
-def test_cursor_builtin_skills_dir_paths_non_empty():
-    """CursorDiscoverer declares ``_builtin_skills_dir_paths`` with at least
-    the macOS, Windows, and Linux entries — one per platform Cursor ships on."""
+def test_cursor_builtin_skills_dir_paths_targets_skills_cursor():
+    """CursorDiscoverer's built-in-skills paths point at ``~/.cursor/skills-cursor``
+    (home-relative, platform-independent — not the old per-OS app-bundle map)."""
     from agent_scan.agents import CursorDiscoverer
 
-    paths = CursorDiscoverer._builtin_skills_dir_paths
-    assert "darwin" in paths, "macOS (darwin) entry must be declared"
-    assert "win32" in paths, "Windows (win32) entry must be declared"
-    assert "linux" in paths, "Linux entry must be declared"
+    assert "~/.cursor/skills-cursor" in CursorDiscoverer._builtin_skills_dir_paths
 
 
-def test_cursor_builtin_skills_dirs_macos_path(tmp_path, monkeypatch):
-    """On macOS the system-wide Cursor install path includes
-    ``/Applications/Cursor.app/Contents/Resources/app/skills``."""
-    import agent_scan.agents.vscode.cursor as cursor_mod
+def test_cursor_skills_cursor_scanned_once_not_in_skills_dir_paths():
+    """``~/.cursor/skills-cursor`` is owned by the built-in-skills scan, NOT by
+    ``_skills_dir_paths`` — otherwise ``discover_skills`` would scan it twice. The
+    user-authored ``~/.cursor/skills`` stays in ``_skills_dir_paths``."""
     from agent_scan.agents import CursorDiscoverer
 
-    monkeypatch.setattr(cursor_mod.sys, "platform", "darwin")
+    assert "~/.cursor/skills-cursor" not in CursorDiscoverer._skills_dir_paths
+    assert "~/.cursor/skills" in CursorDiscoverer._skills_dir_paths
+
+
+def test_cursor_builtin_skills_dirs_resolves_skills_cursor(tmp_path):
+    """``_builtin_skills_dirs`` resolves ``~/.cursor/skills-cursor`` against the
+    scanned home — no per-OS branching, so it is the same on every platform."""
+    from agent_scan.agents import CursorDiscoverer
+
     dirs = [p.as_posix() for p in CursorDiscoverer(tmp_path)._builtin_skills_dirs()]
-
-    expected = "/Applications/Cursor.app/Contents/Resources/app/skills"
-    assert any(d == expected for d in dirs), f"expected {expected!r} in built-in skills dirs; got: {dirs}"
+    assert dirs == [(tmp_path / ".cursor" / "skills-cursor").as_posix()]
 
 
 def test_cursor_builtin_skills_discovered_in_discover_skills(tmp_path, monkeypatch):
-    """Skills shipped inside the Cursor app bundle (``resources/app/skills``) are
-    surfaced by ``discover_skills`` — the ``/migrate-to-skills`` / ``/loop`` layout."""
+    """Skills under the built-in / managed skills dir are surfaced by
+    ``discover_skills`` — the override merges ``_discover_builtin_skills`` results."""
     from agent_scan.agents import CursorDiscoverer
 
-    # Simulate the application-level skills directory.
-    app_skills = tmp_path / "app" / "skills"
-    migrate_skill = app_skills / "migrate-to-skills"
+    # A built-in / managed skills dir (stands in for ~/.cursor/skills-cursor).
+    builtin_dir = tmp_path / "skills-cursor"
+    migrate_skill = builtin_dir / "migrate-to-skills"
     migrate_skill.mkdir(parents=True)
     (migrate_skill / "SKILL.md").write_text(
         "---\nname: migrate-to-skills\ndescription: Migrate rules and commands to skills.\n---\n\nbody\n"
     )
-    loop_skill = app_skills / "loop"
+    loop_skill = builtin_dir / "loop"
     loop_skill.mkdir(parents=True)
     (loop_skill / "SKILL.md").write_text("---\nname: loop\ndescription: Run a prompt on a schedule.\n---\n\nbody\n")
     (tmp_path / ".cursor").mkdir()
 
     discoverer = CursorDiscoverer(tmp_path)
-    monkeypatch.setattr(discoverer, "_builtin_skills_dirs", lambda: [app_skills])
+    monkeypatch.setattr(discoverer, "_builtin_skills_dirs", lambda: [builtin_dir])
 
     skills_dirs = discoverer.discover_skills()
 
-    assert app_skills.as_posix() in skills_dirs, (
-        f"application-bundled skills dir must be surfaced; got: {list(skills_dirs)}"
-    )
-    skill_names = {name for name, _ in skills_dirs[app_skills.as_posix()]}
+    assert builtin_dir.as_posix() in skills_dirs, f"built-in skills dir must be surfaced; got: {list(skills_dirs)}"
+    skill_names = {name for name, _ in skills_dirs[builtin_dir.as_posix()]}
     assert "migrate-to-skills" in skill_names, f"migrate-to-skills must be discovered; got: {skill_names}"
     assert "loop" in skill_names, f"loop must be discovered; got: {skill_names}"
 
@@ -5739,79 +5743,20 @@ def test_family_base_has_no_builtin_skills_logic():
 
 def test_other_vscode_family_discoverers_have_no_builtin_skills_logic(tmp_path):
     """VSCode, Windsurf, Kiro, and Antigravity have no ``_builtin_skills_dirs``
-    method — only Cursor ships a dedicated app-bundled skills dir."""
+    method — only Cursor ships a dedicated built-in / managed skills dir."""
     from agent_scan.agents import AntigravityDiscoverer, KiroDiscoverer, VSCodeDiscoverer, WindsurfDiscoverer
 
     for cls in (VSCodeDiscoverer, WindsurfDiscoverer, KiroDiscoverer, AntigravityDiscoverer):
         assert not hasattr(cls, "_builtin_skills_dirs"), (
             f"{cls.__name__} must not define _builtin_skills_dirs "
-            f"(only Cursor ships a dedicated app-bundled skills dir)"
+            f"(only Cursor ships a dedicated built-in / managed skills dir)"
         )
-
-
-@pytest.mark.parametrize("linux_platform", ["linux", "linux2"])
-def test_cursor_builtin_skills_dirs_linux(tmp_path, monkeypatch, linux_platform):
-    """On Linux the deb-installed Cursor path includes
-    ``/usr/share/cursor/resources/app/skills``."""
-    import agent_scan.agents.vscode.cursor as cursor_mod
-    from agent_scan.agents import CursorDiscoverer
-
-    monkeypatch.setattr(cursor_mod.sys, "platform", linux_platform)
-    dirs = [p.as_posix() for p in CursorDiscoverer(tmp_path)._builtin_skills_dirs()]
-
-    assert any("/usr/share/cursor/resources/app/skills" in d for d in dirs), (
-        f"Linux Cursor built-in skills path not found; got: {dirs}"
-    )
-
-
-def test_cursor_builtin_skills_dirs_windows(tmp_path, monkeypatch):
-    """On Windows the per-user NSIS install path includes
-    ``AppData/Local/Programs/Cursor/resources/app/skills``."""
-    import agent_scan.agents.vscode.cursor as cursor_mod
-    from agent_scan.agents import CursorDiscoverer
-
-    monkeypatch.setattr(cursor_mod.sys, "platform", "win32")
-    dirs = [p.as_posix() for p in CursorDiscoverer(tmp_path)._builtin_skills_dirs()]
-
-    assert any("Cursor/resources/app/skills" in d for d in dirs), (
-        f"Windows Cursor built-in skills path not found; got: {dirs}"
-    )
-
-
-def test_cursor_builtin_skills_dirs_empty_on_unsupported_platform(tmp_path, monkeypatch):
-    """An unrecognized platform yields no built-in skills dirs."""
-    import agent_scan.agents.vscode.cursor as cursor_mod
-    from agent_scan.agents import CursorDiscoverer
-
-    monkeypatch.setattr(cursor_mod.sys, "platform", "sunos5")
-
-    assert CursorDiscoverer(tmp_path)._builtin_skills_dirs() == []
-
-
-# ---------------------------------------------------------------------------
-# Cursor managed/synced skills (``~/.cursor/skills-cursor``)
-# ---------------------------------------------------------------------------
-# Cursor delivers its own built-in/managed skills (``migrate-to-skills``,
-# ``loop``, ``review``, …) by *syncing* them into ``~/.cursor/skills-cursor``,
-# distinct from the user-authored ``~/.cursor/skills``. The dir is declared in
-# ``_skills_dir_paths`` so it flows through the standard home-skills scan
-# (``_discover_home_skills_dirs``) — no bespoke wiring.
-# ---------------------------------------------------------------------------
-
-
-def test_cursor_skills_cursor_declared_in_skills_dir_paths():
-    """``~/.cursor/skills-cursor`` is declared among CursorDiscoverer's home skill
-    paths, alongside the user-authored ``~/.cursor/skills``."""
-    from agent_scan.agents import CursorDiscoverer
-
-    assert "~/.cursor/skills-cursor" in CursorDiscoverer._skills_dir_paths
-    assert "~/.cursor/skills" in CursorDiscoverer._skills_dir_paths
 
 
 def test_cursor_skills_cursor_dir_discovered(tmp_path):
     """Skills synced into ``~/.cursor/skills-cursor`` are surfaced by
-    ``discover_skills`` under their own key — exercises the real
-    ``_skills_dir_paths`` wiring (no mock), so it guards the path staying live."""
+    ``discover_skills`` via the built-in-skills scan — exercises the real
+    ``_builtin_skills_dir_paths`` wiring (no mock), so the path can't regress."""
     from agent_scan.agents import CursorDiscoverer
 
     skills_cursor = tmp_path / ".cursor" / "skills-cursor"

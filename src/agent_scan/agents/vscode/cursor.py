@@ -1,6 +1,5 @@
 """Cursor discoverer."""
 
-import sys
 from pathlib import Path
 from typing import ClassVar
 
@@ -35,13 +34,12 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
         ".codex/skills",
     )
     # Per cursor.com/docs/skills the same four paths apply at the user/home level
-    # for skills available across all workspaces.
-    # ``~/.cursor/skills-cursor/`` is not documented but observed on disk as
-    # the location Cursor uses for its own built-in (synced/managed) skills at
-    # the user level — distinct from user-authored ``~/.cursor/skills/``.
+    # for skills available across all workspaces. (Cursor's own synced built-in /
+    # managed skills live separately at ``~/.cursor/skills-cursor`` — scanned via
+    # ``_builtin_skills_dir_paths`` below, kept out of this tuple to avoid a
+    # double scan.)
     _skills_dir_paths = (
         "~/.cursor/skills",
-        "~/.cursor/skills-cursor",
         "~/.agents/skills",
         "~/.claude/skills",
         "~/.codex/skills",
@@ -60,31 +58,24 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
         # is omitted.
         "linux": ("/usr/share/cursor/resources/app/extensions",),
     }
-    # Per-OS paths to the app-bundled ``skills/`` directory, parallel to
-    # ``resources/app/extensions`` above. Cursor 2.4 introduced built-in skills
-    # (``/migrate-to-skills``); later versions added more (``/loop``,
-    # ``/multitask``, ``/review``, …). No other VSCode-family fork ships a
-    # standalone app-level skills dir, so this is Cursor-specific rather than a
-    # base-class extension point. See cursor.com/docs/skills.
-    _builtin_skills_dir_paths: ClassVar[dict[str, tuple[str, ...]]] = {
-        "darwin": (
-            "/Applications/Cursor.app/Contents/Resources/app/skills",  # inferred — verify: mirrors extensions layout
-            "~/Applications/Cursor.app/Contents/Resources/app/skills",  # inferred — verify (user-local install)
-        ),
-        # inferred — verify: per-user NSIS install; mirrors extensions layout.
-        "win32": ("~/AppData/Local/Programs/Cursor/resources/app/skills",),
-        # inferred — verify: deb install root; mirrors extensions layout.
-        # The Linux AppImage build has no stable path and is omitted.
-        "linux": ("/usr/share/cursor/resources/app/skills",),
-    }
+    # Cursor's own built-in / managed skills (``migrate-to-skills``, ``loop``,
+    # ``review``, …) are not user-authored: Cursor *syncs* them into
+    # ``~/.cursor/skills-cursor`` at the user level (alongside
+    # ``.cursor-managed-skills-manifest.json`` / ``.sync-manifest.json``),
+    # distinct from the user-authored ``~/.cursor/skills``. Home-relative and the
+    # same on every OS (Cursor's user dir is ``~/.cursor`` everywhere), so this is
+    # a flat tuple rather than the per-OS map ``_builtin_extension_dir_templates``
+    # above needs. Kept out of ``_skills_dir_paths`` so the dir is scanned once,
+    # not twice. No other VSCode-family fork ships such a dir. See
+    # cursor.com/docs/skills.
+    _builtin_skills_dir_paths: ClassVar[tuple[str, ...]] = ("~/.cursor/skills-cursor",)
 
     def _builtin_skills_dirs(self) -> list[Path]:
-        """Resolve the per-OS app-bundled skills directories for this install."""
-        key = "linux" if sys.platform in ("linux", "linux2") else sys.platform
-        return [expand_path(Path(raw), self.home_directory) for raw in self._builtin_skills_dir_paths.get(key, ())]
+        """Resolve the home-relative built-in / managed skills directories."""
+        return [expand_path(Path(raw), self.home_directory) for raw in self._builtin_skills_dir_paths]
 
     def _discover_builtin_skills(self) -> SkillsDirsResult:
-        """Scan the Cursor app-bundled skills directories (``resources/app/skills``)."""
+        """Scan Cursor's synced built-in / managed skills dir(s) (``~/.cursor/skills-cursor``)."""
         result: SkillsDirsResult = {}
         for skills_dir in self._builtin_skills_dirs():
             entries = self._scan_skills_dir(skills_dir)
