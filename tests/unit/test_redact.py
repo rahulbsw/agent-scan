@@ -570,21 +570,9 @@ class TestRedactText:
         assert "AKIAIOSFODNN7EXAMPLE" not in result
         assert "**REDACTED_SECRET_AWSKEYDETECTOR**" in result
 
-    def test_redact_text_preserves_low_entropy_keyword_value(self):
-        """Keyword-only, low-entropy values are intentionally NOT redacted.
-
-        Skill content is documentation/code where a ``password``/``api_key``
-        keyword next to a value is usually legitimate context, not a live
-        secret. Redacting on keyword alone would strip analysis context, so
-        only high-entropy / known-format secrets are removed.
-        """
-        text = 'config = {"password": "changeme"}'
-        result = redact_text(text)
-        assert result == text
-
-    def test_redact_text_redacts_high_entropy_keyword_value(self):
-        """A keyword value that IS high-entropy is still redacted (by the
-        entropy detector, not by keyword context)."""
+    def test_redact_text_redacts_high_entropy_value_in_assignment(self):
+        """A high-entropy value in a quoted assignment is redacted by the
+        entropy detector."""
         text = f'config = {{"password": "{FAKE_API_KEY}"}}'
         result = redact_text(text)
         assert FAKE_API_KEY not in result

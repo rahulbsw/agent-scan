@@ -475,15 +475,6 @@ def _redact_secrets_in_line(line: str, plugins: list) -> str:
        detected. Only the matched candidate substring is replaced, so the
        surrounding markup stays intact.
 
-    ``KeywordDetector`` is intentionally NOT used here. Unlike :func:`redact_args`
-    (where a flag's value is almost always a credential), skill content is
-    free-form documentation and code: a keyword like ``password`` / ``api_key``
-    / ``token`` next to a value is usually legitimate explanatory context
-    (examples, variable names, prose), not a real secret. Redacting on keyword
-    alone would strip large amounts of context the downstream analysis relies
-    on, so detection is scoped to high-entropy and known-format secrets that
-    actually look like live credentials.
-
     Replacements are applied longest-first so a secret that is a substring of
     another does not corrupt the marker inserted for the longer one.
     """
@@ -567,7 +558,7 @@ def _is_synthetic_binary_description(text: str) -> bool:
 
 
 def redact_signature(signature: ServerSignature) -> ServerSignature:
-    """Redact secrets and absolute paths from a (skill) ``ServerSignature`` in place.
+    """Redact secrets from a (skill) ``ServerSignature`` in place.
 
     Skill signatures embed raw file contents in their prompt / resource / tool
     ``description`` fields, and the skill's frontmatter description in
