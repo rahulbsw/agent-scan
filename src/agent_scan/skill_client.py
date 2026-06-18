@@ -17,8 +17,19 @@ from mcp.types import (
 from yaml.error import YAMLError
 
 from agent_scan.models import ServerSignature, SkillServer
+from agent_scan.redact import redact_signature
 
 logger = logging.getLogger(__name__)
+
+# Synthetic description that ``traverse_skill_tree`` emits for a binary resource:
+# this fixed prefix followed by the file's sha256 hex digest. It is generated
+# entirely by us and contains no user content, so ``redact``'s
+# ``_is_synthetic_binary_description`` exempts it from secret redaction --
+# otherwise the 64-char digest trips the hex high-entropy detector and every
+# binary collapses to an identical, useless description. ``redact`` imports this
+# constant (lazily, to avoid an import cycle) so the marker and matcher cannot
+# drift apart.
+BINARY_FILE_DESCRIPTION_PREFIX = "Binary file. Hash: "
 
 # Cap traversal depth when walking a commands dir, mirroring the value used by
 # the discoverer plugin/extension walks (``agents.base._MAX_PLUGIN_RGLOB_DEPTH``).
@@ -83,6 +94,16 @@ def _inspect_skill_file(expanded_path: str) -> ServerSignature:
 
 
 def inspect_skill(config: SkillServer) -> ServerSignature:
+    """Read a skill (single file or ``<name>/SKILL.md`` directory) into a signature.
+
+    Secrets in the skill's contents are redacted in place here -- the single
+    point where skill files are read -- so the signature is already sanitized by
+    the time it reaches the analysis / upload calls.
+    """
+    return redact_signature(_inspect_skill(config))
+
+
+def _inspect_skill(config: SkillServer) -> ServerSignature:
     logger.info(f"Scanning skill at path: {config.path}")
     expanded_path = os.path.expanduser(config.path)
     if os.path.isfile(expanded_path):
@@ -184,7 +205,7 @@ def traverse_skill_tree(skill_path: str, relative_path: str | None) -> tuple[lis
                 logger.exception(f"Error reading file: {file}. The file is not a bianry")
                 with open(os.path.expanduser(full_path), "rb") as f:
                     content_hash = hashlib.sha256(f.read()).hexdigest()
-                content = f"Binary file. Hash: {content_hash}"
+                content = f"{BINARY_FILE_DESCRIPTION_PREFIX}{content_hash}"
             resources.append(
                 Resource(
                     name=file,
