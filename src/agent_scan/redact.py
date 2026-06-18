@@ -182,6 +182,31 @@ def _wrap_for_entropy(value: str) -> str:
     return '"' + value.replace('"', r"\"") + '"'
 
 
+# Longest pure-ASCII-lowercase token (``^[a-z]+$``) safe to skip without running
+# any plugin: it matches no format detector (all need a digit/uppercase/special/
+# prefix) and no HexHighEntropyString (only [a-f] is hex -> entropy <2.58 < 3.0
+# limit). Base64HighEntropyString (limit 4.5) is bounded by log2(len), so a cap
+# up to 22 is provably safe; 15 is a conservative margin. A lower cap only skips
+# fewer tokens, never one a plugin would flag.
+_PROSE_MAX_LEN = 15
+
+
+def _could_be_secret(value: str) -> bool:
+    """Cheap O(len) pre-filter: ``True`` for every value any plugin could flag,
+    ``False`` only for short pure-ASCII-lowercase tokens (see
+    :data:`_PROSE_MAX_LEN`), which dominate prose/code and match no detector.
+
+    Must never reject a value that would match, or a secret leaks; passing
+    through a non-match is fine (it just falls to the full scan).
+    """
+    return (
+        len(value) > _PROSE_MAX_LEN  # long enough to reach a high-entropy threshold
+        or not value.isalpha()  # has a digit, separator, or other non-letter
+        or not value.islower()  # has an uppercase letter (or no cased letters at all)
+        or not value.isascii()  # has a non-ASCII character
+    )
+
+
 def _detect_secret_in_plugins(value: str, plugins: list) -> str | None:
     """Two-pass scan of ``value`` against an already-built ``plugins`` list.
 
@@ -200,6 +225,11 @@ def _detect_secret_in_plugins(value: str, plugins: list) -> str | None:
     ``transient_settings(_DETECT_SECRETS_CONFIG)`` context that ``plugins``
     was built under.
     """
+    # Cheap pre-filter: skip the full plugin battery for values that provably
+    # match nothing (see :func:`_could_be_secret`). Conservative -- never
+    # rejects a value a plugin would flag -- so output is unchanged.
+    if not _could_be_secret(value):
+        return None
     # Pass 1: format-based named detectors on the bare value.
     for plugin in plugins:
         if isinstance(plugin, HighEntropyStringsPlugin):
