@@ -3498,11 +3498,12 @@ def test_vscode_extension_walk_respects_max_depth_cap(tmp_path, monkeypatch):
     pathologically deep trees blowing up the walk.
     """
     from agent_scan.agents import VSCodeDiscoverer
-    from agent_scan.agents.vscode import base as vscode_base
+    from agent_scan.agents import base as agent_base
 
-    # The extension walk reads ``_MAX_PLUGIN_RGLOB_DEPTH`` from its own module
-    # (agents.vscode.base), so patch the cap there.
-    monkeypatch.setattr(vscode_base, "_MAX_PLUGIN_RGLOB_DEPTH", 3)
+    # The extension MCP walk delegates to ``AgentDiscoverer._discover_plugin_mcp_files``
+    # (agents.base), which reads ``_MAX_PLUGIN_RGLOB_DEPTH`` from that module, so patch
+    # the cap there.
+    monkeypatch.setattr(agent_base, "_MAX_PLUGIN_RGLOB_DEPTH", 3)
 
     # Scan the tree as a built-in (manifest-less) root so it is walked wholesale
     # and depth *pruning* — not manifest gating — is what's under test; depth is
