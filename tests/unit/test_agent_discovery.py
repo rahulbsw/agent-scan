@@ -3382,6 +3382,92 @@ def test_cursor_extension_skills_discovers_skills_dir(tmp_path):
     assert len(matching) == 1
 
 
+def test_cursor_plugin_mcp_discovers_mcp_json_flat(tmp_path):
+    """Installed Cursor plugins under ``~/.cursor/plugins/cache`` are scanned for a
+    flat ``{name: serverConfig}`` ``mcp.json`` (the Linear-plugin shape)."""
+    from agent_scan.agents import CursorDiscoverer
+
+    plugin_dir = tmp_path / ".cursor" / "plugins" / "cache" / "cursor-public" / "linear" / "abc123"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "mcp.json").write_text('{"linear": {"command": "linear-mcp"}}')
+
+    mcp_configs = CursorDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/cursor-public/linear/abc123/mcp.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, _ = entries[0]
+    assert name == "linear"
+
+
+def test_cursor_plugin_mcp_discovers_dot_mcp_json_wrapped(tmp_path):
+    """Installed Cursor plugins are scanned for a wrapped ``{"mcpServers": ...}``
+    ``.mcp.json`` carrying a remote server (the Atlassian-plugin shape)."""
+    from agent_scan.agents import CursorDiscoverer
+
+    plugin_dir = tmp_path / ".cursor" / "plugins" / "cache" / "cursor-public" / "atlassian" / "def456"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / ".mcp.json").write_text(
+        '{"mcpServers": {"atlassian": {"type": "http", "url": "https://mcp.atlassian.com/v1/mcp"}}}'
+    )
+
+    mcp_configs = CursorDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/atlassian/def456/.mcp.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, _ = entries[0]
+    assert name == "atlassian"
+
+
+def test_cursor_plugin_skills_discovers_skills_dir(tmp_path):
+    """Installed Cursor plugins can ship a ``skills/`` directory."""
+    from agent_scan.agents import CursorDiscoverer
+
+    skill_dir = (
+        tmp_path / ".cursor" / "plugins" / "cache" / "cursor-public" / "datadog" / "fed789" / "skills" / "ddsetup"
+    )
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: ddsetup\ndescription: d\n---\n\nbody.\n")
+
+    skills_dirs = CursorDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/datadog/fed789/skills")]
+    assert len(matching) == 1
+
+
+def test_cursor_plugin_local_dir_scanned(tmp_path):
+    """Locally-installed Cursor plugins under ``~/.cursor/plugins/local`` are scanned too."""
+    from agent_scan.agents import CursorDiscoverer
+
+    plugin_dir = tmp_path / ".cursor" / "plugins" / "local" / "my-plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "mcp.json").write_text('{"mcpServers": {"local-srv": {"command": "l"}}}')
+
+    mcp_configs = CursorDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/plugins/local/my-plugin/mcp.json")]
+    assert len(matching) == 1
+    name, _ = mcp_configs[matching[0]][0]
+    assert name == "local-srv"
+
+
+def test_cursor_plugins_marketplaces_not_scanned(tmp_path):
+    """Only *installed* plugins (``cache``/``local``) are scanned; a marketplace
+    catalog clone under ``~/.cursor/plugins/marketplaces`` is NOT walked."""
+    from agent_scan.agents import CursorDiscoverer
+
+    catalog_dir = tmp_path / ".cursor" / "plugins" / "marketplaces" / "cursor-public" / "uninstalled" / "xyz"
+    catalog_dir.mkdir(parents=True)
+    (catalog_dir / "mcp.json").write_text('{"mcpServers": {"uninstalled-srv": {"command": "u"}}}')
+
+    mcp_configs = CursorDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert not any("/marketplaces/" in k for k in mcp_configs)
+
+
 def test_windsurf_extension_mcp_discovers_mcp_json(tmp_path):
     """Windsurf is a VSCode fork. Its Codeium *engine* state lives under
     ``~/.codeium/windsurf`` (the MCP/skill paths), but its VSCode-fork *user data*

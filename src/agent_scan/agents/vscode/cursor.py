@@ -3,7 +3,17 @@
 from pathlib import Path
 from typing import ClassVar
 
-from agent_scan.agents.vscode.base import SkillsDirsResult, VSCodeFamilyDiscoverer
+from agent_scan.agents.base import (
+    _MAX_PLUGIN_RGLOB_DEPTH,
+    McpConfigsResult,
+    _walk_under_depth,
+)
+from agent_scan.agents.vscode.base import (
+    _VSCODE_FAMILY_FORMATS,
+    SkillsDirsResult,
+    VSCodeFamilyDiscoverer,
+)
+from agent_scan.skill_client import inspect_skills_dir
 from agent_scan.well_known_clients import expand_path
 
 
@@ -69,6 +79,22 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
     # not twice. No other VSCode-family fork ships such a dir. See
     # cursor.com/docs/skills.
     _builtin_skills_dir_paths: ClassVar[tuple[str, ...]] = ("~/.cursor/skills-cursor",)
+    # Cursor's plugin install tree, distinct from ``~/.cursor/extensions``: an
+    # installed plugin lives under ``~/.cursor/plugins/<subdir>/…/<plugin>`` and
+    # ships a flat ``{name: cfg}`` or wrapped ``{"mcpServers": …}`` ``mcp.json`` /
+    # ``.mcp.json`` plus a ``skills/`` dir, mirroring Claude Code's plugin layout.
+    # Cursor's docs document only the ``mcp.json`` *format*, not these on-disk
+    # install paths — verified empirically (Jun 2026), tagged like the other
+    # verified-vs-inferred paths in this family.
+    _plugin_root_path = "~/.cursor/plugins"
+    # Only the *installed*-plugin subtrees are scanned: ``cache`` holds plugins
+    # installed from a marketplace (grouped by marketplace name) and ``local``
+    # holds locally-installed ones. The ``plugins`` root is never walked wholesale,
+    # so a future marketplace *catalog* clone (a ``marketplaces`` sibling, as in
+    # Claude Code) is excluded by construction — only plugins the user actually
+    # installed are surfaced. Mirrors ``ClaudeCodeDiscoverer._plugin_subdirs``
+    # deliberately skipping ``marketplaces``.
+    _plugin_subdirs: ClassVar[tuple[str, ...]] = ("cache", "local")
 
     def _builtin_skills_dirs(self) -> list[Path]:
         """Resolve the home-relative built-in / managed skills directories."""
@@ -86,4 +112,53 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
     def discover_skills(self) -> SkillsDirsResult:
         result = super().discover_skills()
         result.update(self._discover_builtin_skills())
+        result.update(self._discover_plugin_skills())
+        return result
+
+    def discover_mcp_servers(self) -> McpConfigsResult:
+        result = super().discover_mcp_servers()
+        result.update(self._discover_plugin_mcp_servers())
+        return result
+
+    # --- private: installed-plugin walks (~/.cursor/plugins, parity with Claude Code) ---
+
+    def _plugin_base_dirs(self) -> list[Path]:
+        """Each installed-plugin subtree to walk: ``~/.cursor/plugins/<subdir>`` for
+        every entry in :attr:`_plugin_subdirs` (``cache``/``local``). Enumerating the
+        named subdirs — rather than walking the ``plugins`` root — keeps the scan to
+        *installed* plugins and excludes any marketplace catalog sibling."""
+        root = expand_path(Path(self._plugin_root_path), self.home_directory)
+        return [root / sub for sub in self._plugin_subdirs]
+
+    def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
+        """Scan ``mcp.json`` / ``.mcp.json`` under each installed plugin.
+
+        Cursor plugins ship MCP config under either filename and in either the flat
+        ``{name: serverConfig}`` or wrapped ``{"mcpServers": {...}}`` shape, so both
+        names are walked and parsed via :attr:`_VSCODE_FAMILY_FORMATS`.
+        ``skip_unrecognized=True`` drops stray files merely *named* ``mcp.json`` (a
+        plugin may ship a JSON schema / fixture) rather than surfacing them as
+        ``CouldNotParseMCPConfig`` false positives; a genuinely-malformed MCP file
+        is still reported. Mirrors
+        :meth:`ClaudeCodeDiscoverer._discover_plugin_mcp_servers`."""
+        result: McpConfigsResult = {}
+        for base in self._plugin_base_dirs():
+            for name in ("mcp.json", ".mcp.json"):
+                for mcp_file in _walk_under_depth(base, name, _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
+                    if not mcp_file.is_file():
+                        continue
+                    parsed = self._parse_mcp_file(mcp_file, formats=_VSCODE_FAMILY_FORMATS, skip_unrecognized=True)
+                    if parsed is None:
+                        continue
+                    result[mcp_file.as_posix()] = parsed
+        return result
+
+    def _discover_plugin_skills(self) -> SkillsDirsResult:
+        """Scan ``skills/`` subdirs under each installed plugin (parity with
+        :meth:`VSCodeFamilyDiscoverer._discover_extension_skills`)."""
+        result: SkillsDirsResult = {}
+        for base in self._plugin_base_dirs():
+            for skills_dir in _walk_under_depth(base, "skills", _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
+                if skills_dir.is_dir():
+                    result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
         return result
