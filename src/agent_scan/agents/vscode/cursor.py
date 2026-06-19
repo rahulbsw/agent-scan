@@ -75,21 +75,16 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
     # not twice. No other VSCode-family fork ships such a dir. See
     # cursor.com/docs/skills.
     _builtin_skills_dir_paths: ClassVar[tuple[str, ...]] = ("~/.cursor/skills-cursor",)
-    # Cursor's plugin install tree, distinct from ``~/.cursor/extensions``: an
-    # installed plugin lives under ``~/.cursor/plugins/<subdir>/…/<plugin>`` and
-    # ships a flat ``{name: cfg}`` or wrapped ``{"mcpServers": …}`` ``mcp.json`` /
-    # ``.mcp.json`` plus a ``skills/`` dir, mirroring Claude Code's plugin layout.
-    # Cursor's docs document only the ``mcp.json`` *format*, not these on-disk
-    # install paths — verified empirically (Jun 2026), tagged like the other
-    # verified-vs-inferred paths in this family.
+    # Cursor's plugin tree, distinct from ``~/.cursor/extensions``: an installed
+    # plugin lives at ``~/.cursor/plugins/<subdir>/…/<plugin>`` with a flat or
+    # wrapped ``mcp.json`` / ``.mcp.json`` and a ``skills/`` dir, like Claude
+    # Code's plugins. Cursor's docs cover the ``mcp.json`` format but not these
+    # install paths — verified empirically (Jun 2026).
     _plugin_root_path = "~/.cursor/plugins"
-    # Only the *installed*-plugin subtrees are scanned: ``cache`` holds plugins
-    # installed from a marketplace (grouped by marketplace name) and ``local``
-    # holds locally-installed ones. The ``plugins`` root is never walked wholesale,
-    # so a future marketplace *catalog* clone (a ``marketplaces`` sibling, as in
-    # Claude Code) is excluded by construction — only plugins the user actually
-    # installed are surfaced. Mirrors ``ClaudeCodeDiscoverer._plugin_subdirs``
-    # deliberately skipping ``marketplaces``.
+    # Installed-plugin subtrees only: ``cache`` (marketplace-installed) and
+    # ``local`` (locally-installed). The ``plugins`` root is never walked
+    # wholesale, so a marketplace *catalog* clone (a ``marketplaces`` sibling, as
+    # in Claude Code) is excluded by construction.
     _plugin_subdirs: ClassVar[tuple[str, ...]] = ("cache", "local")
 
     def _builtin_skills_dirs(self) -> list[Path]:
@@ -119,24 +114,17 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
     # --- private: installed-plugin walks (~/.cursor/plugins, parity with Claude Code) ---
 
     def _plugin_base_dirs(self) -> list[Path]:
-        """Each installed-plugin subtree to walk: ``~/.cursor/plugins/<subdir>`` for
-        every entry in :attr:`_plugin_subdirs` (``cache``/``local``). Enumerating the
-        named subdirs — rather than walking the ``plugins`` root — keeps the scan to
-        *installed* plugins and excludes any marketplace catalog sibling."""
+        """Installed-plugin subtrees to walk: ``~/.cursor/plugins/<subdir>`` per
+        :attr:`_plugin_subdirs`. Enumerating named subdirs (not the ``plugins``
+        root) keeps the scan to installed plugins, excluding any catalog sibling."""
         root = expand_path(Path(self._plugin_root_path), self.home_directory)
         return [root / sub for sub in self._plugin_subdirs]
 
     def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
         """Scan ``mcp.json`` / ``.mcp.json`` under each installed plugin via the
-        shared :meth:`_discover_plugin_mcp_files` walk.
-
-        Cursor plugins ship MCP config under either filename and in either the flat
-        ``{name: serverConfig}`` or wrapped ``{"mcpServers": {...}}`` shape, so both
-        names are walked and parsed via :attr:`_VSCODE_FAMILY_FORMATS`.
-        ``skip_unrecognized=True`` drops stray files merely *named* ``mcp.json`` (a
-        plugin may ship a JSON schema / fixture) rather than surfacing them as
-        ``CouldNotParseMCPConfig`` false positives; a genuinely-malformed MCP file
-        is still reported."""
+        shared :meth:`_discover_plugin_mcp_files`. Cursor plugins use either
+        filename and the flat or wrapped shape; ``skip_unrecognized=True`` drops
+        stray files merely *named* ``mcp.json`` instead of flagging them malformed."""
         return self._discover_plugin_mcp_files(
             self._plugin_base_dirs(),
             ("mcp.json", ".mcp.json"),
@@ -144,7 +132,6 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
         )
 
     def _discover_plugin_skills(self) -> SkillsDirsResult:
-        """Scan ``skills/`` subdirs under each installed plugin via the shared
-        :meth:`_discover_skill_and_command_dirs` walk (parity with the Claude Code /
-        Codex plugin-skill walks)."""
+        """Scan ``skills/`` under each installed plugin via the shared
+        :meth:`_discover_skill_and_command_dirs`."""
         return self._discover_skill_and_command_dirs(self._plugin_base_dirs(), "skills", inspect_skills_dir)

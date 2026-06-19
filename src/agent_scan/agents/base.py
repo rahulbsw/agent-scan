@@ -420,19 +420,14 @@ class AgentDiscoverer(ABC):
         filenames: tuple[str, ...],
         parse_fn: Callable[[Path], McpScanResult],
     ) -> McpConfigsResult:
-        """Walk each base dir for plugin MCP config files named in ``filenames`` and
-        parse each hit via ``parse_fn``, keyed by absolute file path.
+        """Walk each base dir for plugin MCP files named in ``filenames``, parse
+        each hit via ``parse_fn``, keyed by absolute path.
 
         The MCP counterpart of :meth:`_discover_skill_and_command_dirs`, shared by
-        the Claude Code, Codex, and Cursor installed-plugin walks — all iterate
-        identically: ``_walk_under_depth`` for each filename under each base
-        (skipping unreadable bases, see its docstring), then ``parse_fn`` per hit.
-        Each agent supplies its own ``filenames`` (``.mcp.json`` for Claude Code &
-        Codex; both ``mcp.json`` and ``.mcp.json`` for Cursor) and its own
-        ``parse_fn`` (which encodes that agent's format union / snake-case handling
-        / ``skip_unrecognized`` policy), so per-agent parsing stays in the subclass
-        while the walk skeleton is shared. A falsy parse result — ``None``
-        (missing/empty/unrecognized) or an empty server list — is skipped; a truthy
+        the Claude Code, Codex, and Cursor plugin walks. Each agent supplies its own
+        ``filenames`` and ``parse_fn`` (format union / snake-case / ``skip_unrecognized``
+        policy), so per-agent parsing stays in the subclass while the walk is shared.
+        A falsy result (``None`` or empty list) is skipped; a truthy
         ``CouldNotParseMCPConfig`` is recorded.
         """
         result: McpConfigsResult = {}

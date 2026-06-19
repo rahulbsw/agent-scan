@@ -297,13 +297,9 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         return [root / sub for root in self._plugin_root_dirs() for sub in self._plugin_subdirs]
 
     def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
-        """Scan plugin ``.mcp.json`` files under every plugin base dir.
-
-        Plugin ``.mcp.json`` files use the flat ``{name: serverConfig}`` format
-        (no ``mcpServers`` wrapper). A top-level ``mcpServers`` key is also
-        tolerated for plugins that ship the wrapped format. Walk skeleton is the
-        shared :meth:`_discover_plugin_mcp_files`; only the format union is
-        Claude-Code-specific.
+        """Scan plugin ``.mcp.json`` files (flat ``{name: serverConfig}`` or wrapped
+        ``mcpServers``) via the shared :meth:`_discover_plugin_mcp_files`; only the
+        format union is Claude-Code-specific.
         """
         return self._discover_plugin_mcp_files(
             self._plugin_base_dirs(),
