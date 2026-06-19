@@ -80,7 +80,7 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
     # wrapped ``mcp.json`` / ``.mcp.json`` and a ``skills/`` dir, like Claude
     # Code's plugins. Cursor's docs cover the ``mcp.json`` format but not these
     # install paths — verified empirically (Jun 2026).
-    _plugin_root_path = "~/.cursor/plugins"
+    _plugin_root_path: ClassVar[str] = "~/.cursor/plugins"
     # Installed-plugin subtrees only: ``cache`` (marketplace-installed) and
     # ``local`` (locally-installed). The ``plugins`` root is never walked
     # wholesale, so a marketplace *catalog* clone (a ``marketplaces`` sibling, as
