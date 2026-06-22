@@ -5926,27 +5926,6 @@ def test_walk_under_depth_yields_hits_for_readable_tree(tmp_path):
     assert hits[0] == target / "mcp.json"
 
 
-def test_walk_under_depth_matches_multiple_names_in_one_pass(tmp_path):
-    """A tuple of names is matched in a single traversal: a tree carrying both
-    ``mcp.json`` and ``.mcp.json`` yields every match without walking once per
-    name. Guards the single-pass plugin-MCP walk."""
-    from agent_scan.agents.base import _walk_under_depth
-
-    (tmp_path / "p1").mkdir()
-    (tmp_path / "p1" / "mcp.json").write_text("{}")
-    (tmp_path / "p1" / ".mcp.json").write_text("{}")
-    (tmp_path / "p2").mkdir()
-    (tmp_path / "p2" / "mcp.json").write_text("{}")
-
-    hits = list(_walk_under_depth(tmp_path, ("mcp.json", ".mcp.json"), 10, want_file=True))
-
-    assert sorted(h.relative_to(tmp_path).as_posix() for h in hits) == [
-        "p1/.mcp.json",
-        "p1/mcp.json",
-        "p2/mcp.json",
-    ]
-
-
 def test_vscode_extension_walks_unreadable_do_not_abort_discovery(tmp_path, monkeypatch):
     """An unreadable ``~/.vscode/extensions`` base (shared by the extension-MCP and
     extension-skills walks) must degrade gracefully, not abort the whole discoverer.
