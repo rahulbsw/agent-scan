@@ -54,9 +54,16 @@ _MAX_PLUGIN_RGLOB_DEPTH = 10
 _MAX_CONFIG_FILE_BYTES = 20 * 1024 * 1024  # 20 MiB
 
 
-def _walk_under_depth(base: Path, name: str, max_path_depth: int, *, want_file: bool) -> Iterator[Path]:
-    """Yield paths named ``name`` under ``base``, pruning traversal so each yielded
-    path's relative parts count is at most ``max_path_depth``.
+def _walk_under_depth(
+    base: Path, name: str | tuple[str, ...], max_path_depth: int, *, want_file: bool
+) -> Iterator[Path]:
+    """Yield paths whose final component is ``name`` — or any entry of ``name`` when
+    it is a tuple — under ``base``, pruning traversal so each yielded path's relative
+    parts count is at most ``max_path_depth``.
+
+    Passing a tuple matches every name in a single traversal (e.g. a plugin tree
+    carrying both ``mcp.json`` and ``.mcp.json``), so the tree is walked once rather
+    than once per name.
 
     Unlike ``Path.rglob`` + post-hoc filtering, traversal stops at the cap rather
     than walking the full subtree first — so a pathologically deep plugin layout
@@ -75,6 +82,7 @@ def _walk_under_depth(base: Path, name: str, max_path_depth: int, *, want_file: 
     leading ``exists()`` probe. Mirrors the tolerance ``_load_json_file`` and
     ``profiles_dir.iterdir`` already apply.
     """
+    names = (name,) if isinstance(name, str) else name
     try:
         if not base.exists():
             return
@@ -83,8 +91,9 @@ def _walk_under_depth(base: Path, name: str, max_path_depth: int, *, want_file: 
             root = Path(root_str)
             dir_depth = len(root.relative_to(base).parts)
             candidates = files if want_file else dirs
-            if name in candidates:
-                hits.append(root / name)
+            for n in names:
+                if n in candidates:
+                    hits.append(root / n)
             # The dir we're in is at depth `dir_depth`; an entry inside it sits at
             # depth+1. Prune once depth+1 reaches the cap so we don't descend further.
             if dir_depth + 1 >= max_path_depth:
@@ -427,19 +436,20 @@ class AgentDiscoverer(ABC):
         the Claude Code, Codex, and Cursor plugin walks. Each agent supplies its own
         ``filenames`` and ``parse_fn`` (format union / snake-case / ``skip_unrecognized``
         policy), so per-agent parsing stays in the subclass while the walk is shared.
-        A falsy result (``None`` or empty list) is skipped; a truthy
-        ``CouldNotParseMCPConfig`` is recorded.
+        All ``filenames`` are matched in a single traversal per base, so a tree
+        carrying both ``mcp.json`` and ``.mcp.json`` is walked once. A falsy result
+        (``None`` or empty list) is skipped; a truthy ``CouldNotParseMCPConfig`` is
+        recorded.
         """
         result: McpConfigsResult = {}
         for base in bases:
-            for name in filenames:
-                for mcp_file in _walk_under_depth(base, name, _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
-                    if not mcp_file.is_file():
-                        continue
-                    parsed = parse_fn(mcp_file)
-                    if not parsed:
-                        continue
-                    result[mcp_file.as_posix()] = parsed
+            for mcp_file in _walk_under_depth(base, filenames, _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
+                if not mcp_file.is_file():
+                    continue
+                parsed = parse_fn(mcp_file)
+                if not parsed:
+                    continue
+                result[mcp_file.as_posix()] = parsed
         return result
 
     # --- shared project-folder enumeration (used by both Claude Code and the VSCode family) ---
