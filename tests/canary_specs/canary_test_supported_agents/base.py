@@ -99,10 +99,6 @@ class Scope(ABC):
     def expected(self) -> list[ExpectedItem]:
         return []
 
-    @property
-    def enforced(self) -> bool:
-        return bool(self.expected())
-
 
 @dataclass(frozen=True)
 class McpScope(Scope):

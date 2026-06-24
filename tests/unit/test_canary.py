@@ -55,8 +55,14 @@ def test_scope_order_fixture_before_merging_mcp_scope_then_gaps():
     # The committed .mcp.json fixture must precede the `-s project` McpScope that merges into it, so
     # `claude mcp add` adds to (rather than gets clobbered by) the fixture — both servers are detected.
     assert labels.index("mcp/project-file-fixture") < labels.index("mcp/project-file")
-    assert isinstance(scopes[5], PluginScope)  # the live plugin install
-    assert all(isinstance(s, Gap) for s in scopes[7:])
+    by_label = {s.label: s for s in scopes}
+    assert isinstance(by_label["mcp+skill/plugin"], PluginScope)  # the live plugin install
+    assert {s.label for s in scopes if isinstance(s, Gap)} == {
+        "skill/global",
+        "mcp/managed",
+        "mcp/plugin-manifest",
+        "skill/plugin-manifest",
+    }
 
 
 def test_mcp_scope_emits_claude_mcp_add():
@@ -91,7 +97,6 @@ def test_gaps_are_inert():
         assert gap.commands(CTX) == []
         assert gap.files() == []
         assert gap.expected() == []
-        assert gap.enforced is False
         assert gap.mirrors  # still references its discoverer method
 
 
@@ -111,17 +116,11 @@ def test_fixture_scopes_declare_files_and_assert_items_but_run_no_command():
             "skill", "canary-project-skill", "skill/project", ("$PROJECT/.claude/skills/", "canary-project-skill")
         )
     ]
-    assert skill.enforced is True
 
     server = fixtures["mcp/project-file-fixture"]
     (mf,) = server.files()
     assert (mf.src, mf.dest) == ("test_projects/proj/.mcp.json", ".mcp.json")
     assert server.expected() == [ExpectedItem("mcp", "canary-project-fixture-mcp", "mcp/project-file-fixture")]
-
-
-def test_project_skill_is_no_longer_a_gap():
-    gap_labels = {g.label for g in ClaudeCodeCanary().gaps()}
-    assert "skill/project" not in gap_labels
 
 
 def test_committed_fixtures_are_locatable():

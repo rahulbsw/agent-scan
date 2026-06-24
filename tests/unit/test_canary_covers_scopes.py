@@ -27,8 +27,8 @@ def _scope_methods(discoverer_cls) -> set:
     """The scope-producing ``_discover_*`` methods reachable from *discoverer_cls* (by return type).
 
     Walks the MRO from the most-derived class up to (but not including) ``AgentDiscoverer``,
-    so scope methods inherited from an intermediate base (e.g. a future PartialDiscoverer)
-    are included rather than making the coverage check vacuously pass for subclasses.
+    so scope methods inherited from an intermediate base are included rather than making the
+    coverage check vacuously pass for subclasses.
 
     Annotations are resolved via ``typing.get_type_hints`` rather than read raw from ``__annotations__``,
     so the check survives ``from __future__ import annotations`` (PEP 563) in a discoverer module — which
