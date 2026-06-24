@@ -18,14 +18,8 @@ EXPECTED_ITEMS = [
     ExpectedItem("mcp", "discord", "mcp/plugin"),
     ExpectedItem("skill", "access", "skill/plugin", ("$HOME/.claude/plugins/", "skills/access")),
     ExpectedItem("skill", "configure", "skill/plugin", ("$HOME/.claude/plugins/", "skills/configure")),
-    ExpectedItem("skill", "commit", "command/plugin", ("$HOME/.claude/plugins/", "commands/commit.md")),
-    ExpectedItem("skill", "clean_gone", "command/plugin", ("$HOME/.claude/plugins/", "commands/clean_gone.md")),
-    ExpectedItem("skill", "commit-push-pr", "command/plugin", ("$HOME/.claude/plugins/", "commands/commit-push-pr.md")),
     ExpectedItem(
         "skill", "canary-project-skill", "skill/project", ("$PROJECT/.claude/skills/", "canary-project-skill")
-    ),
-    ExpectedItem(
-        "skill", "canary-project-command", "command/project", ("$PROJECT/.claude/commands/", "canary-project-command")
     ),
     ExpectedItem("mcp", "canary-project-fixture-mcp", "mcp/project-file-fixture"),
 ]
@@ -43,18 +37,17 @@ def test_expected_items_in_order():
 def test_scope_order_live_then_fixtures_then_gaps():
     scopes = ClaudeCodeCanary().scopes
     labels = [s.label for s in scopes]
-    assert labels[:6] == [
+    assert labels[:5] == [
         "mcp/global",
         "mcp/project-inline",
         "mcp/project-file",
         "lifecycle/trust",
         "mcp+skill/plugin",
-        "command/plugin",
     ]
-    assert all(isinstance(s, PluginScope) for s in scopes[4:6])  # both plugins are live installs
-    assert labels[6:9] == ["skill/project", "command/project", "mcp/project-file-fixture"]
-    assert all(isinstance(s, FixtureScope) for s in scopes[6:9])
-    assert all(isinstance(s, Gap) for s in scopes[9:])
+    assert isinstance(scopes[4], PluginScope)  # the live plugin install
+    assert labels[5:7] == ["skill/project", "mcp/project-file-fixture"]
+    assert all(isinstance(s, FixtureScope) for s in scopes[5:7])
+    assert all(isinstance(s, Gap) for s in scopes[7:])
 
 
 def test_mcp_scope_emits_claude_mcp_add():
@@ -84,24 +77,6 @@ def test_plugin_scope_marketplace_pin_then_installs_narrow_to_broad():
     assert all(c.non_fatal for c in scope.commands(CTX))
 
 
-def test_command_plugin_scope_installs_commit_commands_and_expects_the_command():
-    # command/plugin is filled by installing a SECOND pinned plugin (commit-commands) from the same
-    # official marketplace — discord ships no commands. One `--scope user` install populates the shared
-    # plugin cache that _discover_plugin_commands scans; detection ignores enablement.
-    scope = _plugin_scope("command/plugin")
-    argvs = [" ".join(c.argv) for c in scope.commands(CTX)]
-    assert "claude plugin marketplace add anthropics/claude-plugins-official" in argvs
-    assert argvs[-1] == "claude plugin install commit-commands@claude-plugins-official --scope user"
-    assert all(c.non_fatal for c in scope.commands(CTX))
-    # All three commands commit-commands ships at PIN_SHA are asserted (so the report has no EXTRA noise).
-    assert [(e.name, e.path_contains) for e in scope.expected()] == [
-        ("commit", ("$HOME/.claude/plugins/", "commands/commit.md")),
-        ("clean_gone", ("$HOME/.claude/plugins/", "commands/clean_gone.md")),
-        ("commit-push-pr", ("$HOME/.claude/plugins/", "commands/commit-push-pr.md")),
-    ]
-    assert scope.mirrors == (ClaudeCodeCanary.discoverer._discover_plugin_commands,)
-
-
 def test_gaps_are_inert():
     for gap in ClaudeCodeCanary().gaps():
         assert gap.commands(CTX) == []
@@ -113,7 +88,7 @@ def test_gaps_are_inert():
 
 def test_fixture_scopes_declare_files_and_assert_items_but_run_no_command():
     fixtures = {s.label: s for s in ClaudeCodeCanary().scopes if isinstance(s, FixtureScope)}
-    assert set(fixtures) == {"skill/project", "command/project", "mcp/project-file-fixture"}
+    assert set(fixtures) == {"skill/project", "mcp/project-file-fixture"}
 
     skill = fixtures["skill/project"]
     assert skill.commands(CTX) == []  # no CLI can write a project skill
@@ -135,10 +110,9 @@ def test_fixture_scopes_declare_files_and_assert_items_but_run_no_command():
     assert server.expected() == [ExpectedItem("mcp", "canary-project-fixture-mcp", "mcp/project-file-fixture")]
 
 
-def test_project_skill_and_command_are_no_longer_gaps():
+def test_project_skill_is_no_longer_a_gap():
     gap_labels = {g.label for g in ClaudeCodeCanary().gaps()}
     assert "skill/project" not in gap_labels
-    assert "command/project" not in gap_labels
 
 
 def test_committed_fixtures_are_locatable():

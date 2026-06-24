@@ -81,8 +81,8 @@ def test_canary_is_registered_to_its_discoverer(canary):
     assert canary.discoverer is DISCOVERERS[canary.name]
 
 
-def test_claude_code_canary_has_a_scope_for_all_twelve_methods():
-    # Concrete lock for the one canary that exists today: claude code has 12 scope-producing methods.
+def test_claude_code_canary_has_a_scope_for_all_nine_methods():
+    # Concrete lock for the one canary that exists today: claude code has 9 scope-producing methods.
     from agent_scan.agents.claude_code import ClaudeCodeDiscoverer
 
-    assert len(_scope_methods(ClaudeCodeDiscoverer)) == 12
+    assert len(_scope_methods(ClaudeCodeDiscoverer)) == 9

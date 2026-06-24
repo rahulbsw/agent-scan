@@ -53,7 +53,7 @@ class ExpectedItem:
     item was found in the right scope; use ``$HOME``/``$PROJECT`` placeholders (the executor normalizes
     detected paths to those)."""
 
-    kind: str  # "mcp" | "skill" (commands surface as skill-type items too)
+    kind: str  # "mcp" | "skill"
     name: str
     scope: str
     path_contains: tuple[str, ...] = ()
@@ -62,7 +62,7 @@ class ExpectedItem:
 @dataclass(frozen=True)
 class FixtureFile:
     """One committed fixture to materialize into the project before the scan — for scopes no ``claude``
-    CLI writes (a project-local skill/command, or a hand-committed project ``.mcp.json``). ``src`` is a
+    CLI writes (a project-local skill, or a hand-committed project ``.mcp.json``). ``src`` is a
     path under the ``canary_test_supported_agents`` package dir (the committed ``test_projects/`` tree); ``dest`` is its
     landing path under the dummy project. Pure data — the executor resolves ``src`` against that package
     dir on disk and copies it into ``project / dest`` (a directory is copied recursively).
@@ -157,7 +157,7 @@ class PluginScope(Scope):
 
 @dataclass(frozen=True)
 class FixtureScope(Scope):
-    """A scope whose on-disk state no ``claude`` CLI writes — a hand-authored project skill/command, or a
+    """A scope whose on-disk state no ``claude`` CLI writes — a hand-authored project skill, or a
     committed project ``.mcp.json``. Instead of seed commands, the executor copies ``sources`` (committed
     fixtures) into the project, then ``inspect`` must detect ``expected_items``. This is the canary's one
     deliberate fixture exception: a :class:`Gap` exists precisely because there is no binary to drive, so a

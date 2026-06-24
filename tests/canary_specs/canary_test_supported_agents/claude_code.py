@@ -2,8 +2,8 @@
 
 One :class:`Scope` per scope-producing ``_discover_*`` method (``mirrors`` references the method object
 itself). Three tiers: the scopes a real ``claude`` can write are driven live (the three ``claude mcp add``
-MCP scopes + two pinned marketplace plugins — ``discord`` for MCP/skills, ``commit-commands`` for plugin
-commands); the project-local skill/command/server scopes that no CLI writes are :class:`FixtureScope` s
+MCP scopes + a pinned marketplace plugin — ``discord`` for MCP/skills); the project-local skill/server
+scopes that no CLI writes are :class:`FixtureScope` s
 (the executor copies a committed fixture into the project, then inspect must detect it); the rest are
 :class:`Gap` s — mirrored for fidelity (so the coverage test sees them covered) but never seeded or
 asserted, because neither a CLI nor a sensible fixture can drive them.
@@ -35,14 +35,8 @@ CLAUDE_PLUGIN_MARKETPLACE_REPO = "anthropics/claude-plugins-official"
 CLAUDE_PLUGIN = "discord"
 CLAUDE_PLUGIN_PIN_SHA = "66bca6b6f62e5023673feff699d9d99451ae9919"
 
-# `discord` ships no slash commands, so the plugin-command scope needs a second real plugin. `commit-commands`
-# is a pure command plugin in the SAME official marketplace (and present at PIN_SHA), bundling
-# `commands/commit.md` etc. — installing it lands a `commands/` dir in the plugin cache that
-# `_discover_plugin_commands` detects. Same marketplace + pin as `discord`, so still deterministic.
-CLAUDE_COMMAND_PLUGIN = "commit-commands"
-
 # Committed project fixtures, copied into the (registered) dummy project so inspect can detect the
-# project-local skill/command/server scopes no `claude` CLI writes. The src paths are relative to the
+# project-local skill/server scopes no `claude` CLI writes. The src paths are relative to the
 # `canary_test_supported_agents` package dir on disk; the executor resolves them against that dir (the
 # cloned source tree it puts on PYTHONPATH — these fixtures are test support, not shipped in the wheel)
 # and copies them in.
@@ -91,35 +85,11 @@ class ClaudeCodeCanary(AgentCanary):
                     ExpectedItem("skill", "configure", "skill/plugin", ("$HOME/.claude/plugins/", "skills/configure")),
                 ),
             ),
-            PluginScope(
-                "command/plugin",
-                (_D._discover_plugin_commands,),
-                marketplace=CLAUDE_PLUGIN_MARKETPLACE,
-                marketplace_repo=CLAUDE_PLUGIN_MARKETPLACE_REPO,
-                plugin=CLAUDE_COMMAND_PLUGIN,
-                pin_sha=CLAUDE_PLUGIN_PIN_SHA,
-                # commit-commands ships exactly these three commands at PIN_SHA — assert all of them so the
-                # report stays clean (no informational EXTRA) and a future command add/remove on a pin bump
-                # surfaces as drift.
-                expected_items=(
-                    ExpectedItem("skill", "commit", "command/plugin", ("$HOME/.claude/plugins/", "commands/commit.md")),
-                    ExpectedItem(
-                        "skill", "clean_gone", "command/plugin", ("$HOME/.claude/plugins/", "commands/clean_gone.md")
-                    ),
-                    ExpectedItem(
-                        "skill",
-                        "commit-push-pr",
-                        "command/plugin",
-                        ("$HOME/.claude/plugins/", "commands/commit-push-pr.md"),
-                    ),
-                ),
-                scopes=("user",),  # one install populates the shared cache; command detection ignores enablement
-            ),
-            # --- Fixture scopes: project-local skill/command/server that no `claude` CLI writes. The
-            #     executor copies the committed fixture into the (registered) project, then inspect must
-            #     detect it. Project skills/commands surface as skill-type items (path distinguishes the
-            #     scope). The server fixture shares <project>/.mcp.json with the mcp/project-file CLI write
-            #     — `claude mcp add` merges into the pre-written file, so both servers are detected.
+            # --- Fixture scopes: project-local skill/server that no `claude` CLI writes. The executor
+            #     copies the committed fixture into the (registered) project, then inspect must detect it.
+            #     A project skill surfaces as a skill-type item. The server fixture shares
+            #     <project>/.mcp.json with the mcp/project-file CLI write — `claude mcp add` merges into the
+            #     pre-written file, so both servers are detected.
             FixtureScope(
                 "skill/project",
                 (_D._discover_project_skills,),
@@ -138,24 +108,6 @@ class ClaudeCodeCanary(AgentCanary):
                 ),
             ),
             FixtureScope(
-                "command/project",
-                (_D._discover_project_commands,),
-                (
-                    FixtureFile(
-                        f"{_FIXTURE_ROOT}/.claude/commands/canary-project-command.md",
-                        ".claude/commands/canary-project-command.md",
-                    ),
-                ),
-                (
-                    ExpectedItem(
-                        "skill",
-                        "canary-project-command",
-                        "command/project",
-                        ("$PROJECT/.claude/commands/", "canary-project-command"),
-                    ),
-                ),
-            ),
-            FixtureScope(
                 "mcp/project-file-fixture",
                 (_D._discover_project_mcp_servers,),
                 (FixtureFile(f"{_FIXTURE_ROOT}/.mcp.json", ".mcp.json"),),
@@ -165,7 +117,6 @@ class ClaudeCodeCanary(AgentCanary):
             #     sensible fixture. Mirrored so the coverage test counts their method as covered; surfaced
             #     in the report as known coverage gaps.
             Gap("skill/global", (_D._discover_global_skill,), "no claude CLI creates a standalone personal skill"),
-            Gap("command/global", (_D._discover_global_commands,), "no claude CLI creates a slash command"),
             Gap("mcp/managed", (_D._discover_managed_mcp_servers,), "enterprise system path; no CLI writer"),
             Gap(
                 "mcp/plugin-manifest",
