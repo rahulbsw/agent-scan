@@ -1524,6 +1524,30 @@ class TestRunInstallCallsEnsureGuardEnabled:
         mock_install.assert_called_once()
 
     @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_test_flag_true_does_not_change_install_hooks_call(
+        self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch
+    ):
+        """--test flag is a no-op: _install_hooks receives the same args regardless of args.test."""
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "snyk-from-env")
+        config = tmp_path / "settings.json"
+        args = SimpleNamespace(
+            client="claude",
+            url="https://api.snyk.io",
+            tenant_id="tid-interactive",
+            file=str(config),
+            managed=False,
+            test=True,
+        )
+        _run_install(args)
+        mock_install.assert_called_once()
+        call_args = mock_install.call_args
+        assert "test" not in (call_args.kwargs or {})
+        assert len(call_args.args) == 10, "args.test must not be forwarded to _install_hooks"
+
+    @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
     def test_headless_installs_without_snyk_token(self, mock_fetch, mock_install, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "existing-pk")
