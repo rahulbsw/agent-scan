@@ -17,6 +17,7 @@ import pytest
 
 from agent_scan.guard import (
     _PERMISSION_DENIED,
+    ALL_CLIENTS,
     CLAUDE_HOOK_EVENTS,
     CLAUDE_MANAGED_SETTINGS_PATH,
     CLAUDE_SETTINGS_PATH,
@@ -50,6 +51,7 @@ from agent_scan.guard import (
     _prepare_cursor_config,
     _print_client_status,
     _run_install,
+    _run_uninstall,
     _shell_quote,
     _uninstall_claude,
     _uninstall_codex,
@@ -2422,3 +2424,104 @@ class TestUninstallPreservesCustomHooks:
         assert "Stop" not in data["hooks"]
         assert "CustomEvent" in data["hooks"]
         assert data["hooks"]["CustomEvent"] == [_claude_group(OTHER_CMD)]
+
+
+# ===================================================================
+# client="all" support
+# ===================================================================
+
+
+class TestRunInstallAll:
+    """_run_install with client='all' installs all three clients with a single push key."""
+
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_install_all_calls_install_hooks_for_each_client(
+        self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "tok")
+        args = SimpleNamespace(
+            client="all",
+            url="https://api.snyk.io",
+            tenant_id="tid-1",
+            file=None,
+            managed=False,
+        )
+        _run_install(args)
+        mock_mint.assert_called_once()
+        assert mock_install.call_count == len(ALL_CLIENTS)
+        called_clients = [c.args[0] for c in mock_install.call_args_list]
+        assert called_clients == ALL_CLIENTS
+
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_install_all_reuses_single_push_key(self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch):
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "tok")
+        args = SimpleNamespace(
+            client="all",
+            url="https://api.snyk.io",
+            tenant_id="tid-1",
+            file=None,
+            managed=False,
+        )
+        _run_install(args)
+        for call in mock_install.call_args_list:
+            assert call.args[2] == "minted-pk"
+
+    @patch("agent_scan.guard._install_hooks")
+    def test_install_all_headless(self, mock_install, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        monkeypatch.setenv("TENANT_ID", "tid-hl")
+        args = SimpleNamespace(
+            client="all",
+            url="https://api.snyk.io",
+            tenant_id="",
+            file=None,
+            managed=False,
+        )
+        _run_install(args)
+        assert mock_install.call_count == len(ALL_CLIENTS)
+        for call in mock_install.call_args_list:
+            assert call.args[2] == "headless-pk"
+
+    def test_install_all_with_file_override_exits(self, monkeypatch):
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "tok")
+        args = SimpleNamespace(
+            client="all",
+            url="https://api.snyk.io",
+            tenant_id="tid-1",
+            file="/tmp/override.json",
+            managed=False,
+        )
+        with pytest.raises(SystemExit):
+            _run_install(args)
+
+
+class TestRunUninstallAll:
+    """_run_uninstall with client='all' uninstalls all three clients."""
+
+    @patch("agent_scan.guard._uninstall_single_client")
+    def test_uninstall_all_calls_each_client(self, mock_single):
+        args = SimpleNamespace(
+            client="all",
+            file=None,
+            managed=False,
+        )
+        _run_uninstall(args)
+        assert mock_single.call_count == len(ALL_CLIENTS)
+        called_clients = [c.args[0] for c in mock_single.call_args_list]
+        assert called_clients == ALL_CLIENTS
+
+    def test_uninstall_all_with_file_override_exits(self):
+        args = SimpleNamespace(
+            client="all",
+            file="/tmp/override.json",
+            managed=False,
+        )
+        with pytest.raises(SystemExit):
+            _run_uninstall(args)
