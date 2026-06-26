@@ -1609,6 +1609,53 @@ def test_load_json_file_returns_none_on_permission_error(tmp_path, monkeypatch):
     assert mcp_configs == {}
 
 
+def test_first_existing_path_returns_first_that_exists(tmp_path):
+    """``_first_existing_path`` returns ``as_posix()`` of the first existing candidate,
+    skipping earlier absent ones."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    present = tmp_path / "present"
+    present.mkdir()
+
+    result = ClaudeCodeDiscoverer(tmp_path)._first_existing_path([tmp_path / "missing", present])
+
+    assert result == present.as_posix()
+
+
+def test_first_existing_path_returns_none_when_none_exist(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    result = ClaudeCodeDiscoverer(tmp_path)._first_existing_path([tmp_path / "a", tmp_path / "b"])
+
+    assert result is None
+
+
+def test_first_existing_path_skips_permission_error_and_continues(tmp_path, monkeypatch):
+    """A candidate whose ``exists()`` raises ``PermissionError`` is logged and skipped
+    (install-detection tolerance under ``--scan-all-users``); the next existing candidate
+    is still returned."""
+    from pathlib import Path
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    denied = tmp_path / "denied"
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+
+    real_exists = Path.exists
+
+    def fake_exists(self, *args, **kwargs):
+        if self == denied:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
+    result = ClaudeCodeDiscoverer(tmp_path)._first_existing_path([denied, allowed])
+
+    assert result == allowed.as_posix()
+
+
 def test_load_json_file_still_returns_could_not_parse_for_malformed_json(tmp_path):
     """Regression guard: real parse failures still produce ``CouldNotParseMCPConfig``.
     Splitting out the ``PermissionError`` branch must not weaken malformed-JSON handling.
@@ -7345,3 +7392,49 @@ def test_get_client_from_path_classifies_claude_plugin_mcp_json_in_repos(tmp_pat
     plugin_mcp.write_text('{"mcpServers": {}}')
 
     assert get_client_from_path(str(plugin_mcp)) == "claude code"
+
+
+def test_get_client_from_path_classifies_relocated_claude_json_under_config_dir(tmp_path, monkeypatch):
+    """A ``CLAUDE_CONFIG_DIR``-relocated ``.claude.json`` is still attributed to claude code.
+
+    ``static_mcp_config_paths`` resolves the global config via ``_config_json_path`` -- the
+    same resolver ``_discover_global_mcp_servers`` uses -- so a ``--paths`` scan of the
+    relocated file labels as claude code instead of falling through to the raw path. Without
+    that, the classifier would only emit ``~/.claude.json`` and miss the relocated config.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    cfg = tmp_path / "custom-claude"
+    cfg.mkdir()
+    (cfg / ".claude.json").write_text('{"mcpServers": {"relocated": {"command": "r"}}}')
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    from agent_scan.agents import get_client_from_path
+
+    assert get_client_from_path(str(cfg / ".claude.json")) == "claude code"
+
+
+def test_build_static_path_owner_map_round_trips_known_paths():
+    """``build_static_path_owner_map`` produces a {realpath: agent name} map that
+    ``get_client_from_path`` looks up known static config files in."""
+    from agent_scan.agents import build_static_path_owner_map, get_client_from_path
+
+    owner_map = build_static_path_owner_map()
+
+    assert get_client_from_path("~/.gemini/settings.json", owner_map) == "gemini cli"
+    assert get_client_from_path("~/.claude.json", owner_map) == "claude code"
+    assert get_client_from_path("~/.cursor/mcp.json", owner_map) == "cursor"
+
+
+def test_get_client_from_path_uses_provided_owner_map():
+    """A provided ``owner_map`` is authoritative: matches come only from it, with no fresh
+    discoverer enumeration (the build-once contract the loop callers rely on)."""
+    import os
+
+    from agent_scan.agents import get_client_from_path
+
+    custom = {os.path.realpath(os.path.expanduser("~/x/custom.json")): "fake-agent"}
+
+    assert get_client_from_path("~/x/custom.json", custom) == "fake-agent"
+    # A path a fresh build WOULD classify returns None against an empty map, proving the
+    # provided map is used as-is rather than re-enumerating discoverers.
+    assert get_client_from_path("~/.gemini/settings.json", {}) is None

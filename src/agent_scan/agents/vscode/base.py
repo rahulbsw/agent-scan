@@ -8,7 +8,6 @@ sibling modules (``cursor.py``, ``windsurf.py``, ``kiro.py``, ``antigravity.py``
 ``vscode.py``) override only path constants and feature flags.
 """
 
-import logging
 import os
 import sys
 from functools import cached_property
@@ -40,7 +39,6 @@ from agent_scan.models import (
 )
 from agent_scan.skill_client import inspect_skills_dir
 
-logger = logging.getLogger(__name__)
 # Cap traversal into ``<userdata>/User/workspaceStorage/``. Layout is
 # ``<workspaceStorage>/<hash>/workspace.json`` so depth 2 is sufficient.
 _MAX_WORKSPACE_STORAGE_DEPTH = 2
@@ -282,23 +280,12 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     # --- public (override AgentDiscoverer abstracts) ---
 
     def client_exists(self) -> str | None:
-        for raw in self._install_paths:
-            path = self._expand_path(Path(raw))
-            try:
-                if path.exists():
-                    return path.as_posix()
-            except PermissionError:
-                logger.warning("Permission error for path %s", path.as_posix())
-        # The platform-specific userdata dirs are a secondary signal — if no
-        # explicit ``_install_paths`` matched but any of the IDE's userdata
-        # trees is present, the IDE has run at least once on this machine.
-        for userdata in self._user_data_dirs():
-            try:
-                if userdata.exists():
-                    return userdata.as_posix()
-            except PermissionError:
-                logger.warning("Permission error for path %s", userdata.as_posix())
-        return None
+        # The platform-specific userdata dirs are a secondary signal — if no explicit
+        # ``_install_paths`` matched but any of the IDE's userdata trees is present, the
+        # IDE has run at least once on this machine.
+        return self._first_existing_path(
+            [self._expand_path(Path(raw)) for raw in self._install_paths]
+        ) or self._first_existing_path(self._user_data_dirs())
 
     def discover_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}

@@ -15,18 +15,13 @@ not covered here; an agent that grows one should graduate to its own dedicated
 discoverer.
 """
 
-import logging
 from pathlib import Path
 
 from agent_scan.agents.base import (
     AgentDiscoverer,
     McpConfigsResult,
-    McpScanResult,
     SkillsDirsResult,
 )
-from agent_scan.models import CouldNotParseMCPConfig
-
-logger = logging.getLogger(__name__)
 
 
 class PartialDiscoverer(AgentDiscoverer, abstract=True):
@@ -46,14 +41,7 @@ class PartialDiscoverer(AgentDiscoverer, abstract=True):
     _skills_dir_paths: tuple[str, ...] = ()
 
     def client_exists(self) -> str | None:
-        for raw in self._client_exists_paths:
-            path = self._expand_path(Path(raw))
-            try:
-                if path.exists():
-                    return path.as_posix()
-            except PermissionError:
-                logger.warning("Permission error for path %s", path.as_posix())
-        return None
+        return self._first_existing_path([self._expand_path(Path(raw)) for raw in self._client_exists_paths])
 
     def discover_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}
@@ -75,24 +63,3 @@ class PartialDiscoverer(AgentDiscoverer, abstract=True):
 
     def static_mcp_config_paths(self) -> list[str]:
         return [self._expand_path(Path(raw)).as_posix() for raw in self._mcp_config_paths]
-
-    def _discover_mcpservers_table(self, path: Path) -> McpScanResult:
-        """Parse a wrapped ``{"mcpServers": {...}}`` config at ``path``.
-
-        Mirrors ``ClaudeDesktopDiscoverer.discover_mcp_servers``: a missing/empty
-        file, a non-object root, or one without a non-empty ``mcpServers`` table
-        yields ``None`` (no entry, not a failure -- these files are multi-purpose);
-        malformed JSON becomes ``CouldNotParseMCPConfig``; a valid table is
-        validated into typed servers.
-        """
-        data = self._load_json_file(path)
-        if data is None:
-            return None
-        if isinstance(data, CouldNotParseMCPConfig):
-            return data
-        if not isinstance(data, dict):
-            return None
-        servers = data.get("mcpServers")
-        if not isinstance(servers, dict) or not servers:
-            return None
-        return self._validate_servers(servers, source=f"mcpServers in {path.as_posix()}")

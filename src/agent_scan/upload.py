@@ -4,7 +4,7 @@ import logging
 import aiohttp
 import rich
 
-from agent_scan.agents import get_client_from_path
+from agent_scan.agents import build_static_path_owner_map, get_client_from_path
 from agent_scan.models import ScanPathResult, ScanPathResultsCreate, ScanUserInfo
 from agent_scan.redact import redact_scan_result
 from agent_scan.runtime_config import get_runtime_config
@@ -50,12 +50,13 @@ async def upload(
     )
 
     results_with_servers = []
+    owner_map = build_static_path_owner_map()
     for result in results:
         # If there are no servers but there is a path-level error, still include the result
         if not result.servers and result.error is None:
             logger.info(f"No servers and no error for path {result.path}. Skipping upload.")
             continue
-        result.client = get_client_from_path(result.path) or result.client or result.path
+        result.client = get_client_from_path(result.path, owner_map) or result.client or result.path
         # Redact sensitive information (tracebacks, etc.) before upload
         redact_scan_result(result)
         results_with_servers.append(result)

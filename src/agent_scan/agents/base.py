@@ -31,6 +31,7 @@ from agent_scan.models import (
 )
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skills_dir
+from agent_scan.utils import expand_path
 
 logger = logging.getLogger(__name__)
 McpConfigsResult = dict[
@@ -244,30 +245,9 @@ class AgentDiscoverer(ABC):
 
     # --- shared helpers (inherited by every concrete subclass) ---
 
-    @staticmethod
-    def expand_path(path: Path, home_directory: Path | None) -> Path:
-        """Resolve a ``~``-prefixed path against a specific ``home_directory``.
-
-        Unlike ``Path.expanduser`` (which always uses the current process's
-        ``$HOME``), this expands against the *given* home so a discoverer bound to
-        another user's home under ``--scan-all-users`` resolves ``~/...`` correctly.
-        A ``None`` home (unknown) or a non-``~`` path (absolute or cwd-relative,
-        e.g. ``.amp/skills``) is returned unchanged.
-
-        Static (rather than reading ``self.home_directory``) because the legacy
-        ``inspect.py`` engine also resolves explicit ``--paths`` against multiple
-        homes without a discoverer instance; subclasses use the bound-home
-        convenience :meth:`_expand_path` instead.
-        """
-        if home_directory is None or not str(path).startswith("~"):
-            return path
-
-        suffix = path.parts[1:]
-        return home_directory / Path(*suffix)
-
     def _expand_path(self, path: Path) -> Path:
-        """:meth:`expand_path` against this discoverer's bound ``home_directory``."""
-        return self.expand_path(path, self.home_directory)
+        """``utils.expand_path`` against this discoverer's bound ``home_directory``."""
+        return expand_path(path, self.home_directory)
 
     def _load_json_file(self, path: Path) -> dict | CouldNotParseMCPConfig | None:
         """JSON-decode an arbitrary file. ``None`` if missing, unreadable (denied
@@ -346,6 +326,29 @@ class AgentDiscoverer(ABC):
                 is_failure=True,
             )
         return self._servers_to_signed_list(validated)
+
+    def _discover_mcpservers_table(self, path: Path) -> McpScanResult:
+        """Parse a single wrapped ``{"mcpServers": {...}}`` config file at ``path``.
+
+        The common shape for agents whose config file is multi-purpose: a
+        missing/empty file, a non-object root, or one without a non-empty
+        ``mcpServers`` table yields ``None`` (no entry, not a failure -- these
+        files carry other settings too); malformed JSON becomes
+        ``CouldNotParseMCPConfig``; a valid table is validated into typed servers.
+        Use :meth:`_parse_mcp_file` instead when the wrapper layout varies across
+        formats.
+        """
+        data = self._load_json_file(path)
+        if data is None:
+            return None
+        if isinstance(data, CouldNotParseMCPConfig):
+            return data
+        if not isinstance(data, dict):
+            return None
+        servers = data.get("mcpServers")
+        if not isinstance(servers, dict) or not servers:
+            return None
+        return self._validate_servers(servers, source=f"mcpServers in {path.as_posix()}")
 
     def _parse_mcp_file(
         self,
@@ -431,6 +434,21 @@ class AgentDiscoverer(ABC):
         except PermissionError:
             return None
         return inspect_skills_dir(str(path))
+
+    def _first_existing_path(self, paths: list[Path]) -> str | None:
+        """Return ``as_posix()`` of the first path in ``paths`` that exists, else ``None``.
+
+        A ``PermissionError`` on a candidate (routine under ``--scan-all-users`` when
+        probing another user's home) is logged and skipped, not propagated -- the
+        install-detection tolerance every ``client_exists`` needs.
+        """
+        for path in paths:
+            try:
+                if path.exists():
+                    return path.as_posix()
+            except PermissionError:
+                logger.warning("Permission error for path %s", path.as_posix())
+        return None
 
     def _discover_skill_and_command_dirs(
         self,

@@ -74,6 +74,27 @@ def get_relative_path(path: str) -> str:
         return path
 
 
+def expand_path(path: Path, home_directory: Path | None) -> Path:
+    """Resolve a ``~``-prefixed path against a specific ``home_directory``.
+
+    Unlike ``Path.expanduser`` (which always uses the current process's
+    ``$HOME``), this expands against the *given* home so a discoverer bound to
+    another user's home under ``--scan-all-users`` resolves ``~/...`` correctly.
+    A ``None`` home (unknown) or a non-``~`` path (absolute or cwd-relative,
+    e.g. ``.amp/skills``) is returned unchanged.
+
+    A module-level util because both the bound-home convenience
+    ``AgentDiscoverer._expand_path`` and the discoverer-less ``--paths`` engine
+    in ``inspect.py`` need home-relative expansion; the latter resolves explicit
+    paths against multiple homes without ever constructing a discoverer.
+    """
+    if home_directory is None or not str(path).startswith("~"):
+        return path
+
+    suffix = path.parts[1:]
+    return home_directory / Path(*suffix)
+
+
 def calculate_distance(responses: list[str], reference: str):
     return sorted([(w, Levenshtein.distance(w, reference)) for w in responses], key=lambda x: x[1])
 

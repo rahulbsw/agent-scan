@@ -2,6 +2,7 @@ import io
 import os
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ from agent_scan import utils as utils_module
 from agent_scan.models import CommandParsingError, rebalance_command_args
 from agent_scan.utils import (
     calculate_distance,
+    expand_path,
     get_readable_home_directories,
     get_relative_path,
     suppress_stdout,
@@ -34,6 +36,19 @@ class TestGetRelativePath:
     def test_empty_path(self):
         result = get_relative_path("")
         assert result == ""
+
+
+class TestExpandPath:
+    def test_none_home_returns_path_unchanged(self):
+        path = Path("~/.claude/mcp.json")
+        assert expand_path(path, None) == path
+
+    def test_non_tilde_path_returns_unchanged(self):
+        assert expand_path(Path(".amp/skills"), Path("/home/alice")) == Path(".amp/skills")
+
+    def test_tilde_path_joined_to_given_home(self):
+        home = Path("/home/bob")
+        assert expand_path(Path("~/.claude/mcp.json"), home) == home / ".claude/mcp.json"
 
 
 @pytest.mark.parametrize(

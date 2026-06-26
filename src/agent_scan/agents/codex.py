@@ -93,13 +93,7 @@ class CodexDiscoverer(AgentDiscoverer):
     # --- public (override AgentDiscoverer abstracts) ---
 
     def client_exists(self) -> str | None:
-        path = self._codex_home()
-        try:
-            if path.exists():
-                return path.as_posix()
-        except PermissionError:
-            logger.warning("Permission error for path %s", path.as_posix())
-        return None
+        return self._first_existing_path([self._codex_home()])
 
     def discover_mcp_servers(self) -> McpConfigsResult:
         """MCP servers across every on-disk layer: user + profile + system config,

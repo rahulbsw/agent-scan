@@ -44,7 +44,6 @@ by convention):
   * **Linux** -- not an officially supported Claude Desktop platform.
 """
 
-import logging
 import sys
 from pathlib import Path
 
@@ -53,9 +52,6 @@ from agent_scan.agents.base import (
     McpConfigsResult,
     SkillsDirsResult,
 )
-from agent_scan.models import CouldNotParseMCPConfig
-
-logger = logging.getLogger(__name__)
 
 
 class ClaudeDesktopDiscoverer(AgentDiscoverer):
@@ -67,7 +63,7 @@ class ClaudeDesktopDiscoverer(AgentDiscoverer):
     The config is the wrapped ``{"mcpServers": {...}}`` shape, so MCP discovery
     mirrors ``ClaudeCodeDiscoverer._discover_global_mcp_servers``: extract the
     top-level ``mcpServers`` map and route it through the inherited
-    :meth:`AgentDiscoverer._validate_servers`. Gating on the presence of
+    :meth:`AgentDiscoverer._discover_mcpservers_table`. Gating on the presence of
     ``mcpServers`` (rather than format-union parsing the whole file) avoids
     misreporting a config that carries only UI settings as a parse failure -- the
     file is multi-purpose (e.g. ``globalShortcut``).
@@ -90,34 +86,22 @@ class ClaudeDesktopDiscoverer(AgentDiscoverer):
         install_dir = self._install_dir()
         if install_dir is None:
             return None
-        try:
-            if install_dir.exists():
-                return install_dir.as_posix()
-        except PermissionError:
-            logger.warning("Permission error for path %s", install_dir.as_posix())
-        return None
+        return self._first_existing_path([install_dir])
 
     def discover_mcp_servers(self) -> McpConfigsResult:
         """Parse the top-level ``mcpServers`` map from ``claude_desktop_config.json``.
 
-        Mirrors ``ClaudeCodeDiscoverer._discover_global_mcp_servers``: a missing
-        file or one without a non-empty ``mcpServers`` table yields no entry (not a
-        parse failure), malformed JSON is surfaced as ``CouldNotParseMCPConfig``
-        keyed by the file, and a valid table is validated into typed servers.
+        Delegates to the inherited :meth:`AgentDiscoverer._discover_mcpservers_table`
+        (the shared wrapped-``mcpServers`` parser): a missing file or one without a
+        non-empty ``mcpServers`` table yields no entry (not a parse failure),
+        malformed JSON is surfaced as ``CouldNotParseMCPConfig`` keyed by the file,
+        and a valid table is validated into typed servers.
         """
         config_path = self._config_path()
-        if config_path is None or not config_path.exists():
+        if config_path is None:
             return {}
-        data = self._load_json_file(config_path)
-        if isinstance(data, CouldNotParseMCPConfig):
-            return {config_path.as_posix(): data}
-        if not isinstance(data, dict):
-            return {}
-        servers = data.get("mcpServers")
-        if not isinstance(servers, dict) or not servers:
-            return {}
-        entries = self._validate_servers(servers, source=f"mcpServers in {config_path.as_posix()}")
-        return {config_path.as_posix(): entries}
+        entry = self._discover_mcpservers_table(config_path)
+        return {config_path.as_posix(): entry} if entry is not None else {}
 
     def discover_skills(self) -> SkillsDirsResult:
         """Claude Desktop's custom Skills are uploaded through Settings and stored

@@ -9,7 +9,7 @@ import aiohttp
 import certifi
 import rich
 
-from agent_scan.agents import get_client_from_path
+from agent_scan.agents import build_static_path_owner_map, get_client_from_path
 from agent_scan.models import (
     ScalarToolLabels,
     ScanError,
@@ -171,8 +171,9 @@ async def analyze_machine(
     # Use relative paths in the analysis payload to strip the username from absolute paths,
     # anonymizing the user. Clone to preserve the absolute paths for the control backend call.
     analysis_path_results = []
+    owner_map = build_static_path_owner_map()
     for result in scan_paths:
-        result.client = get_client_from_path(result.path) or result.client or result.path
+        result.client = get_client_from_path(result.path, owner_map) or result.client or result.path
         analysis_path_copy = result.clone()
         analysis_path_copy.path = get_relative_path(result.path)
         analysis_path_results.append(analysis_path_copy)

@@ -1,10 +1,9 @@
 """Claude Code discoverer: ``~/.claude.json`` + ``~/.claude/skills`` + per-project,
 plugin, command, and enterprise (managed-mcp) scopes."""
 
-import glob
-import logging
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 from agent_scan.agents.base import (
@@ -21,8 +20,6 @@ from agent_scan.models import (
     PluginMCPConfigFile,
 )
 from agent_scan.skill_client import inspect_commands_dir, inspect_skills_dir
-
-logger = logging.getLogger(__name__)
 
 # Canonical agent name for Claude Code, used as this discoverer's ``name`` and the
 # key under which it registers in ``agents.DISCOVERERS``.
@@ -81,25 +78,17 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     # --- public (override AgentDiscoverer abstracts) ---
 
     def client_exists(self) -> str | None:
-        path = self._claude_base_dir()
-        try:
-            if path.exists():
-                return path.as_posix()
-        except PermissionError:
-            logger.warning("Permission error for path %s", path.as_posix())
-        return None
+        return self._first_existing_path([self._claude_base_dir()])
 
     def static_mcp_config_paths(self) -> list[str]:
         # Every fixed-location MCP file claude code owns: the user-global config plus each
-        # installed-plugin ``.mcp.json`` under ``~/.claude/plugins/{cache,repos}/**/.mcp.json``.
-        # Enumerating them keeps ``--paths`` attribution complete (a plugin config still
-        # labels as claude code). Globbed against the scanning user's own home (the classifier
-        # resolves ``~`` itself). Per-project ``.mcp.json`` paths stay omitted: they live at
-        # arbitrary cwd locations, never a fixed path.
-        paths = [self._expand_path(Path(self._mcp_config_path)).as_posix()]
-        for subdir in self._plugin_subdirs:
-            pattern = os.path.expanduser(f"{self._install_path}/plugins/{subdir}/**/.mcp.json")
-            paths.extend(glob.glob(pattern, recursive=True))
+        # installed-plugin ``.mcp.json``. Both come from the same helpers the
+        # ``_discover_*_mcp_servers`` methods use -- ``_config_json_path`` for the global config
+        # and ``_plugin_mcp_files`` for plugins -- so ``--paths`` attribution stays in lockstep
+        # with discovery (honoring the same ``CLAUDE_CONFIG_DIR`` / plugin-root env-var
+        # relocations). Per-project ``.mcp.json`` paths stay omitted: arbitrary cwd locations.
+        paths = [self._config_json_path().as_posix()]
+        paths.extend(mcp_file.as_posix() for mcp_file in self._plugin_mcp_files())
         return paths
 
     def discover_mcp_servers(self) -> McpConfigsResult:
@@ -316,6 +305,19 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         """Every ``<plugin-root>/<subdir>`` to scan for plugin MCP servers and skills."""
         return [root / sub for root in self._plugin_root_dirs() for sub in self._plugin_subdirs]
 
+    def _plugin_mcp_files(self) -> Iterator[Path]:
+        """Yield each installed-plugin ``.mcp.json`` file under the plugin base dirs.
+
+        The single source of plugin MCP-file locations, consumed by both
+        ``_discover_plugin_mcp_servers`` (discovery) and ``static_mcp_config_paths``
+        (``--paths`` attribution) so the two cannot drift. The ``is_file()`` guard skips
+        FIFOs/special files ``os.walk`` may surface (a deliberate hang defense).
+        """
+        for base in self._plugin_base_dirs():
+            for mcp_file in _walk_under_depth(base, ".mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
+                if mcp_file.is_file():
+                    yield mcp_file
+
     def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
         """Scan plugin ``.mcp.json`` files under every plugin base dir.
 
@@ -324,16 +326,13 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         tolerated for plugins that ship the wrapped format.
         """
         result: McpConfigsResult = {}
-        for base in self._plugin_base_dirs():
-            for mcp_file in _walk_under_depth(base, ".mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
-                if not mcp_file.is_file():
-                    continue
-                parsed = self._parse_mcp_file(mcp_file, formats=_CLAUDE_MCP_FORMATS)
-                # Skip on None (missing/empty file) or an empty server list; a parse
-                # failure is a truthy ``CouldNotParseMCPConfig`` and is still recorded.
-                if not parsed:
-                    continue
-                result[mcp_file.as_posix()] = parsed
+        for mcp_file in self._plugin_mcp_files():
+            parsed = self._parse_mcp_file(mcp_file, formats=_CLAUDE_MCP_FORMATS)
+            # Skip on None (missing/empty file) or an empty server list; a parse
+            # failure is a truthy ``CouldNotParseMCPConfig`` and is still recorded.
+            if not parsed:
+                continue
+            result[mcp_file.as_posix()] = parsed
         return result
 
     def _discover_plugin_skills(self) -> SkillsDirsResult:

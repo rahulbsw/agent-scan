@@ -73,7 +73,29 @@ def find_discoverers(home_directory: Path | None) -> list[AgentDiscoverer]:
     return found
 
 
-def get_client_from_path(path: str) -> str | None:
+def build_static_path_owner_map() -> dict[str, str]:
+    """Map ``{realpath(static MCP config path): agent name}`` for every registered
+    discoverer, built against the scanning user's own home.
+
+    The lookup table behind :func:`get_client_from_path`. Enumerating all discoverers
+    walks the filesystem (e.g. Claude Code's plugin tree), so callers labeling many
+    ``--paths`` results should build this once and reuse it. The first-registered
+    discoverer wins on a realpath collision (matching the registry-iteration order of
+    the per-path matcher).
+    """
+    owner_map: dict[str, str] = {}
+    for cls in DISCOVERERS.values():
+        try:
+            known = cls(None).static_mcp_config_paths()
+        except Exception:
+            logger.exception("static_mcp_config_paths for %s raised; skipping", cls.__name__)
+            continue
+        for candidate in known:
+            owner_map.setdefault(os.path.realpath(os.path.expanduser(candidate)), cls.name)
+    return owner_map
+
+
+def get_client_from_path(path: str, owner_map: dict[str, str] | None = None) -> str | None:
     """Best-effort: name the agent that owns the MCP config file at ``path``.
 
     Matches the realpath of ``path`` against each registered discoverer's
@@ -84,18 +106,14 @@ def get_client_from_path(path: str) -> str | None:
     Used to label explicitly-scanned paths (``--paths`` mode); discovery-mode
     results already carry the agent name, so callers fall back to that. The
     discoverer registry is the single source of truth for this mapping.
+
+    Pass a prebuilt ``owner_map`` from :func:`build_static_path_owner_map` when
+    labeling many paths in a loop; otherwise the full discoverer enumeration (which
+    walks the filesystem) runs on every call.
     """
-    target = os.path.realpath(os.path.expanduser(path))
-    for cls in DISCOVERERS.values():
-        try:
-            known = cls(None).static_mcp_config_paths()
-        except Exception:
-            logger.exception("static_mcp_config_paths for %s raised; skipping", cls.__name__)
-            continue
-        for candidate in known:
-            if os.path.realpath(os.path.expanduser(candidate)) == target:
-                return cls.name
-    return None
+    if owner_map is None:
+        owner_map = build_static_path_owner_map()
+    return owner_map.get(os.path.realpath(os.path.expanduser(path)))
 
 
 __all__ = [
@@ -116,6 +134,7 @@ __all__ = [
     "VSCodeDiscoverer",
     "VSCodeFamilyDiscoverer",
     "WindsurfDiscoverer",
+    "build_static_path_owner_map",
     "find_discoverers",
     "get_client_from_path",
 ]
