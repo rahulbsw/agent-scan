@@ -84,8 +84,14 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
     CandidateClient(
         name="opencode",
         client_exists_paths=["~/.config/opencode"],
-        mcp_config_paths=[],
-        skills_dir_paths=[],
+        mcp_config_paths=[
+            "~/.config/opencode/opencode.json",
+            "~/.config/opencode/opencode.jsonc",
+        ],
+        skills_dir_paths=[
+            "~/.config/opencode/skills",
+            ".opencode/skills",
+        ],
     ),
     CandidateClient(
         name="antigravity",
@@ -174,8 +180,14 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
     CandidateClient(
         name="opencode",
         client_exists_paths=["~/.config/opencode"],
-        mcp_config_paths=[],
-        skills_dir_paths=[],
+        mcp_config_paths=[
+            "~/.config/opencode/opencode.json",
+            "~/.config/opencode/opencode.jsonc",
+        ],
+        skills_dir_paths=[
+            "~/.config/opencode/skills",
+            ".opencode/skills",
+        ],
     ),
     CandidateClient(
         name="antigravity",
@@ -271,8 +283,14 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
     CandidateClient(
         name="opencode",
         client_exists_paths=["~/.config/opencode"],
-        mcp_config_paths=[],
-        skills_dir_paths=[],
+        mcp_config_paths=[
+            "~/.config/opencode/opencode.json",
+            "~/.config/opencode/opencode.jsonc",
+        ],
+        skills_dir_paths=[
+            "~/.config/opencode/skills",
+            ".opencode/skills",
+        ],
     ),
     CandidateClient(
         name="antigravity",

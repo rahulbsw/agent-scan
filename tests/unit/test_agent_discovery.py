@@ -1188,6 +1188,7 @@ def test_DISCOVERERS_registers_claude_code_and_vscode_family():
         "antigravity",
         "codex",
         "claude desktop",
+        "opencode",
     }
 
 
@@ -7383,3 +7384,427 @@ def test_find_discoverers_returns_claude_desktop_when_installed(tmp_path, monkey
     found = find_discoverers(tmp_path)
 
     assert any(isinstance(d, claude_desktop_module.ClaudeDesktopDiscoverer) for d in found)
+
+
+# ---------------------------------------------------------------------------
+# OpenCodeDiscoverer
+# ---------------------------------------------------------------------------
+
+
+def _opencode_install(tmp_path):
+    """Create the minimal ``~/.config/opencode`` install marker; returns its path."""
+    install = tmp_path / ".config" / "opencode"
+    install.mkdir(parents=True)
+    return install
+
+
+# --- OpenCodeDiscoverer: client_exists ---
+
+
+def test_opencode_discoverer_detects_installation(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+
+    result = OpenCodeDiscoverer(tmp_path).client_exists()
+
+    assert result is not None
+    assert result.endswith("/.config/opencode")
+
+
+def test_opencode_discoverer_returns_none_when_absent(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    assert OpenCodeDiscoverer(tmp_path).client_exists() is None
+
+
+# --- OpenCodeDiscoverer: discover_mcp_servers (global) ---
+
+
+def test_opencode_discoverer_parses_local_mcp_server(tmp_path):
+    """``type: "local"`` with array ``command`` -> StdioServer; command[0]/[1:] split."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text(
+        '{"mcp": {"playwright": {"type": "local", '
+        '"command": ["npx", "@playwright/mcp@1.59.1", "--browser", "chromium"], '
+        '"environment": {"FOO": "bar"}}}}'
+    )
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert len(mcp_configs) == 1
+    config_path = next(iter(mcp_configs))
+    assert config_path.endswith("/.config/opencode/opencode.json")
+    entries = mcp_configs[config_path]
+    assert isinstance(entries, list)
+    assert len(entries) == 1
+    name, server = entries[0]
+    assert name == "playwright"
+    assert isinstance(server, StdioServer)
+    assert server.command == "npx"
+    assert server.args == ["@playwright/mcp@1.59.1", "--browser", "chromium"]
+    assert server.env == {"FOO": "bar"}
+
+
+def test_opencode_discoverer_parses_remote_mcp_server(tmp_path):
+    """``type: "remote"`` -> RemoteServer with ``type: "http"`` and headers."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text(
+        '{"mcp": {"upstream": {"type": "remote", '
+        '"url": "https://mcp.example.com/mcp", '
+        '"headers": {"Authorization": "Bearer xyz"}}}}'
+    )
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp_configs))
+    entries = mcp_configs[config_path]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "upstream"
+    assert isinstance(server, RemoteServer)
+    assert server.url == "https://mcp.example.com/mcp"
+    assert server.type == "http"
+    assert server.headers == {"Authorization": "Bearer xyz"}
+
+
+def test_opencode_discoverer_skips_disabled_entries(tmp_path):
+    """``enabled: false`` drops the entry before typed validation -- one survivor."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text(
+        '{"mcp": {'
+        '"on": {"type": "local", "command": ["echo", "hi"]}, '
+        '"off": {"type": "local", "command": ["echo", "bye"], "enabled": false}'
+        "}}"
+    )
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    entries = mcp_configs[next(iter(mcp_configs))]
+    assert isinstance(entries, list)
+    names = {n for n, _ in entries}
+    assert names == {"on"}
+
+
+def test_opencode_discoverer_parses_jsonc(tmp_path):
+    """``.jsonc`` siblings of ``.json`` are read; comments and trailing commas tolerated."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.jsonc").write_text(
+        "// global opencode config\n"
+        '{"mcp": {"srv": {"type": "local", "command": ["echo"],}}}\n'
+    )
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert any(k.endswith("opencode.jsonc") for k in mcp_configs)
+    entries = next(iter(mcp_configs.values()))
+    assert isinstance(entries, list) and entries[0][0] == "srv"
+
+
+def test_opencode_discoverer_skips_config_without_mcp_block(tmp_path):
+    """A valid opencode config that only sets ``permission`` / ``theme`` etc. is
+    skipped silently (not reported as malformed)."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text('{"permission": {"edit": "ask"}}')
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert mcp_configs == {}
+
+
+def test_opencode_discoverer_records_could_not_parse_on_invalid_json(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text("{not valid json")
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert len(mcp_configs) == 1
+    entry = next(iter(mcp_configs.values()))
+    assert isinstance(entry, CouldNotParseMCPConfig)
+    assert entry.is_failure is True
+
+
+def test_opencode_discoverer_returns_empty_when_global_config_missing(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+
+    assert OpenCodeDiscoverer(tmp_path).discover_mcp_servers() == {}
+
+
+# --- OpenCodeDiscoverer: $OPENCODE_CONFIG env override ---
+
+
+def test_opencode_discoverer_reads_opencode_config_env(tmp_path, monkeypatch):
+    """``$OPENCODE_CONFIG`` adds an explicitly-named extra config source on own-home scans."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    override_path = tmp_path / "custom.json"
+    override_path.write_text('{"mcp": {"env-srv": {"type": "local", "command": ["echo"]}}}')
+
+    monkeypatch.setenv("OPENCODE_CONFIG", str(override_path))
+    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert str(override_path) in mcp_configs
+    entries = mcp_configs[str(override_path)]
+    assert isinstance(entries, list)
+    assert entries[0][0] == "env-srv"
+
+
+def test_opencode_discoverer_ignores_env_var_when_not_own_home(tmp_path, monkeypatch):
+    """``$OPENCODE_CONFIG`` reflects the scanning process's environment; under
+    ``--scan-all-users`` the scanner can't apply it to another user's home."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    override_path = tmp_path / "custom.json"
+    override_path.write_text('{"mcp": {"env-srv": {"type": "local", "command": ["echo"]}}}')
+
+    monkeypatch.setenv("OPENCODE_CONFIG", str(override_path))
+    # Force ``_scans_own_home`` to False by pointing Path.home() elsewhere.
+    other_home = tmp_path / "other-home"
+    other_home.mkdir()
+    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: other_home))
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert str(override_path) not in mcp_configs
+
+
+# --- OpenCodeDiscoverer: discover_skills ---
+
+
+def test_opencode_discoverer_parses_global_skills(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    skills_dir = install / "skills"
+    skills_dir.mkdir()
+    my_skill = skills_dir / "my-skill"
+    my_skill.mkdir()
+    (my_skill / "SKILL.md").write_text("---\nname: my-skill\ndescription: A test skill\n---\n\nBody.\n")
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    assert len(skills_dirs) == 1
+    dir_path = next(iter(skills_dirs))
+    assert dir_path.endswith("/.config/opencode/skills")
+    skills = skills_dirs[dir_path]
+    assert isinstance(skills, list)
+    name, server = skills[0]
+    assert name == "my-skill"
+    assert isinstance(server, SkillServer)
+
+
+def test_opencode_discoverer_skills_returns_empty_when_dir_missing(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+
+    assert OpenCodeDiscoverer(tmp_path).discover_skills() == {}
+
+
+# --- OpenCodeDiscoverer: project enumeration via SQLite db ---
+
+
+def _seed_opencode_db(db_path, worktrees):
+    """Create an opencode-shaped SQLite db with one ``project`` row per worktree."""
+    import sqlite3
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(db_path))
+    con.execute(
+        "CREATE TABLE project ("
+        "id TEXT PRIMARY KEY, worktree TEXT NOT NULL, vcs TEXT, name TEXT, "
+        "icon_url TEXT, icon_color TEXT, time_created INTEGER NOT NULL, "
+        "time_updated INTEGER NOT NULL, time_initialized INTEGER, sandboxes TEXT NOT NULL)"
+    )
+    for i, worktree in enumerate(worktrees):
+        con.execute(
+            "INSERT INTO project (id, worktree, time_created, time_updated, sandboxes) VALUES (?, ?, ?, ?, ?)",
+            (f"id-{i}", worktree, 0, 0, "[]"),
+        )
+    con.commit()
+    con.close()
+
+
+def test_opencode_discoverer_enumerates_projects_from_sqlite_db(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    db_path = tmp_path / ".local" / "share" / "opencode" / "opencode.db"
+    _seed_opencode_db(db_path, ["/Users/alice/repo-a", "/Users/alice/repo-b"])
+
+    folders = OpenCodeDiscoverer(tmp_path)._discover_project_folders()
+
+    folder_strs = {f.as_posix() for f in folders}
+    assert folder_strs == {"/Users/alice/repo-a", "/Users/alice/repo-b"}
+
+
+def test_opencode_discoverer_project_folders_empty_when_db_missing(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    # no opencode.db on disk
+
+    assert OpenCodeDiscoverer(tmp_path)._discover_project_folders() == []
+
+
+def test_opencode_discoverer_project_folders_empty_on_schema_drift(tmp_path):
+    """A db with no ``project`` table (e.g. a schema-version mismatch) yields ``[]``,
+    not an unhandled exception that would abort the discoverer."""
+    import sqlite3
+
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    db_path = tmp_path / ".local" / "share" / "opencode" / "opencode.db"
+    db_path.parent.mkdir(parents=True)
+    con = sqlite3.connect(str(db_path))
+    con.execute("CREATE TABLE unrelated (x TEXT)")
+    con.close()
+
+    assert OpenCodeDiscoverer(tmp_path)._discover_project_folders() == []
+
+
+def test_opencode_discoverer_discovers_project_opencode_json(tmp_path):
+    """A project-root ``opencode.json`` is picked up when listed in the SQLite db."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    project = tmp_path / "repo"
+    project.mkdir()
+    (project / "opencode.json").write_text(
+        '{"mcp": {"proj-srv": {"type": "local", "command": ["echo"]}}}'
+    )
+    db_path = tmp_path / ".local" / "share" / "opencode" / "opencode.db"
+    _seed_opencode_db(db_path, [project.as_posix()])
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/repo/opencode.json")]
+    assert len(keys) == 1
+    entries = mcp_configs[keys[0]]
+    assert isinstance(entries, list)
+    assert entries[0][0] == "proj-srv"
+
+
+def test_opencode_discoverer_discovers_project_skills_dir(tmp_path):
+    """``<project>/.opencode/skills`` is scanned for each opened project."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    project = tmp_path / "repo"
+    skills_dir = project / ".opencode" / "skills" / "proj-skill"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "SKILL.md").write_text("---\nname: proj-skill\ndescription: x\n---\nBody\n")
+    db_path = tmp_path / ".local" / "share" / "opencode" / "opencode.db"
+    _seed_opencode_db(db_path, [project.as_posix()])
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/repo/.opencode/skills")]
+    assert len(matching) == 1
+    skills = skills_dirs[matching[0]]
+    assert isinstance(skills, list)
+    assert skills[0][0] == "proj-skill"
+
+
+# --- OpenCodeDiscoverer: managed (system-wide) config ---
+
+
+def test_opencode_discoverer_discovers_managed_mcp_servers(tmp_path, monkeypatch):
+    """Managed dir per OS yields its ``opencode.json`` mcp entries."""
+    from agent_scan.agents import OpenCodeDiscoverer, opencode as opencode_module
+
+    _opencode_install(tmp_path)
+    managed = tmp_path / "managed-opencode"
+    managed.mkdir()
+    (managed / "opencode.json").write_text(
+        '{"mcp": {"mgr-srv": {"type": "local", "command": ["echo"]}}}'
+    )
+    monkeypatch.setattr(OpenCodeDiscoverer, "_managed_config_dir", lambda self: managed)
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/managed-opencode/opencode.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    assert entries[0][0] == "mgr-srv"
+    assert opencode_module  # silence unused-import lint when running this test alone
+
+
+def test_opencode_discoverer_managed_config_dir_per_os(monkeypatch):
+    """Confirms per-OS paths for managed config dir."""
+    from agent_scan.agents import OpenCodeDiscoverer, opencode as opencode_module
+
+    d = OpenCodeDiscoverer(None)
+
+    monkeypatch.setattr(opencode_module.sys, "platform", "darwin")
+    assert d._managed_config_dir() == __import__("pathlib").Path("/Library/Application Support/opencode")
+
+    monkeypatch.setattr(opencode_module.sys, "platform", "linux")
+    assert d._managed_config_dir() == __import__("pathlib").Path("/etc/opencode")
+
+    monkeypatch.setattr(opencode_module.sys, "platform", "win32")
+    monkeypatch.setenv("PROGRAMDATA", "C:\\ProgramData")
+    assert d._managed_config_dir() == __import__("pathlib").Path("C:\\ProgramData") / "opencode"
+
+
+# --- OpenCodeDiscoverer: full discover() + registry ---
+
+
+def test_opencode_discoverer_discover_assembles_client(tmp_path, monkeypatch):
+    from agent_scan.agents import OpenCodeDiscoverer
+    from agent_scan.models import ClientToInspect
+
+    # Disable per-OS managed-config probing so the assertion isn't OS-sensitive.
+    monkeypatch.setattr(OpenCodeDiscoverer, "_managed_config_dir", lambda self: None)
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text(
+        '{"mcp": {"srv": {"type": "local", "command": ["echo"]}}}'
+    )
+
+    cti = OpenCodeDiscoverer(tmp_path).discover()
+
+    assert isinstance(cti, ClientToInspect)
+    assert cti.name == "opencode"
+    assert cti.client_path.endswith("/.config/opencode")
+
+
+def test_opencode_discoverer_discover_returns_none_when_absent(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    assert OpenCodeDiscoverer(tmp_path).discover() is None
+
+
+def test_DISCOVERERS_registers_opencode():
+    from agent_scan.agents import DISCOVERERS, OpenCodeDiscoverer
+
+    assert DISCOVERERS["opencode"] is OpenCodeDiscoverer
+
+
+def test_find_discoverers_returns_opencode_when_installed(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer, find_discoverers
+
+    _opencode_install(tmp_path)
+
+    found = find_discoverers(tmp_path)
+
+    assert any(isinstance(d, OpenCodeDiscoverer) for d in found)
