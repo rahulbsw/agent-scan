@@ -79,7 +79,8 @@ class FixtureFile:
     dest: str
 
 
-class Scope(ABC):
+@dataclass(frozen=True)
+class Scope:
     """One detection scope mirroring a discoverer ``_discover_*`` method.
 
     ``mirrors`` holds the discoverer method OBJECT(s) this scope tests (rename-proof — a rename breaks
@@ -104,8 +105,6 @@ class Scope(ABC):
 class McpScope(Scope):
     """A single ``<bin> mcp add -s <cli_scope> <name> -- <cmd...>`` write + its expected ``mcp`` item."""
 
-    label: str
-    mirrors: tuple[Callable, ...]
     server_name: str
     cli_scope: str  # the -s value: user | local | project
     command: tuple[str, ...]
@@ -133,8 +132,6 @@ class PluginScope(Scope):
     installs stay non-fatal: a failed install leaves its enforced items MISSING, which the inspect
     comparison catches."""
 
-    label: str
-    mirrors: tuple[Callable, ...]
     marketplace: str
     marketplace_repo: str
     plugin: str
@@ -173,8 +170,6 @@ class FixtureScope(Scope):
     fixture is the only way to give the scope end-to-end coverage (it can't catch format drift, only
     regressions in agent-scan's own discovery/normalization)."""
 
-    label: str
-    mirrors: tuple[Callable, ...]
     sources: tuple[FixtureFile, ...]
     expected_items: tuple[ExpectedItem, ...]
 
@@ -209,8 +204,6 @@ class Gap(Scope):
     """A discoverer scope with no live writer: mirrored for fidelity (so the coverage test counts its
     method as covered) but never seeded or asserted. ``why`` documents why it can't be driven live."""
 
-    label: str
-    mirrors: tuple[Callable, ...]
     why: str
 
 
@@ -237,8 +230,9 @@ class AgentCanary(ABC):
         """Ordered binary names to probe for this agent's CLI (most-specific first)."""
 
     @property
+    @abstractmethod
     def scopes(self) -> list[Scope]:
-        raise NotImplementedError
+        """Ordered scopes the executor runs for this agent."""
 
     def expected(self) -> list[ExpectedItem]:
         return [item for scope in self.scopes for item in scope.expected()]
