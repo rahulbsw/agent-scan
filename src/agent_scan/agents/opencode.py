@@ -45,15 +45,20 @@ class OpenCodeDiscoverer(AgentDiscoverer):
       (Linux), or ``%ProgramData%\\opencode`` (Windows). See follow-up note in
       :meth:`_managed_config_dir` for the macOS MDM plist scope, which is
       intentionally NOT scanned here.
-    * Env overrides — both are honored only on an own-home scan (the env vars
+    * Env overrides — all are honored only on an own-home scan (the env vars
       reflect the *scanning process's* environment, so they must not be applied
-      to other users under ``--scan-all-users``):
+      to other users under ``--scan-all-users``). All are applied *additively*
+      to the home-relative defaults so the scanner never misses configs
+      regardless of whether opencode treats them as relocation or addition.
 
       - ``$OPENCODE_CONFIG`` names an alternate config file (mcp only).
-      - ``$OPENCODE_CONFIG_DIR`` names an alternate global config *directory*;
-        treated additively (the default ``~/.config/opencode`` is still scanned
-        too) so the scanner never misses configs regardless of whether opencode
-        treats this as replacement or addition.
+      - ``$OPENCODE_CONFIG_DIR`` names an alternate global config *directory*.
+      - ``$XDG_CONFIG_HOME``, ``$XDG_DATA_HOME``, ``$XDG_CACHE_HOME`` — opencode
+        uses the ``xdg-basedir`` package for every ``Global.Path`` location
+        (``packages/core/src/global.ts``), so when these are set opencode reads
+        from ``<XDG>/opencode/`` instead of the conventional home-relative paths
+        for config, data (SQLite db), and cache (URL-pulled skills),
+        respectively.
 
     * Claude-Code compat — opencode's skill discovery
       (https://opencode.ai/docs/skills) lists four extra paths it loads
@@ -137,12 +142,20 @@ class OpenCodeDiscoverer(AgentDiscoverer):
     # --- public (override AgentDiscoverer abstracts) ---
 
     def client_exists(self) -> str | None:
-        path = self._global_config_dir()
-        try:
-            if path.exists():
-                return path.as_posix()
-        except PermissionError:
-            logger.warning("Permission error for path %s", path.as_posix())
+        """Detect an opencode install at any of the known global config dirs.
+
+        Walks every candidate in :meth:`_global_config_dirs` (XDG override,
+        ``$OPENCODE_CONFIG_DIR``, ``~/.config/opencode``, ``~/.opencode``) and
+        returns the first one that exists. A user with ``$XDG_CONFIG_HOME``
+        relocating their config out of ``~/.config`` would otherwise read as
+        "not installed" and skip the whole discoverer.
+        """
+        for path in self._global_config_dirs():
+            try:
+                if path.exists():
+                    return path.as_posix()
+            except PermissionError:
+                logger.warning("Permission error for path %s", path.as_posix())
         return None
 
     def discover_mcp_servers(self) -> McpConfigsResult:
@@ -177,15 +190,32 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         """
         return self._default_global_config_dir()
 
+    def _xdg_env_dir(self, env_var: str) -> Path | None:
+        """Return ``<env>/opencode`` if ``env_var`` is set on an own-home scan.
+
+        opencode resolves every ``Global.Path`` via ``xdg-basedir``
+        (``packages/core/src/global.ts``), which honors the standard ``XDG_*``
+        env vars. When the scanning process has one set, that's where opencode
+        is reading from; the scanner must look there too. Other users under
+        ``--scan-all-users`` get the home-relative defaults only.
+        """
+        if not self._scans_own_home():
+            return None
+        value = os.environ.get(env_var)
+        if not value:
+            return None
+        return Path(value) / "opencode"
+
     def _global_config_dirs(self) -> list[Path]:
         """Every global config dir to sweep for MCP/skills.
 
         Includes (in priority order):
 
-        - ``$OPENCODE_CONFIG_DIR`` when set on an own-home scan — kept additive
-          (not a replacement) so the scanner never misses configs regardless of
-          whether opencode treats the env var as relocation or as an additional
-          search root.
+        - ``$XDG_CONFIG_HOME/opencode`` when set on an own-home scan — opencode
+          reads its config from there instead of ``~/.config/opencode`` per
+          ``xdg-basedir`` resolution. Additive: defaults are still scanned.
+        - ``$OPENCODE_CONFIG_DIR`` when set on an own-home scan — opencode's
+          alternate config dir.
         - ``~/.config/opencode`` — the XDG default.
         - ``~/.opencode`` — opencode's ``ConfigPaths.directories`` also walks
           ``Global.Path.home`` for ``.opencode``, so a user with skills or an
@@ -195,6 +225,9 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         appears multiple ways collapses to one entry.
         """
         dirs: list[Path] = []
+        xdg = self._xdg_env_dir("XDG_CONFIG_HOME")
+        if xdg is not None:
+            dirs.append(xdg)
         if self._scans_own_home():
             override = os.environ.get("OPENCODE_CONFIG_DIR")
             if override:
@@ -203,11 +236,32 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         dirs.append(expand_path(Path(self._install_path_alt), self.home_directory))
         return dirs
 
-    def _data_dir(self) -> Path:
-        return expand_path(Path(self._data_path), self.home_directory)
+    def _data_dirs(self) -> list[Path]:
+        """Every data dir to consult for the opencode SQLite db.
 
-    def _cache_dir(self) -> Path:
-        return expand_path(Path(self._cache_path), self.home_directory)
+        Includes ``$XDG_DATA_HOME/opencode`` on own-home scans (where opencode
+        actually persists projects when XDG is set) plus the home-relative
+        default ``~/.local/share/opencode``.
+        """
+        dirs: list[Path] = []
+        xdg = self._xdg_env_dir("XDG_DATA_HOME")
+        if xdg is not None:
+            dirs.append(xdg)
+        dirs.append(expand_path(Path(self._data_path), self.home_directory))
+        return dirs
+
+    def _cache_dirs(self) -> list[Path]:
+        """Every cache dir to consult for URL-pulled skills.
+
+        Includes ``$XDG_CACHE_HOME/opencode`` on own-home scans plus the
+        home-relative default ``~/.cache/opencode``.
+        """
+        dirs: list[Path] = []
+        xdg = self._xdg_env_dir("XDG_CACHE_HOME")
+        if xdg is not None:
+            dirs.append(xdg)
+        dirs.append(expand_path(Path(self._cache_path), self.home_directory))
+        return dirs
 
     def _managed_config_dir(self) -> Path | None:
         """System-wide opencode config directory, or ``None`` on unsupported OSes.
@@ -242,32 +296,42 @@ class OpenCodeDiscoverer(AgentDiscoverer):
     def _discover_project_folders(self) -> list[Path]:
         """Project paths from opencode's SQLite db (``project.worktree`` column).
 
-        Opened with ``mode=ro&immutable=1`` so a concurrently-running opencode
-        cannot block us on the WAL/SHM lock; any sqlite error (missing file,
-        schema drift, permission denied) yields ``[]`` rather than aborting the
-        whole discoverer.
+        Reads ``opencode.db`` from every data dir in :meth:`_data_dirs` (XDG +
+        default), deduplicating worktree paths. Opened with
+        ``mode=ro&immutable=1`` so a concurrently-running opencode cannot block
+        us on the WAL/SHM lock; per-db sqlite errors (missing file, schema
+        drift, permission denied) are tolerated rather than aborting the whole
+        discoverer.
         """
-        db_path = self._data_dir() / self._db_filename
-        try:
-            if not db_path.exists():
-                return []
-        except (PermissionError, OSError):
-            return []
-        # ``immutable=1`` is what lets us co-exist with a live opencode: it tells
-        # SQLite the file will not change, so no WAL/SHM is consulted and no lock
-        # is taken. Safe for a read-only inspection.
-        uri = f"file:{db_path.as_posix()}?mode=ro&immutable=1"
-        try:
-            con = sqlite3.connect(uri, uri=True)
+        seen: set[str] = set()
+        result: list[Path] = []
+        for data_dir in self._data_dirs():
+            db_path = data_dir / self._db_filename
             try:
-                cur = con.execute("SELECT worktree FROM project WHERE worktree IS NOT NULL")
-                rows = cur.fetchall()
-            finally:
-                con.close()
-        except sqlite3.Error as e:
-            logger.warning("Could not read opencode project table from %s: %s", db_path.as_posix(), e)
-            return []
-        return [Path(row[0]) for row in rows if isinstance(row[0], str) and row[0]]
+                if not db_path.exists():
+                    continue
+            except (PermissionError, OSError):
+                continue
+            # ``immutable=1`` tells SQLite the file will not change, so no
+            # WAL/SHM is consulted and no lock is taken — safe co-existence
+            # with a live opencode.
+            uri = f"file:{db_path.as_posix()}?mode=ro&immutable=1"
+            try:
+                con = sqlite3.connect(uri, uri=True)
+                try:
+                    cur = con.execute("SELECT worktree FROM project WHERE worktree IS NOT NULL")
+                    rows = cur.fetchall()
+                finally:
+                    con.close()
+            except sqlite3.Error as e:
+                logger.warning("Could not read opencode project table from %s: %s", db_path.as_posix(), e)
+                continue
+            for row in rows:
+                if not isinstance(row[0], str) or not row[0] or row[0] in seen:
+                    continue
+                seen.add(row[0])
+                result.append(Path(row[0]))
+        return result
 
     # --- MCP discovery ---
 
@@ -436,25 +500,26 @@ class OpenCodeDiscoverer(AgentDiscoverer):
     # --- URL-pulled skills cache (Gap C) ---
 
     def _discover_cached_url_skills(self) -> SkillsDirsResult:
-        """Scan ``~/.cache/opencode/skills/<hash>/`` for skills pulled from
-        ``cfg.skills.urls`` URLs.
+        """Scan ``<cache>/opencode/skills/<hash>/`` for URL-pulled skills.
 
-        Per ``packages/core/src/skill/discovery.ts:107`` the layout is
-        ``<cache>/skills/<Bun.hash(base-url)>/<skill-name>/SKILL.md``. Each
-        ``<hash>`` directory is structurally identical to a normal skills dir
-        root, so we list one level beneath ``skills/`` and feed each match
+        Iterates every cache dir in :meth:`_cache_dirs` (XDG override +
+        default). Per ``packages/core/src/skill/discovery.ts:107`` the layout
+        under each cache root is ``skills/<Bun.hash(base-url)>/<skill-name>/SKILL.md``.
+        Each ``<hash>`` directory is structurally identical to a normal skills
+        dir root, so we list one level beneath ``skills/`` and feed each match
         through ``_scan_skills_dir``.
         """
-        cache_skills = self._cache_dir() / "skills"
         result: SkillsDirsResult = {}
-        try:
-            if not cache_skills.is_dir():
-                return result
-            hash_dirs = sorted(cache_skills.iterdir())
-        except (PermissionError, OSError):
-            return result
-        for hash_dir in hash_dirs:
-            if not hash_dir.is_dir():
+        for cache_dir in self._cache_dirs():
+            cache_skills = cache_dir / "skills"
+            try:
+                if not cache_skills.is_dir():
+                    continue
+                hash_dirs = sorted(cache_skills.iterdir())
+            except (PermissionError, OSError):
                 continue
-            self._record_skills_at(result, hash_dir)
+            for hash_dir in hash_dirs:
+                if not hash_dir.is_dir():
+                    continue
+                self._record_skills_at(result, hash_dir)
         return result

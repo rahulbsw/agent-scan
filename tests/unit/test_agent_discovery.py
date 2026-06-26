@@ -8166,3 +8166,155 @@ def test_opencode_discoverer_scans_multiple_cached_hash_dirs(tmp_path):
 
     matching = [k for k in skills_dirs if "/.cache/opencode/skills/" in k]
     assert len(matching) == 2
+
+
+# --- OpenCodeDiscoverer: XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_CACHE_HOME ---
+
+
+def test_opencode_discoverer_detects_install_via_xdg_config_home(tmp_path, monkeypatch):
+    """When ``$XDG_CONFIG_HOME`` relocates opencode, ``client_exists`` finds it
+    even if ``~/.config/opencode`` is absent. opencode uses ``xdg-basedir`` for
+    every Global.Path location (packages/core/src/global.ts)."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    # No ``~/.config/opencode`` on disk — only an XDG-relocated install.
+    xdg_cfg = tmp_path / "xdg-config"
+    (xdg_cfg / "opencode").mkdir(parents=True)
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_cfg))
+    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+
+    result = OpenCodeDiscoverer(tmp_path).client_exists()
+
+    assert result is not None
+    assert result.endswith("/xdg-config/opencode")
+
+
+def test_opencode_discoverer_scans_xdg_config_home_mcp(tmp_path, monkeypatch):
+    """``$XDG_CONFIG_HOME/opencode/opencode.json`` is scanned for mcp servers."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    xdg_cfg = tmp_path / "xdg-config"
+    install = xdg_cfg / "opencode"
+    install.mkdir(parents=True)
+    (install / "opencode.json").write_text(
+        '{"mcp": {"xdg-srv": {"type": "local", "command": ["echo"]}}}'
+    )
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_cfg))
+    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/xdg-config/opencode/opencode.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    assert entries[0][0] == "xdg-srv"
+
+
+def test_opencode_discoverer_scans_xdg_config_home_skills(tmp_path, monkeypatch):
+    """``$XDG_CONFIG_HOME/opencode/skills`` is scanned for skills."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    xdg_cfg = tmp_path / "xdg-config"
+    sk = xdg_cfg / "opencode" / "skills" / "xdg-skill"
+    sk.mkdir(parents=True)
+    (sk / "SKILL.md").write_text("---\nname: xdg-skill\ndescription: x\n---\nBody\n")
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_cfg))
+    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/xdg-config/opencode/skills")]
+    assert len(matching) == 1
+
+
+def test_opencode_discoverer_reads_project_db_at_xdg_data_home(tmp_path, monkeypatch):
+    """``$XDG_DATA_HOME/opencode/opencode.db`` is consulted for project paths."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    xdg_data = tmp_path / "xdg-data"
+    db_path = xdg_data / "opencode" / "opencode.db"
+    _seed_opencode_db(db_path, ["/Users/alice/xdg-repo"])
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_data))
+    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+
+    folders = OpenCodeDiscoverer(tmp_path)._discover_project_folders()
+
+    assert {f.as_posix() for f in folders} == {"/Users/alice/xdg-repo"}
+
+
+def test_opencode_discoverer_scans_xdg_cache_home_url_skills(tmp_path, monkeypatch):
+    """``$XDG_CACHE_HOME/opencode/skills/<hash>/`` is scanned for URL-pulled skills."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    xdg_cache = tmp_path / "xdg-cache"
+    sk = xdg_cache / "opencode" / "skills" / "deadbeef" / "remote-skill"
+    sk.mkdir(parents=True)
+    (sk / "SKILL.md").write_text("---\nname: remote-skill\ndescription: x\n---\nBody\n")
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(xdg_cache))
+    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/xdg-cache/opencode/skills/deadbeef")]
+    assert len(matching) == 1
+
+
+def test_opencode_discoverer_ignores_xdg_when_not_own_home(tmp_path, monkeypatch):
+    """XDG env vars reflect the scanning process's env; on a non-own-home scan
+    they must not be applied to another user's home."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    xdg_cfg = tmp_path / "xdg-config"
+    (xdg_cfg / "opencode").mkdir(parents=True)
+    (xdg_cfg / "opencode" / "opencode.json").write_text(
+        '{"mcp": {"xdg-srv": {"type": "local", "command": ["echo"]}}}'
+    )
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_cfg))
+    other_home = tmp_path / "other-home"
+    other_home.mkdir()
+    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: other_home))
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert all("xdg-config" not in k for k in mcp_configs)
+
+
+def test_opencode_discoverer_xdg_is_additive_default_still_scanned(tmp_path, monkeypatch):
+    """Both XDG-relocated and default ``~/.config/opencode`` configs surface
+    when both exist (additive, not replacement)."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text(
+        '{"mcp": {"def-srv": {"type": "local", "command": ["echo"]}}}'
+    )
+    xdg_cfg = tmp_path / "xdg-config"
+    xdg_install = xdg_cfg / "opencode"
+    xdg_install.mkdir(parents=True)
+    (xdg_install / "opencode.json").write_text(
+        '{"mcp": {"xdg-srv": {"type": "local", "command": ["echo"]}}}'
+    )
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_cfg))
+    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    names = set()
+    for entry in mcp_configs.values():
+        if isinstance(entry, list):
+            for n, _ in entry:
+                names.add(n)
+    assert {"def-srv", "xdg-srv"} <= names
