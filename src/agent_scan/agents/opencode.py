@@ -200,7 +200,7 @@ class OpenCodeDiscoverer(AgentDiscoverer):
     def _global_config_dirs(self) -> list[Path]:
         """Every global config dir to sweep for MCP/skills.
 
-        Includes (in priority order):
+        Includes (all scanned additively):
 
         - ``$XDG_CONFIG_HOME/opencode`` when set on an own-home scan — opencode
           reads its config from there instead of ``~/.config/opencode`` per
@@ -313,8 +313,11 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             #      silently drop every project for that user.
             #   2. The cost is tolerated torn reads if opencode happens to
             #      be writing the ``project`` table mid-scan: a corrupt
-            #      worktree string just yields a ``Path`` that probes
-            #      nothing downstream. The ``project`` table only grows
+            #      worktree string yields a ``Path`` whose ancestor walk
+            #      makes a bounded handful of stat calls (one
+            #      ``opencode.json`` / ``.opencode/skills`` probe per
+            #      ancestor up to the filesystem root), all of which miss
+            #      on a non-existent path. The ``project`` table only grows
             #      when a user opens a new project, so the window is small
             #      in practice.
             # ``as_uri()`` produces the canonical ``file:///`` form on every
