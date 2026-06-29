@@ -204,7 +204,11 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         value = os.environ.get(env_var)
         if not value:
             return None
-        return Path(value) / "opencode"
+        # ``.absolute()`` so a relative env value (xdg-basedir/Node don't reject
+        # one) still yields an absolute path — the result dicts are keyed by
+        # ``.as_posix()`` and downstream dedup/attribution assumes absolute keys.
+        # Matches the ``.absolute()`` guard on the SQLite db path below.
+        return (Path(value) / "opencode").absolute()
 
     def _global_config_dirs(self) -> list[Path]:
         """Every global config dir to sweep for MCP/skills.
@@ -231,7 +235,9 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         if self._scans_own_home():
             override = os.environ.get("OPENCODE_CONFIG_DIR")
             if override:
-                dirs.append(Path(override))
+                # ``.absolute()`` keeps keys absolute even for a relative env
+                # value (see ``_xdg_env_dir``).
+                dirs.append(Path(override).absolute())
         dirs.append(self._default_global_config_dir())
         dirs.append(expand_path(Path(self._install_path_alt), self.home_directory))
         return dirs
@@ -285,7 +291,9 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         override = os.environ.get("OPENCODE_CONFIG")
         if not override:
             return None
-        return Path(override)
+        # ``.absolute()`` so a relative env value yields an absolute key /
+        # ``client_path`` (see ``_xdg_env_dir``).
+        return Path(override).absolute()
 
     # --- project enumeration (SQLite db) ---
 

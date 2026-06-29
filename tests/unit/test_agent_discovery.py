@@ -8417,3 +8417,104 @@ def test_opencode_discoverer_xdg_is_additive_default_still_scanned(tmp_path, mon
             for n, _ in entry:
                 names.add(n)
     assert {"def-srv", "xdg-srv"} <= names
+
+
+# --- OpenCodeDiscoverer: relative env values must still yield absolute keys ---
+#
+# opencode resolves XDG_*/OPENCODE_CONFIG[_DIR] via xdg-basedir/Node, which do
+# NOT reject a relative value (XDG spec says compliant apps ignore them, but the
+# package doesn't). The default dirs are absolute (``expand_path``) and the
+# SQLite db path is guarded with ``.absolute()``; the other env-derived paths
+# must match so the "downstream-keyed by absolute path" dedup/attribution
+# invariant the discoverer documents holds regardless of how the env is spelled.
+
+
+def test_opencode_discoverer_relative_xdg_config_home_yields_absolute_keys(tmp_path, monkeypatch):
+    """A relative ``$XDG_CONFIG_HOME`` still produces an absolute config key."""
+    from pathlib import Path
+
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    install = tmp_path / "rel-xdg-config" / "opencode"
+    install.mkdir(parents=True)
+    (install / "opencode.json").write_text('{"mcp": {"xdg-srv": {"type": "local", "command": ["echo"]}}}')
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", "rel-xdg-config")
+    _force_home(monkeypatch, tmp_path)
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/rel-xdg-config/opencode/opencode.json")]
+    assert len(keys) == 1
+    assert Path(keys[0]).is_absolute()
+    assert keys[0] == (install / "opencode.json").as_posix()
+
+
+def test_opencode_discoverer_relative_opencode_config_dir_yields_absolute_keys(tmp_path, monkeypatch):
+    """A relative ``$OPENCODE_CONFIG_DIR`` still produces an absolute config key."""
+    from pathlib import Path
+
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    override = tmp_path / "rel-config-dir"
+    override.mkdir()
+    (override / "opencode.json").write_text('{"mcp": {"alt-srv": {"type": "local", "command": ["echo"]}}}')
+
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", "rel-config-dir")
+    _force_home(monkeypatch, tmp_path)
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/rel-config-dir/opencode.json")]
+    assert len(keys) == 1
+    assert Path(keys[0]).is_absolute()
+
+
+def test_opencode_discoverer_relative_xdg_cache_home_yields_absolute_skill_keys(tmp_path, monkeypatch):
+    """A relative ``$XDG_CACHE_HOME`` still produces an absolute URL-skills key."""
+    from pathlib import Path
+
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    sk = tmp_path / "rel-xdg-cache" / "opencode" / "skills" / "deadbeef" / "remote-skill"
+    sk.mkdir(parents=True)
+    (sk / "SKILL.md").write_text("---\nname: remote-skill\ndescription: x\n---\nBody\n")
+
+    monkeypatch.setenv("XDG_CACHE_HOME", "rel-xdg-cache")
+    _force_home(monkeypatch, tmp_path)
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/rel-xdg-cache/opencode/skills/deadbeef")]
+    assert len(keys) == 1
+    assert Path(keys[0]).is_absolute()
+
+
+def test_opencode_discoverer_relative_opencode_config_file_yields_absolute_key(tmp_path, monkeypatch):
+    """A relative ``$OPENCODE_CONFIG`` file yields an absolute ``client_exists``
+    path and an absolute env-override config key (not a relative one)."""
+    from pathlib import Path
+
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "rel-custom.json").write_text('{"mcp": {"env-srv": {"type": "local", "command": ["echo"]}}}')
+
+    monkeypatch.setenv("OPENCODE_CONFIG", "rel-custom.json")
+    _force_home(monkeypatch, tmp_path)
+
+    discoverer = OpenCodeDiscoverer(tmp_path)
+    client_path = discoverer.client_exists()
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    assert client_path is not None
+    assert Path(client_path).is_absolute()
+    env_keys = [k for k in mcp_configs if k.endswith("/rel-custom.json")]
+    assert len(env_keys) == 1
+    assert Path(env_keys[0]).is_absolute()
