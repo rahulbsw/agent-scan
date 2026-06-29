@@ -32,6 +32,7 @@ IS_WINDOWS = sys.platform == "win32"
 # Constants
 # ---------------------------------------------------------------------------
 
+ALL_CLIENTS = ["claude", "cursor", "codex"]
 DEFAULT_REMOTE_URL = "https://api.snyk.io"
 _DETECTION_RE = re.compile(
     r"PUSH_KEY=.*snyk-agent-guard"
@@ -133,7 +134,7 @@ def _get_machine_description(client: str) -> str:
     from agent_scan.upload import get_hostname
 
     hostname = get_hostname()
-    label = _client_label(client)
+    label = ", ".join(_client_label(c) for c in ALL_CLIENTS) if client == "all" else _client_label(client)
     return f"agent-guard ({hostname}) {label}"
 
 
@@ -186,12 +187,18 @@ def _run_install(args) -> None:
         tenant_id = (os.environ.get("TENANT_ID", "") or "").strip()
     managed: bool = getattr(args, "managed", False)
 
-    label = _client_label(client)
+    clients = ALL_CLIENTS if client == "all" else [client]
+
+    if client == "all" and getattr(args, "file", None):
+        rich.print("[bold red]Error:[/bold red] --file cannot be used with client 'all'.")
+        sys.exit(1)
+
     scope = "managed" if managed else "user"
     snyk_token = ""
 
     if not headless:
         # Interactive flow — mint a push key
+        label = ", ".join(_client_label(c) for c in clients)
         rich.print(f"Installing [bold magenta]Agent Guard[/bold magenta] {scope} hooks for [bold]{label}[/bold]")
         rich.print()
 
@@ -212,9 +219,9 @@ def _run_install(args) -> None:
 
         _ensure_guard_enabled_for_tenant(url, tenant_id, snyk_token)
 
-        # Preflight: verify target directory is writable before minting
-        config_path = _config_path(client, getattr(args, "file", None), managed=managed)
-        _preflight_writable(config_path)
+        # Preflight: verify target directories are writable before minting
+        for c in clients:
+            _preflight_writable(_config_path(c, getattr(args, "file", None), managed=managed))
 
         description = _get_machine_description(client)
         rich.print(f"[dim]Minting push key for {description}...[/dim]")
@@ -229,28 +236,34 @@ def _run_install(args) -> None:
             sys.exit(1)
         rich.print(f"[green]\u2713[/green]  Push key minted  [yellow]{_mask_key(push_key)}[/yellow]")
 
-    hook_client = _hook_client_name(client)
     minted = not headless  # True if we minted the key in this run
-    config_path = _config_path(client, getattr(args, "file", None), managed=managed)
 
+    installed_any = False
     try:
-        _install_hooks(
-            client,
-            hook_client,
-            push_key,
-            url,
-            config_path,
-            scope,
-            label,
-            minted,
-            tenant_id,
-            snyk_token,
-        )
-    except (SystemExit, KeyboardInterrupt):
-        raise
+        for c in clients:
+            _install_hooks(
+                c,
+                _hook_client_name(c),
+                push_key,
+                url,
+                _config_path(c, getattr(args, "file", None), managed=managed),
+                scope,
+                _client_label(c),
+                minted,
+                tenant_id,
+                snyk_token,
+            )
+            installed_any = True
     except BaseException:
         if minted:
-            _revoke_after_failure(url, tenant_id, snyk_token, push_key)
+            if installed_any:
+                rich.print(
+                    "[yellow]Warning:[/yellow] Installation partially completed. "
+                    "The push key is still active for already-configured clients. "
+                    "Run [bold]uninstall[/bold] to clean up if needed."
+                )
+            else:
+                _revoke_after_failure(url, tenant_id, snyk_token, push_key)
         raise
 
 
@@ -346,8 +359,6 @@ def _install_hooks(
     ):
         if not script_existed:
             dest_path.unlink(missing_ok=True)
-        if minted:
-            _revoke_after_failure(url, tenant_id, snyk_token, push_key)
         rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
         raise SystemExit(1)
 
@@ -622,6 +633,18 @@ def _uninstall_codex_managed(path: Path) -> None:
 def _run_uninstall(args) -> None:
     client: str = args.client
     managed: bool = getattr(args, "managed", False)
+
+    if client == "all" and getattr(args, "file", None):
+        rich.print("[bold red]Error:[/bold red] --file cannot be used with client 'all'.")
+        sys.exit(1)
+
+    clients = ALL_CLIENTS if client == "all" else [client]
+
+    for c in clients:
+        _uninstall_single_client(c, args, managed)
+
+
+def _uninstall_single_client(client: str, args, managed: bool) -> None:
     label = _client_label(client)
     scope = "managed" if managed else "user"
     config_path = _config_path(client, getattr(args, "file", None), managed=managed)
@@ -630,13 +653,7 @@ def _run_uninstall(args) -> None:
     rich.print("[dim]Other hooks in the file will be preserved.[/dim]")
     rich.print()
 
-    # Detect the installed command to extract push key + tenant for revocation
-    if client == "claude":
-        info = _detect_claude_install(config_path)
-    elif client == "cursor":
-        info = _detect_cursor_install(config_path)
-    else:  # codex
-        info = _detect_codex_install(config_path)
+    info = _detect_existing_install(client, config_path)
 
     # Remove hooks from config
     if client == "claude":
