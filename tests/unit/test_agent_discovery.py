@@ -7809,6 +7809,45 @@ def test_opencode_discoverer_project_folders_empty_on_schema_drift(tmp_path):
     assert OpenCodeDiscoverer(tmp_path)._discover_project_folders() == []
 
 
+def test_opencode_discoverer_project_folders_skips_fifo_db_without_hanging(tmp_path):
+    """A non-regular file at the ``opencode.db`` path — e.g. a FIFO planted in a
+    hostile home under ``--scan-all-users`` — must be skipped via the
+    ``is_file()`` guard, never handed to ``sqlite3.connect``. Opening a FIFO
+    blocks on open()/first-read until a writer appears, which would hang the
+    whole scan. Runs in a worker thread with a join timeout so a regression
+    (the guard reverting to ``exists()``) surfaces as a fast failure rather than
+    a hung suite."""
+    import os
+    import threading
+
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("os.mkfifo not available on this platform")
+
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    db_path = tmp_path / ".local" / "share" / "opencode" / "opencode.db"
+    db_path.parent.mkdir(parents=True)
+    os.mkfifo(db_path)
+
+    result: list = []
+    error: list = []
+
+    def run():
+        try:
+            result.append(OpenCodeDiscoverer(tmp_path)._discover_project_folders())
+        except BaseException as e:  # pragma: no cover - only on regression
+            error.append(e)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), "discoverer hung opening a FIFO opencode.db (missing is_file guard)"
+    assert not error, f"discoverer raised on FIFO db: {error}"
+    assert result[0] == []
+
+
 def test_opencode_discoverer_discovers_project_opencode_json(tmp_path):
     """A project-root ``opencode.json`` is picked up when listed in the SQLite db."""
     from agent_scan.agents import OpenCodeDiscoverer

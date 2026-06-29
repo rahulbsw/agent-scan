@@ -317,7 +317,17 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         for data_dir in self._data_dirs():
             db_path = data_dir / self._db_filename
             try:
-                if not db_path.exists():
+                # ``is_file()`` (not ``exists()``) so a non-regular file planted
+                # at this path — a FIFO/socket/device, the classic
+                # ``--scan-all-users`` hostile-home case — is skipped before
+                # ``sqlite3.connect`` can block on open()/first-read waiting for
+                # a writer and hang the scan. Mirrors the ``is_file()`` guard the
+                # plugin/extension MCP walks use for the same defense. Follows
+                # symlinks, so a symlink to a real db still works; a symlink to a
+                # FIFO is rejected. Like ``exists()``, ``is_file()`` re-raises
+                # OSErrors outside the ENOENT/ENOTDIR ignore set (ESTALE, EIO),
+                # so the per-candidate tolerance below is still needed.
+                if not db_path.is_file():
                     continue
             except (PermissionError, OSError):
                 continue
