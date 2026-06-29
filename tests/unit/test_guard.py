@@ -52,6 +52,7 @@ from agent_scan.guard import (
     _print_client_status,
     _run_install,
     _run_uninstall,
+    _send_test_event,
     _shell_quote,
     _uninstall_claude,
     _uninstall_codex,
@@ -1602,6 +1603,9 @@ _DIFF_EMPTY: dict = {"added": {}, "modified": {}, "removed": {}}
 
 _PREPARED: dict[str, dict[str, list[object]]] = {"hooks": {"SessionStart": []}}
 
+_CURRENT_CHECKSUM = "a" * 64
+_NEW_CHECKSUM = "b" * 64
+
 
 class TestInstallHooksOrchestration:
     """Tests for _install_hooks: detect changes → send test event → write config."""
@@ -1615,7 +1619,7 @@ class TestInstallHooksOrchestration:
         """
         dest = MagicMock(name="dest_path")
         targets = {
-            "copy": (f"{_G}._copy_hook_script", (dest, True, False)),
+            "copy": (f"{_G}._copy_hook_script", (dest, True, False, _CURRENT_CHECKSUM, _NEW_CHECKSUM)),
             "build": (f"{_G}._build_hook_command", "test-cmd"),
             "prep_claude": (f"{_G}._prepare_claude_config", (_PREPARED, _DIFF_REMOVED, 0)),
             "prep_cursor": (f"{_G}._prepare_cursor_config", (_PREPARED, _DIFF_REMOVED, 0)),
@@ -1661,6 +1665,14 @@ class TestInstallHooksOrchestration:
 
     def _print_messages(self, ctx):
         return [c.args[0] for c in ctx["rich"].print.call_args_list if c.args]
+
+    # ---------------------------------------------------------------
+    # _copy_hook_script receives only config_path
+    # ---------------------------------------------------------------
+
+    def test_copy_hook_script_called_with_config_path_only(self, ctx, tmp_path):
+        config = self._call(tmp_path, client="claude", config_exists=True)
+        ctx["copy"].assert_called_once_with(config)
 
     # ---------------------------------------------------------------
     # Client routing: each client calls its own prepare + write
@@ -1728,7 +1740,7 @@ class TestInstallHooksOrchestration:
 
     def test_test_event_sent_when_script_new(self, ctx, tmp_path):
         """first_install=True because script did not exist prior."""
-        ctx["copy"].return_value = (ctx["dest"], False, True)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path, config_exists=True)
         ctx["test_event"].assert_called_once()
         _, kwargs = ctx["test_event"].call_args
@@ -1748,7 +1760,7 @@ class TestInstallHooksOrchestration:
 
     def test_test_event_receives_diff(self, ctx, tmp_path):
         ctx["prep_claude"].return_value = (_PREPARED, _DIFF_REMOVED, 0)
-        ctx["copy"].return_value = (ctx["dest"], False, True)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -1759,11 +1771,13 @@ class TestInstallHooksOrchestration:
             config_changed=True,
             hooks_diff=_DIFF_REMOVED,
             push_key_changed=False,
+            current_checksum=None,
+            new_checksum=_NEW_CHECKSUM,
         )
 
     def test_test_event_receives_empty_diff(self, ctx, tmp_path):
         ctx["prep_claude"].return_value = (_PREPARED, _DIFF_EMPTY, 0)
-        ctx["copy"].return_value = (ctx["dest"], False, True)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -1774,6 +1788,8 @@ class TestInstallHooksOrchestration:
             config_changed=False,
             hooks_diff=_DIFF_EMPTY,
             push_key_changed=False,
+            current_checksum=None,
+            new_checksum=_NEW_CHECKSUM,
         )
 
     def test_test_event_not_first_install(self, ctx, tmp_path):
@@ -1788,11 +1804,13 @@ class TestInstallHooksOrchestration:
             config_changed=True,
             hooks_diff=_DIFF_REMOVED,
             push_key_changed=False,
+            current_checksum=_CURRENT_CHECKSUM,
+            new_checksum=_NEW_CHECKSUM,
         )
 
     def test_test_event_push_key_changed(self, ctx, tmp_path):
         ctx["detect_existing"].return_value = {"auth_value": "old-push-key"}
-        ctx["copy"].return_value = (ctx["dest"], False, True)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -1803,11 +1821,13 @@ class TestInstallHooksOrchestration:
             config_changed=True,
             hooks_diff=_DIFF_REMOVED,
             push_key_changed=True,
+            current_checksum=None,
+            new_checksum=_NEW_CHECKSUM,
         )
 
     def test_test_event_push_key_unchanged(self, ctx, tmp_path):
         ctx["detect_existing"].return_value = {"auth_value": "pk-test"}
-        ctx["copy"].return_value = (ctx["dest"], False, True)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -1818,7 +1838,28 @@ class TestInstallHooksOrchestration:
             config_changed=True,
             hooks_diff=_DIFF_REMOVED,
             push_key_changed=False,
+            current_checksum=None,
+            new_checksum=_NEW_CHECKSUM,
         )
+
+    # ---------------------------------------------------------------
+    # Test event: hooks_script checksums
+    # ---------------------------------------------------------------
+
+    def test_test_event_checksums_first_install(self, ctx, tmp_path):
+        """First install: current_checksum is None, new_checksum is populated."""
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
+        self._call(tmp_path)
+        _, kwargs = ctx["test_event"].call_args
+        assert kwargs["current_checksum"] is None
+        assert kwargs["new_checksum"] == _NEW_CHECKSUM
+
+    def test_test_event_checksums_existing_install(self, ctx, tmp_path):
+        """Existing install: both checksums are populated."""
+        self._call(tmp_path, minted=True, config_exists=True)
+        _, kwargs = ctx["test_event"].call_args
+        assert kwargs["current_checksum"] == _CURRENT_CHECKSUM
+        assert kwargs["new_checksum"] == _NEW_CHECKSUM
 
     # ---------------------------------------------------------------
     # Test event failure: abort, cleanup, revoke
@@ -1841,21 +1882,21 @@ class TestInstallHooksOrchestration:
         )
 
     def test_test_event_failure_no_revoke_when_not_minted(self, ctx, tmp_path):
-        ctx["copy"].return_value = (ctx["dest"], False, True)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=False, config_exists=True)
         ctx["revoke"].assert_not_called()
 
     def test_test_event_failure_cleans_new_script(self, ctx, tmp_path):
-        ctx["copy"].return_value = (ctx["dest"], False, True)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path)
         ctx["dest"].unlink.assert_called_once_with(missing_ok=True)
 
     def test_test_event_failure_keeps_existing_script(self, ctx, tmp_path):
-        ctx["copy"].return_value = (ctx["dest"], True, False)
+        ctx["copy"].return_value = (ctx["dest"], True, False, _CURRENT_CHECKSUM, _NEW_CHECKSUM)
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
@@ -1913,7 +1954,7 @@ class TestInstallHooksOrchestration:
         assert any("hooks installed" in m for m in self._print_messages(ctx))
 
     def test_status_installed_when_script_updated(self, ctx, tmp_path):
-        ctx["copy"].return_value = (ctx["dest"], True, True)
+        ctx["copy"].return_value = (ctx["dest"], True, True, _CURRENT_CHECKSUM, _NEW_CHECKSUM)
         ctx["write_claude"].return_value = False
         self._call(tmp_path, config_exists=True)
         assert any("hooks installed" in m for m in self._print_messages(ctx))
@@ -1927,6 +1968,57 @@ class TestInstallHooksOrchestration:
         ctx["write_claude"].return_value = False
         self._call(tmp_path, minted=False, config_exists=True)
         assert any("up to date" in m for m in self._print_messages(ctx))
+
+
+# ===================================================================
+# _send_test_event: hooks_script payload
+# ===================================================================
+
+
+class TestSendTestEventHooksScript:
+    """Verify the hooks_script checksum fields in the test event payload."""
+
+    def _capture_payload(self, **kwargs):
+        """Call _send_test_event with a fake script, capture the JSON payload."""
+        import subprocess
+
+        captured = {}
+
+        def fake_run(cmd, *, input, **kw):
+            captured["payload"] = json.loads(input)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with patch("subprocess.run", side_effect=fake_run), patch(f"{_G}.rich"):
+            _send_test_event(
+                "pk-test",
+                "https://api.snyk.io",
+                "claude-code",
+                Path("/fake/script.sh"),
+                **kwargs,
+            )
+        return captured["payload"]
+
+    def test_first_install_only_new_checksum(self):
+        payload = self._capture_payload(
+            first_install=True,
+            new_checksum="abc123",
+        )
+        assert payload["hooks_script"] == {"new_checksum": "abc123"}
+
+    def test_existing_install_both_checksums(self):
+        payload = self._capture_payload(
+            first_install=False,
+            current_checksum="old111",
+            new_checksum="new222",
+        )
+        assert payload["hooks_script"] == {
+            "current_checksum": "old111",
+            "new_checksum": "new222",
+        }
+
+    def test_no_checksums_omits_hooks_script(self):
+        payload = self._capture_payload(first_install=True)
+        assert "hooks_script" not in payload
 
 
 # ===================================================================
