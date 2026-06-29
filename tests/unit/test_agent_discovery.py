@@ -7620,7 +7620,7 @@ def test_opencode_discoverer_reads_opencode_config_env(tmp_path, monkeypatch):
     override_path.write_text('{"mcp": {"env-srv": {"type": "local", "command": ["echo"]}}}')
 
     monkeypatch.setenv("OPENCODE_CONFIG", str(override_path))
-    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -7640,10 +7640,10 @@ def test_opencode_discoverer_ignores_env_var_when_not_own_home(tmp_path, monkeyp
     override_path.write_text('{"mcp": {"env-srv": {"type": "local", "command": ["echo"]}}}')
 
     monkeypatch.setenv("OPENCODE_CONFIG", str(override_path))
-    # Force ``_scans_own_home`` to False by pointing Path.home() elsewhere.
+    # Force ``_scans_own_home`` to False by pointing ``$HOME`` elsewhere.
     other_home = tmp_path / "other-home"
     other_home.mkdir()
-    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: other_home))
+    monkeypatch.setenv("HOME", str(other_home))
 
     mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -7994,7 +7994,7 @@ def test_opencode_discoverer_scans_opencode_config_dir_in_addition_to_default(tm
     )
 
     monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(override_dir))
-    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -8014,7 +8014,7 @@ def test_opencode_discoverer_scans_opencode_config_dir_skills(tmp_path, monkeypa
     (sk / "SKILL.md").write_text("---\nname: alt-skill\ndescription: a\n---\nBody\n")
 
     monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(override_dir))
-    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
 
@@ -8039,7 +8039,7 @@ def test_opencode_discoverer_ignores_opencode_config_dir_when_not_own_home(tmp_p
     monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(override_dir))
     other_home = tmp_path / "other-home"
     other_home.mkdir()
-    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: other_home))
+    monkeypatch.setenv("HOME", str(other_home))
 
     mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -8245,7 +8245,7 @@ def test_opencode_discoverer_detects_install_via_xdg_config_home(tmp_path, monke
     (xdg_cfg / "opencode").mkdir(parents=True)
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_cfg))
-    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     result = OpenCodeDiscoverer(tmp_path).client_exists()
 
@@ -8266,7 +8266,7 @@ def test_opencode_discoverer_scans_xdg_config_home_mcp(tmp_path, monkeypatch):
     )
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_cfg))
-    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -8288,7 +8288,7 @@ def test_opencode_discoverer_scans_xdg_config_home_skills(tmp_path, monkeypatch)
     (sk / "SKILL.md").write_text("---\nname: xdg-skill\ndescription: x\n---\nBody\n")
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_cfg))
-    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
 
@@ -8306,7 +8306,7 @@ def test_opencode_discoverer_reads_project_db_at_xdg_data_home(tmp_path, monkeyp
     _seed_opencode_db(db_path, ["/Users/alice/xdg-repo"])
 
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_data))
-    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     folders = OpenCodeDiscoverer(tmp_path)._discover_project_folders()
 
@@ -8324,7 +8324,7 @@ def test_opencode_discoverer_scans_xdg_cache_home_url_skills(tmp_path, monkeypat
     (sk / "SKILL.md").write_text("---\nname: remote-skill\ndescription: x\n---\nBody\n")
 
     monkeypatch.setenv("XDG_CACHE_HOME", str(xdg_cache))
-    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
 
@@ -8347,7 +8347,7 @@ def test_opencode_discoverer_ignores_xdg_when_not_own_home(tmp_path, monkeypatch
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_cfg))
     other_home = tmp_path / "other-home"
     other_home.mkdir()
-    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: other_home))
+    monkeypatch.setenv("HOME", str(other_home))
 
     mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -8371,7 +8371,7 @@ def test_opencode_discoverer_xdg_is_additive_default_still_scanned(tmp_path, mon
     )
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_cfg))
-    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
 
