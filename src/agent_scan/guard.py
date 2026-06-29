@@ -238,6 +238,7 @@ def _run_install(args) -> None:
 
     minted = not headless  # True if we minted the key in this run
 
+    installed_any = False
     try:
         for c in clients:
             _install_hooks(
@@ -252,11 +253,17 @@ def _run_install(args) -> None:
                 tenant_id,
                 snyk_token,
             )
-    except (SystemExit, KeyboardInterrupt):
-        raise
+            installed_any = True
     except BaseException:
         if minted:
-            _revoke_after_failure(url, tenant_id, snyk_token, push_key)
+            if installed_any:
+                rich.print(
+                    "[yellow]Warning:[/yellow] Installation partially completed. "
+                    "The push key is still active for already-configured clients. "
+                    "Run [bold]uninstall[/bold] to clean up if needed."
+                )
+            else:
+                _revoke_after_failure(url, tenant_id, snyk_token, push_key)
         raise
 
 
@@ -352,8 +359,6 @@ def _install_hooks(
     ):
         if not script_existed:
             dest_path.unlink(missing_ok=True)
-        if minted:
-            _revoke_after_failure(url, tenant_id, snyk_token, push_key)
         rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
         raise SystemExit(1)
 

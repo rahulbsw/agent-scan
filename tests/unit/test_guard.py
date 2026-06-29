@@ -1870,16 +1870,11 @@ class TestInstallHooksOrchestration:
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
 
-    def test_test_event_failure_revokes_when_minted(self, ctx, tmp_path):
+    def test_test_event_failure_does_not_revoke_in_install_hooks(self, ctx, tmp_path):
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
-        ctx["revoke"].assert_called_once_with(
-            "https://api.snyk.io",
-            "tid-1",
-            "snyk-tok",
-            "pk-test",
-        )
+        ctx["revoke"].assert_not_called()
 
     def test_test_event_failure_no_revoke_when_not_minted(self, ctx, tmp_path):
         ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
@@ -2592,6 +2587,60 @@ class TestRunInstallAll:
         )
         with pytest.raises(SystemExit):
             _run_install(args)
+
+    @patch("agent_scan.guard._revoke_after_failure")
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_install_all_partial_failure_does_not_revoke(
+        self, mock_fetch, mock_mint, mock_install, mock_revoke, tmp_path, monkeypatch
+    ):
+        """First client succeeds, second raises — push key must NOT be revoked."""
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "tok")
+
+        call_count = 0
+
+        def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return None
+            raise RuntimeError("config write failed")
+
+        mock_install.side_effect = side_effect
+        args = SimpleNamespace(
+            client="all",
+            url="https://api.snyk.io",
+            tenant_id="tid-1",
+            file=None,
+            managed=False,
+        )
+        with pytest.raises(RuntimeError, match="config write failed"):
+            _run_install(args)
+        mock_revoke.assert_not_called()
+
+    @patch("agent_scan.guard._revoke_after_failure")
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_install_all_first_client_failure_revokes(
+        self, mock_fetch, mock_mint, mock_install, mock_revoke, tmp_path, monkeypatch
+    ):
+        """First client fails — push key must be revoked."""
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "tok")
+        mock_install.side_effect = RuntimeError("first client failed")
+        args = SimpleNamespace(
+            client="all",
+            url="https://api.snyk.io",
+            tenant_id="tid-1",
+            file=None,
+            managed=False,
+        )
+        with pytest.raises(RuntimeError, match="first client failed"):
+            _run_install(args)
+        mock_revoke.assert_called_once_with("https://api.snyk.io", "tid-1", "tok", "minted-pk")
 
 
 class TestRunUninstallAll:
