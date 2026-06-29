@@ -96,11 +96,15 @@ class OpenCodeDiscoverer(AgentDiscoverer):
       skills-dir root.
 
     Project enumeration is unusual: opencode persists the absolute paths of
-    opened projects in a SQLite database at
-    ``~/.local/share/opencode/opencode.db`` (Drizzle ``project`` table,
-    ``worktree`` column). :meth:`_discover_project_folders` reads it read-only;
-    any failure (missing file, lock contention, schema drift) yields an empty
-    list rather than aborting discovery.
+    opened projects in a SQLite database under ``~/.local/share/opencode``
+    (Drizzle ``project`` table, ``worktree`` column). The db filename varies by
+    install channel — ``opencode.db`` on ``latest``/``beta``/``prod`` builds,
+    ``opencode-<channel>.db`` otherwise — and ``$OPENCODE_DB`` may relocate it on
+    own-home scans, so :meth:`_discover_project_folders` globs ``opencode*.db``
+    per data dir and additionally honors ``$OPENCODE_DB`` (see
+    :meth:`_candidate_db_paths`). Each db is read read-only; any failure (missing
+    file, lock contention, schema drift) yields an empty list rather than
+    aborting discovery.
     """
 
     name = "opencode"
@@ -118,7 +122,16 @@ class OpenCodeDiscoverer(AgentDiscoverer):
     # ``<cache>/skills/<bun-hash-of-base-url>/<skill-name>/SKILL.md``. We walk
     # the ``<hash>`` level so each hash dir is treated like a skills dir root.
     _cache_path = "~/.cache/opencode"
-    _db_filename = "opencode.db"
+    # opencode's db filename varies by install channel
+    # (packages/core/src/database/database.ts ``path()``): ``opencode.db`` for
+    # ``latest``/``beta``/``prod`` builds (or when ``OPENCODE_DISABLE_CHANNEL_DB``
+    # is set), and ``opencode-<channel>.db`` for every other channel — e.g. the
+    # build-time default ``local`` (``opencode-local.db``) or a dev/preview build
+    # named after its git branch. We glob this pattern per data dir so projects
+    # from any channel are enumerated. ``opencode*.db`` is start-anchored and
+    # matches the ``.db`` suffix, so the ``-wal``/``-shm`` sidecars (which end in
+    # ``-wal``/``-shm``) are excluded.
+    _DB_GLOB = "opencode*.db"
     # Both spellings are documented; ``skills/`` is canonical, ``skill/`` is the
     # backwards-compat alias. We scan both so a user who created either gets
     # picked up; downstream keys by absolute path so a single existing dir
@@ -254,7 +267,7 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         return dirs
 
     def _data_dirs(self) -> list[Path]:
-        """Every data dir to consult for the opencode SQLite db.
+        """Every data dir to consult for opencode SQLite db files.
 
         Includes ``$XDG_DATA_HOME/opencode`` on own-home scans (where opencode
         actually persists projects when XDG is set) plus the home-relative
@@ -306,22 +319,92 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         # ``client_path`` (see ``_xdg_env_dir``).
         return Path(override).absolute()
 
+    def _opencode_db_value(self) -> str | None:
+        """Raw ``$OPENCODE_DB`` value on an own-home scan, else ``None``.
+
+        Mirrors :meth:`_opencode_config_env_path`'s own-home gate (the env var
+        reflects the *scanning process's* environment, not another user's under
+        ``--scan-all-users``). The raw string is returned because resolution
+        differs by shape — ``:memory:`` has no backing file, an absolute path is
+        used as-is, and a relative path is joined to the data dir — which
+        :meth:`_resolve_db_env_paths` handles. An empty value is treated as unset,
+        matching the ``OPENCODE_CONFIG``/``OPENCODE_CONFIG_DIR`` handling.
+        """
+        if not self._scans_own_home():
+            return None
+        return os.environ.get("OPENCODE_DB") or None
+
+    def _resolve_db_env_paths(self) -> list[Path]:
+        """Resolve ``$OPENCODE_DB`` (own-home only) to concrete db file paths.
+
+        Per ``packages/core/src/database/database.ts`` ``path()``: ``:memory:``
+        has no backing file (skipped — nothing to scan); an absolute path is used
+        as-is; a relative value is joined to ``Global.Path.data``. opencode joins
+        a relative value to whichever data dir is active, and this session-less
+        scanner can't know which, so it resolves against *every* data dir (an
+        additive superset — a join that doesn't exist on disk is filtered by the
+        ``is_file()`` guard in :meth:`_discover_project_folders`).
+
+        ``.absolute()`` (never ``.resolve()``) keeps keys absolute for a relative
+        env value while preserving the ``is_file()`` symlink-follow semantics the
+        FIFO hang-defense relies on (see :meth:`_xdg_env_dir`).
+        """
+        value = self._opencode_db_value()
+        if value is None or value == ":memory:":
+            return []
+        candidate = Path(value)
+        if candidate.is_absolute():
+            return [candidate.absolute()]
+        return [(data_dir / candidate).absolute() for data_dir in self._data_dirs()]
+
     # --- project enumeration (SQLite db) ---
+
+    def _candidate_db_paths(self) -> list[Path]:
+        """Every opencode SQLite db file to consult for opened projects.
+
+        The ``$OPENCODE_DB`` override paths (own-home only, see
+        :meth:`_resolve_db_env_paths`) come first, followed by every
+        ``opencode*.db`` glob hit in each data dir from :meth:`_data_dirs`. Paths
+        are deduplicated by ``.as_posix()`` so a relative ``$OPENCODE_DB`` that
+        coincides with a globbed file is opened — and warned about — only once.
+        Globbing tolerates a per-dir ``PermissionError``/``OSError`` (the
+        ``sorted(dir.glob(...))`` idiom used across the discoverers).
+        """
+        seen: set[str] = set()
+        candidates: list[Path] = []
+
+        def add(path: Path) -> None:
+            key = path.as_posix()
+            if key not in seen:
+                seen.add(key)
+                candidates.append(path)
+
+        for path in self._resolve_db_env_paths():
+            add(path)
+        for data_dir in self._data_dirs():
+            try:
+                matches = sorted(data_dir.glob(self._DB_GLOB))
+            except (PermissionError, OSError):
+                continue
+            for path in matches:
+                add(path)
+        return candidates
 
     def _discover_project_folders(self) -> list[Path]:
         """Project paths from opencode's SQLite db (``project.worktree`` column).
 
-        Reads ``opencode.db`` from every data dir in :meth:`_data_dirs` (XDG +
-        default), deduplicating worktree paths. :meth:`_read_worktrees` opens
-        each db read-only (preferring a WAL-aware ``mode=ro`` read, falling back
-        to an ``immutable=1`` snapshot when that open is denied); per-db sqlite
-        errors (missing file, schema drift, permission denied) are tolerated
-        rather than aborting the whole discoverer.
+        Reads every candidate db from :meth:`_candidate_db_paths` (the
+        ``opencode*.db`` glob across the data dirs in :meth:`_data_dirs` plus any
+        ``$OPENCODE_DB`` override on own-home scans), deduplicating worktree
+        paths. :meth:`_read_worktrees` opens each db read-only (preferring a
+        WAL-aware ``mode=ro`` read, falling back to an ``immutable=1`` snapshot
+        when that open is denied); per-db sqlite errors (missing file, schema
+        drift, permission denied) are tolerated rather than aborting the whole
+        discoverer.
         """
         seen: set[str] = set()
         result: list[Path] = []
-        for data_dir in self._data_dirs():
-            db_path = data_dir / self._db_filename
+        for db_path in self._candidate_db_paths():
             try:
                 # ``is_file()`` (not ``exists()``) so a non-regular file planted
                 # at this path — a FIFO/socket/device, the classic

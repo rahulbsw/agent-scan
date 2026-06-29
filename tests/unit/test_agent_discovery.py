@@ -7879,6 +7879,160 @@ def test_opencode_discoverer_enumerates_uncheckpointed_wal_projects(tmp_path):
     assert {f.as_posix() for f in folders} == {"/repo/checkpointed", "/repo/newest-in-wal"}
 
 
+def test_opencode_discoverer_enumerates_projects_from_channel_named_db(tmp_path):
+    """opencode names its db ``opencode-<channel>.db`` for any install channel
+    outside ``latest``/``beta``/``prod`` (e.g. a ``local`` dev build). The
+    discoverer globs ``opencode*.db`` so those projects are not missed."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    db_path = tmp_path / ".local" / "share" / "opencode" / "opencode-local.db"
+    _seed_opencode_db(db_path, ["/Users/alice/local-repo"])
+
+    folders = OpenCodeDiscoverer(tmp_path)._discover_project_folders()
+
+    assert {f.as_posix() for f in folders} == {"/Users/alice/local-repo"}
+
+
+def test_opencode_discoverer_unions_projects_across_multiple_dbs(tmp_path):
+    """A user who ran several install channels has projects spread across
+    ``opencode.db`` and ``opencode-<channel>.db``; the glob unions them."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    data = tmp_path / ".local" / "share" / "opencode"
+    _seed_opencode_db(data / "opencode.db", ["/repo/a"])
+    _seed_opencode_db(data / "opencode-dev.db", ["/repo/b"])
+
+    folders = OpenCodeDiscoverer(tmp_path)._discover_project_folders()
+
+    assert {f.as_posix() for f in folders} == {"/repo/a", "/repo/b"}
+
+
+def test_opencode_discoverer_dedupes_worktrees_across_dbs(tmp_path):
+    """A worktree present in more than one db is returned exactly once."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    data = tmp_path / ".local" / "share" / "opencode"
+    _seed_opencode_db(data / "opencode.db", ["/repo/shared"])
+    _seed_opencode_db(data / "opencode-local.db", ["/repo/shared", "/repo/extra"])
+
+    folders = OpenCodeDiscoverer(tmp_path)._discover_project_folders()
+
+    assert {f.as_posix() for f in folders} == {"/repo/shared", "/repo/extra"}
+    assert len(folders) == 2
+
+
+def test_opencode_discoverer_reads_db_from_opencode_db_env_absolute(tmp_path, monkeypatch):
+    """``$OPENCODE_DB`` may relocate the db to an arbitrary absolute path; it is
+    honored on own-home scans."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    db_path = tmp_path / "custom" / "projects.db"
+    _seed_opencode_db(db_path, ["/repo/env-abs"])
+
+    monkeypatch.setenv("OPENCODE_DB", str(db_path))
+    _force_home(monkeypatch, tmp_path)
+
+    folders = OpenCodeDiscoverer(tmp_path)._discover_project_folders()
+
+    assert {f.as_posix() for f in folders} == {"/repo/env-abs"}
+
+
+def test_opencode_discoverer_reads_db_from_opencode_db_env_relative(tmp_path, monkeypatch):
+    """A relative ``$OPENCODE_DB`` is joined to the data dir (as opencode does).
+    The filename here deliberately does NOT match ``opencode*.db``, so it can
+    only be found via the relative-env resolution."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    db_path = tmp_path / ".local" / "share" / "opencode" / "myname.db"
+    _seed_opencode_db(db_path, ["/repo/env-rel"])
+
+    monkeypatch.setenv("OPENCODE_DB", "myname.db")
+    _force_home(monkeypatch, tmp_path)
+
+    folders = OpenCodeDiscoverer(tmp_path)._discover_project_folders()
+
+    assert {f.as_posix() for f in folders} == {"/repo/env-rel"}
+
+
+def test_opencode_discoverer_ignores_opencode_db_env_when_not_own_home(tmp_path, monkeypatch):
+    """``$OPENCODE_DB`` reflects the scanning process's env; under
+    ``--scan-all-users`` it must not be applied to another user's home."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    db_path = tmp_path / "custom" / "projects.db"
+    _seed_opencode_db(db_path, ["/repo/should-not-appear"])
+
+    monkeypatch.setenv("OPENCODE_DB", str(db_path))
+    other_home = tmp_path / "other-home"
+    other_home.mkdir()
+    _force_home(monkeypatch, other_home)
+
+    folders = OpenCodeDiscoverer(tmp_path)._discover_project_folders()
+
+    assert "/repo/should-not-appear" not in {f.as_posix() for f in folders}
+
+
+def test_opencode_discoverer_opencode_db_memory_is_noop(tmp_path, monkeypatch):
+    """``$OPENCODE_DB=:memory:`` has no backing file, so it is skipped (never
+    handed to ``as_uri()``/``is_file()``); the default ``opencode.db`` glob still
+    works."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    db_path = tmp_path / ".local" / "share" / "opencode" / "opencode.db"
+    _seed_opencode_db(db_path, ["/repo/default"])
+
+    monkeypatch.setenv("OPENCODE_DB", ":memory:")
+    _force_home(monkeypatch, tmp_path)
+
+    folders = OpenCodeDiscoverer(tmp_path)._discover_project_folders()
+
+    assert {f.as_posix() for f in folders} == {"/repo/default"}
+
+
+def test_opencode_discoverer_skips_channel_named_fifo_db_without_hanging(tmp_path):
+    """The ``opencode*.db`` glob also matches a hostile channel-named FIFO (e.g.
+    ``opencode-x.db``). The per-candidate ``is_file()`` guard must reject it
+    before ``sqlite3.connect`` so the scan never hangs on a FIFO open(). Runs in
+    a worker thread with a join timeout so a regression surfaces as a fast
+    failure rather than a hung suite."""
+    import os
+    import threading
+
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("os.mkfifo not available on this platform")
+
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    db_dir = tmp_path / ".local" / "share" / "opencode"
+    db_dir.mkdir(parents=True)
+    os.mkfifo(db_dir / "opencode-x.db")
+
+    result: list = []
+    error: list = []
+
+    def run():
+        try:
+            result.append(OpenCodeDiscoverer(tmp_path)._discover_project_folders())
+        except BaseException as e:  # pragma: no cover - only on regression
+            error.append(e)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), "discoverer hung opening a channel-named FIFO db (missing is_file guard)"
+    assert not error, f"discoverer raised on FIFO db: {error}"
+    assert result[0] == []
+
+
 def test_opencode_discoverer_discovers_project_opencode_json(tmp_path):
     """A project-root ``opencode.json`` is picked up when listed in the SQLite db."""
     from agent_scan.agents import OpenCodeDiscoverer
