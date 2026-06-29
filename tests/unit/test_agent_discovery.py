@@ -7633,8 +7633,8 @@ def test_opencode_discoverer_reads_opencode_config_env(tmp_path, monkeypatch):
 
     mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
 
-    assert str(override_path) in mcp_configs
-    entries = mcp_configs[str(override_path)]
+    assert override_path.as_posix() in mcp_configs
+    entries = mcp_configs[override_path.as_posix()]
     assert isinstance(entries, list)
     assert entries[0][0] == "env-srv"
 
@@ -7656,7 +7656,7 @@ def test_opencode_discoverer_ignores_env_var_when_not_own_home(tmp_path, monkeyp
 
     mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
 
-    assert str(override_path) not in mcp_configs
+    assert override_path.as_posix() not in mcp_configs
 
 
 def test_opencode_discoverer_detects_install_via_opencode_config_env(tmp_path, monkeypatch):
@@ -7693,7 +7693,7 @@ def test_opencode_discoverer_discover_surfaces_env_only_install(tmp_path, monkey
     cti = OpenCodeDiscoverer(tmp_path).discover()
 
     assert cti is not None
-    assert str(override_path) in cti.mcp_configs
+    assert override_path.as_posix() in cti.mcp_configs
 
 
 def test_opencode_discoverer_ignores_opencode_config_env_for_client_exists_when_not_own_home(tmp_path, monkeypatch):
