@@ -7511,8 +7511,7 @@ def test_opencode_discoverer_parses_jsonc(tmp_path):
 
     install = _opencode_install(tmp_path)
     (install / "opencode.jsonc").write_text(
-        "// global opencode config\n"
-        '{"mcp": {"srv": {"type": "local", "command": ["echo"],}}}\n'
+        '// global opencode config\n{"mcp": {"srv": {"type": "local", "command": ["echo"],}}}\n'
     )
 
     mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
@@ -7587,10 +7586,9 @@ def test_opencode_discoverer_unknown_type_skips_entry_not_whole_file(tmp_path, c
     assert isinstance(entry, list)
     names = {n for n, _ in entry}
     assert names == {"playwright"}
-    assert any(
-        "future-srv" in record.message and "sse" in record.message
-        for record in caplog.records
-    ), "expected a warning naming the skipped entry and its unrecognized type"
+    assert any("future-srv" in record.message and "sse" in record.message for record in caplog.records), (
+        "expected a warning naming the skipped entry and its unrecognized type"
+    )
 
 
 def test_opencode_discoverer_malformed_known_type_still_raises(tmp_path):
@@ -7601,9 +7599,7 @@ def test_opencode_discoverer_malformed_known_type_still_raises(tmp_path):
     from agent_scan.agents import OpenCodeDiscoverer
 
     install = _opencode_install(tmp_path)
-    (install / "opencode.json").write_text(
-        '{"mcp": {"broken": {"type": "local", "command": []}}}'
-    )
+    (install / "opencode.json").write_text('{"mcp": {"broken": {"type": "local", "command": []}}}')
 
     mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -7766,9 +7762,7 @@ def test_opencode_discoverer_discovers_project_opencode_json(tmp_path):
     _opencode_install(tmp_path)
     project = tmp_path / "repo"
     project.mkdir()
-    (project / "opencode.json").write_text(
-        '{"mcp": {"proj-srv": {"type": "local", "command": ["echo"]}}}'
-    )
+    (project / "opencode.json").write_text('{"mcp": {"proj-srv": {"type": "local", "command": ["echo"]}}}')
     db_path = tmp_path / ".local" / "share" / "opencode" / "opencode.db"
     _seed_opencode_db(db_path, [project.as_posix()])
 
@@ -7812,9 +7806,7 @@ def test_opencode_discoverer_discovers_managed_mcp_servers(tmp_path, monkeypatch
     _opencode_install(tmp_path)
     managed = tmp_path / "managed-opencode"
     managed.mkdir()
-    (managed / "opencode.json").write_text(
-        '{"mcp": {"mgr-srv": {"type": "local", "command": ["echo"]}}}'
-    )
+    (managed / "opencode.json").write_text('{"mcp": {"mgr-srv": {"type": "local", "command": ["echo"]}}}')
     monkeypatch.setattr(OpenCodeDiscoverer, "_managed_config_dir", lambda self: managed)
 
     mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
@@ -7828,7 +7820,8 @@ def test_opencode_discoverer_discovers_managed_mcp_servers(tmp_path, monkeypatch
 
 def test_opencode_discoverer_managed_config_dir_per_os(monkeypatch):
     """Confirms per-OS paths for managed config dir."""
-    from agent_scan.agents import OpenCodeDiscoverer, opencode as opencode_module
+    from agent_scan.agents import OpenCodeDiscoverer
+    from agent_scan.agents import opencode as opencode_module
 
     d = OpenCodeDiscoverer(None)
 
@@ -7853,9 +7846,7 @@ def test_opencode_discoverer_discover_assembles_client(tmp_path, monkeypatch):
     # Disable per-OS managed-config probing so the assertion isn't OS-sensitive.
     monkeypatch.setattr(OpenCodeDiscoverer, "_managed_config_dir", lambda self: None)
     install = _opencode_install(tmp_path)
-    (install / "opencode.json").write_text(
-        '{"mcp": {"srv": {"type": "local", "command": ["echo"]}}}'
-    )
+    (install / "opencode.json").write_text('{"mcp": {"srv": {"type": "local", "command": ["echo"]}}}')
 
     cti = OpenCodeDiscoverer(tmp_path).discover()
 
@@ -7996,15 +7987,11 @@ def test_opencode_discoverer_scans_opencode_config_dir_in_addition_to_default(tm
 
     install = _opencode_install(tmp_path)
     # Default-dir entry
-    (install / "opencode.json").write_text(
-        '{"mcp": {"def-srv": {"type": "local", "command": ["echo"]}}}'
-    )
+    (install / "opencode.json").write_text('{"mcp": {"def-srv": {"type": "local", "command": ["echo"]}}}')
     # Override-dir entry
     override_dir = tmp_path / "alt-opencode"
     override_dir.mkdir()
-    (override_dir / "opencode.json").write_text(
-        '{"mcp": {"alt-srv": {"type": "local", "command": ["echo"]}}}'
-    )
+    (override_dir / "opencode.json").write_text('{"mcp": {"alt-srv": {"type": "local", "command": ["echo"]}}}')
 
     monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(override_dir))
     _force_home(monkeypatch, tmp_path)
@@ -8045,9 +8032,7 @@ def test_opencode_discoverer_ignores_opencode_config_dir_when_not_own_home(tmp_p
     _opencode_install(tmp_path)
     override_dir = tmp_path / "alt-opencode"
     override_dir.mkdir()
-    (override_dir / "opencode.json").write_text(
-        '{"mcp": {"alt-srv": {"type": "local", "command": ["echo"]}}}'
-    )
+    (override_dir / "opencode.json").write_text('{"mcp": {"alt-srv": {"type": "local", "command": ["echo"]}}}')
 
     monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(override_dir))
     other_home = tmp_path / "other-home"
@@ -8090,9 +8075,7 @@ def test_opencode_discoverer_scans_dot_opencode_home_dir_mcp(tmp_path):
     _opencode_install(tmp_path)
     alt = tmp_path / ".opencode"
     alt.mkdir()
-    (alt / "opencode.json").write_text(
-        '{"mcp": {"home-srv": {"type": "local", "command": ["echo"]}}}'
-    )
+    (alt / "opencode.json").write_text('{"mcp": {"home-srv": {"type": "local", "command": ["echo"]}}}')
 
     mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -8114,9 +8097,7 @@ def test_opencode_discoverer_scans_skills_paths_with_tilde_expansion(tmp_path):
     team_skills = tmp_path / "team-skills" / "team-skill"
     team_skills.mkdir(parents=True)
     (team_skills / "SKILL.md").write_text("---\nname: team-skill\ndescription: y\n---\nBody\n")
-    (install / "opencode.json").write_text(
-        '{"skills": {"paths": ["~/team-skills"]}}'
-    )
+    (install / "opencode.json").write_text('{"skills": {"paths": ["~/team-skills"]}}')
 
     skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
 
@@ -8136,9 +8117,7 @@ def test_opencode_discoverer_scans_skills_paths_with_absolute_path(tmp_path):
     skill = abs_root / "abs-skill"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("---\nname: abs-skill\ndescription: a\n---\nBody\n")
-    (install / "opencode.json").write_text(
-        '{"skills": {"paths": ["' + abs_root.as_posix() + '"]}}'
-    )
+    (install / "opencode.json").write_text('{"skills": {"paths": ["' + abs_root.as_posix() + '"]}}')
 
     skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
 
@@ -8172,9 +8151,7 @@ def test_opencode_discoverer_skips_non_string_skills_paths(tmp_path):
     from agent_scan.agents import OpenCodeDiscoverer
 
     install = _opencode_install(tmp_path)
-    (install / "opencode.json").write_text(
-        '{"skills": {"paths": [123, null, "", true]}}'
-    )
+    (install / "opencode.json").write_text('{"skills": {"paths": [123, null, "", true]}}')
 
     skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
 
@@ -8274,9 +8251,7 @@ def test_opencode_discoverer_scans_xdg_config_home_mcp(tmp_path, monkeypatch):
     xdg_cfg = tmp_path / "xdg-config"
     install = xdg_cfg / "opencode"
     install.mkdir(parents=True)
-    (install / "opencode.json").write_text(
-        '{"mcp": {"xdg-srv": {"type": "local", "command": ["echo"]}}}'
-    )
+    (install / "opencode.json").write_text('{"mcp": {"xdg-srv": {"type": "local", "command": ["echo"]}}}')
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_cfg))
     _force_home(monkeypatch, tmp_path)
@@ -8353,9 +8328,7 @@ def test_opencode_discoverer_ignores_xdg_when_not_own_home(tmp_path, monkeypatch
     _opencode_install(tmp_path)
     xdg_cfg = tmp_path / "xdg-config"
     (xdg_cfg / "opencode").mkdir(parents=True)
-    (xdg_cfg / "opencode" / "opencode.json").write_text(
-        '{"mcp": {"xdg-srv": {"type": "local", "command": ["echo"]}}}'
-    )
+    (xdg_cfg / "opencode" / "opencode.json").write_text('{"mcp": {"xdg-srv": {"type": "local", "command": ["echo"]}}}')
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_cfg))
     other_home = tmp_path / "other-home"
@@ -8373,15 +8346,11 @@ def test_opencode_discoverer_xdg_is_additive_default_still_scanned(tmp_path, mon
     from agent_scan.agents import OpenCodeDiscoverer
 
     install = _opencode_install(tmp_path)
-    (install / "opencode.json").write_text(
-        '{"mcp": {"def-srv": {"type": "local", "command": ["echo"]}}}'
-    )
+    (install / "opencode.json").write_text('{"mcp": {"def-srv": {"type": "local", "command": ["echo"]}}}')
     xdg_cfg = tmp_path / "xdg-config"
     xdg_install = xdg_cfg / "opencode"
     xdg_install.mkdir(parents=True)
-    (xdg_install / "opencode.json").write_text(
-        '{"mcp": {"xdg-srv": {"type": "local", "command": ["echo"]}}}'
-    )
+    (xdg_install / "opencode.json").write_text('{"mcp": {"xdg-srv": {"type": "local", "command": ["echo"]}}}')
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_cfg))
     _force_home(monkeypatch, tmp_path)
