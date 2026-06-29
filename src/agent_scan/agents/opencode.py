@@ -514,15 +514,23 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             paths: Schema.optional(Schema.Array(Schema.String))
                 .annotate({ description: "Additional paths to skill folders" })
 
-        The opencode loader (``packages/opencode/src/skill/index.ts:211-220``)
-        expands each entry — ``~/...`` against the user's home, relative paths
-        against the *containing config file's directory*. We mirror those
-        expansion rules and scan each resolved directory via ``_scan_skills_dir``.
+        The opencode loader (``packages/opencode/src/skill/index.ts:211-214``)
+        merges all config scopes into one config and resolves each entry —
+        ``~/...`` against the user's home, absolute as-is, and **relative entries
+        against the instance/project directory** (the cwd within the worktree),
+        *not* the declaring config file's directory. Since this scanner is
+        session-less, we resolve relative entries against every opened-project
+        worktree (see :meth:`_resolve_skills_path_entry`) and scan each resolved
+        directory via ``_scan_skills_dir``.
 
         Malformed config files (already reported by MCP discovery) are skipped
         here — we only consume the ``skills.paths`` array on success.
         """
         result: SkillsDirsResult = {}
+        # opencode's instance dirs (the db ``worktree`` leaves); computed once so
+        # the relative-entry resolution below doesn't re-read the SQLite db per
+        # candidate config file.
+        worktrees = self._discover_project_folders()
         for config_path in self._iter_candidate_config_files():
             data = self._load_json_file(config_path)
             if not isinstance(data, dict):
@@ -536,23 +544,28 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             for entry in paths:
                 if not isinstance(entry, str) or not entry:
                     continue
-                resolved = self._resolve_skills_path_entry(entry, config_path)
-                self._record_skills_at(result, resolved)
+                for resolved in self._resolve_skills_path_entry(entry, worktrees):
+                    self._record_skills_at(result, resolved)
         return result
 
-    def _resolve_skills_path_entry(self, entry: str, config_path: Path) -> Path:
+    def _resolve_skills_path_entry(self, entry: str, worktrees: list[Path]) -> list[Path]:
         """Expand a single ``skills.paths`` entry the way opencode does.
 
-        - ``~/...`` -> joined to ``self.home_directory``.
-        - Absolute -> as-is.
-        - Relative -> joined to the *containing config file's directory*.
+        - ``~`` / ``~/...`` -> the scanned user's home (one path).
+        - Absolute -> as-is (one path).
+        - Relative -> opencode joins it to the *instance/project directory* (the
+          cwd within the worktree), not the declaring config file's dir, so we
+          resolve it against every opened-project ``worktree`` (one path each).
+          With no opened projects there is no anchor and the entry resolves to
+          nothing — matching that opencode would never load it from the config
+          dir.
         """
-        if entry.startswith("~/") or entry == "~":
-            return expand_path(Path(entry), self.home_directory)
+        if entry == "~" or entry.startswith("~/"):
+            return [expand_path(Path(entry), self.home_directory)]
         candidate = Path(entry)
         if candidate.is_absolute():
-            return candidate
-        return config_path.parent / candidate
+            return [candidate]
+        return [worktree / candidate for worktree in worktrees]
 
     # --- URL-pulled skills cache (Gap C) ---
 

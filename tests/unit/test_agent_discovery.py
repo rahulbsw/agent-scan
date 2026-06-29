@@ -8250,8 +8250,9 @@ def test_opencode_discoverer_scans_skills_paths_with_absolute_path(tmp_path):
 
 
 def test_opencode_discoverer_scans_skills_paths_relative_to_config_dir(tmp_path):
-    """Relative ``skills.paths`` resolve against the containing config file's directory,
-    matching opencode's loader."""
+    """Relative ``skills.paths`` resolve against an opened-project worktree
+    (opencode's instance directory). With a single opened project whose config
+    declares the relative entry, that worktree is the resolution base."""
     from agent_scan.agents import OpenCodeDiscoverer
 
     _opencode_install(tmp_path)
@@ -8292,6 +8293,53 @@ def test_opencode_discoverer_skips_skills_paths_when_field_missing(tmp_path):
     skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
 
     assert skills_dirs == {}
+
+
+def test_opencode_discoverer_scans_skills_paths_relative_against_each_worktree(tmp_path):
+    """opencode resolves a relative ``skills.paths`` entry against the instance/
+    project directory (cwd within the worktree), regardless of which merged
+    config declared it (packages/opencode/src/skill/index.ts:211-214). A relative
+    entry in the *global* config therefore loads ``<project>/entry`` for whichever
+    project is open — so the scanner must resolve it against every opened-project
+    worktree, NOT against ``~/.config/opencode``."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text('{"skills": {"paths": ["./team-skills"]}}')
+    p = tmp_path / "proj-p"
+    q = tmp_path / "proj-q"
+    for proj, name in ((p, "p-skill"), (q, "q-skill")):
+        sd = proj / "team-skills" / name
+        sd.mkdir(parents=True)
+        (sd / "SKILL.md").write_text(f"---\nname: {name}\ndescription: x\n---\nBody\n")
+    db_path = tmp_path / ".local" / "share" / "opencode" / "opencode.db"
+    _seed_opencode_db(db_path, [p.as_posix(), q.as_posix()])
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    assert any(k.endswith("/proj-p/team-skills") for k in skills_dirs)
+    assert any(k.endswith("/proj-q/team-skills") for k in skills_dirs)
+    # Must NOT resolve against the global config dir (opencode never loads it there).
+    assert not any(k.endswith("/.config/opencode/team-skills") for k in skills_dirs)
+
+
+def test_opencode_discoverer_skills_paths_relative_records_nothing_without_projects(tmp_path):
+    """With no opened projects there is no instance directory to anchor a relative
+    ``skills.paths`` entry against, so it resolves to nothing — matching that
+    opencode never loads it from the config dir. A literal ``team-skills`` under
+    the global config dir must NOT be picked up."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text('{"skills": {"paths": ["./team-skills"]}}')
+    sd = install / "team-skills" / "should-not-load"
+    sd.mkdir(parents=True)
+    (sd / "SKILL.md").write_text("---\nname: should-not-load\ndescription: x\n---\nBody\n")
+    # No opencode.db -> no opened-project worktrees to anchor against.
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    assert not any("team-skills" in k for k in skills_dirs)
 
 
 # --- OpenCodeDiscoverer: URL-pulled skill cache (~/.cache/opencode/skills/) ---
