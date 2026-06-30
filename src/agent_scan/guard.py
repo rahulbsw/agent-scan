@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import json
 import os
 import re
@@ -31,6 +32,7 @@ IS_WINDOWS = sys.platform == "win32"
 # Constants
 # ---------------------------------------------------------------------------
 
+ALL_CLIENTS = ["claude", "cursor", "codex"]
 DEFAULT_REMOTE_URL = "https://api.snyk.io"
 _DETECTION_RE = re.compile(
     r"PUSH_KEY=.*snyk-agent-guard"
@@ -132,7 +134,7 @@ def _get_machine_description(client: str) -> str:
     from agent_scan.upload import get_hostname
 
     hostname = get_hostname()
-    label = _client_label(client)
+    label = ", ".join(_client_label(c) for c in ALL_CLIENTS) if client == "all" else _client_label(client)
     return f"agent-guard ({hostname}) {label}"
 
 
@@ -185,12 +187,18 @@ def _run_install(args) -> None:
         tenant_id = (os.environ.get("TENANT_ID", "") or "").strip()
     managed: bool = getattr(args, "managed", False)
 
-    label = _client_label(client)
+    clients = ALL_CLIENTS if client == "all" else [client]
+
+    if client == "all" and getattr(args, "file", None):
+        rich.print("[bold red]Error:[/bold red] --file cannot be used with client 'all'.")
+        sys.exit(1)
+
     scope = "managed" if managed else "user"
     snyk_token = ""
 
     if not headless:
         # Interactive flow — mint a push key
+        label = ", ".join(_client_label(c) for c in clients)
         rich.print(f"Installing [bold magenta]Agent Guard[/bold magenta] {scope} hooks for [bold]{label}[/bold]")
         rich.print()
 
@@ -211,9 +219,9 @@ def _run_install(args) -> None:
 
         _ensure_guard_enabled_for_tenant(url, tenant_id, snyk_token)
 
-        # Preflight: verify target directory is writable before minting
-        config_path = _config_path(client, getattr(args, "file", None), managed=managed)
-        _preflight_writable(config_path)
+        # Preflight: verify target directories are writable before minting
+        for c in clients:
+            _preflight_writable(_config_path(c, getattr(args, "file", None), managed=managed))
 
         description = _get_machine_description(client)
         rich.print(f"[dim]Minting push key for {description}...[/dim]")
@@ -228,28 +236,34 @@ def _run_install(args) -> None:
             sys.exit(1)
         rich.print(f"[green]\u2713[/green]  Push key minted  [yellow]{_mask_key(push_key)}[/yellow]")
 
-    hook_client = _hook_client_name(client)
     minted = not headless  # True if we minted the key in this run
-    config_path = _config_path(client, getattr(args, "file", None), managed=managed)
 
+    installed_any = False
     try:
-        _install_hooks(
-            client,
-            hook_client,
-            push_key,
-            url,
-            config_path,
-            scope,
-            label,
-            minted,
-            tenant_id,
-            snyk_token,
-        )
-    except (SystemExit, KeyboardInterrupt):
-        raise
+        for c in clients:
+            _install_hooks(
+                c,
+                _hook_client_name(c),
+                push_key,
+                url,
+                _config_path(c, getattr(args, "file", None), managed=managed),
+                scope,
+                _client_label(c),
+                minted,
+                tenant_id,
+                snyk_token,
+            )
+            installed_any = True
     except BaseException:
         if minted:
-            _revoke_after_failure(url, tenant_id, snyk_token, push_key)
+            if installed_any:
+                rich.print(
+                    "[yellow]Warning:[/yellow] Installation partially completed. "
+                    "The push key is still active for already-configured clients. "
+                    "Run [bold]uninstall[/bold] to clean up if needed."
+                )
+            else:
+                _revoke_after_failure(url, tenant_id, snyk_token, push_key)
         raise
 
 
@@ -324,7 +338,7 @@ def _install_hooks(
     old_push_key = existing_info.get("auth_value", "") if existing_info else ""
     push_key_changed = bool(old_push_key) and old_push_key != push_key
 
-    dest_path, script_existed, script_updated = _copy_hook_script(client, config_path)
+    dest_path, script_existed, script_updated, current_checksum, new_checksum = _copy_hook_script(config_path)
     command = _build_hook_command(push_key, url, dest_path, hook_client, tenant_id=tenant_id)
     prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(client, command, config_path)
 
@@ -340,11 +354,11 @@ def _install_hooks(
         config_changed=config_changed,
         hooks_diff=hooks_diff,
         push_key_changed=push_key_changed,
+        current_checksum=current_checksum,
+        new_checksum=new_checksum,
     ):
         if not script_existed:
             dest_path.unlink(missing_ok=True)
-        if minted:
-            _revoke_after_failure(url, tenant_id, snyk_token, push_key)
         rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
         raise SystemExit(1)
 
@@ -619,6 +633,18 @@ def _uninstall_codex_managed(path: Path) -> None:
 def _run_uninstall(args) -> None:
     client: str = args.client
     managed: bool = getattr(args, "managed", False)
+
+    if client == "all" and getattr(args, "file", None):
+        rich.print("[bold red]Error:[/bold red] --file cannot be used with client 'all'.")
+        sys.exit(1)
+
+    clients = ALL_CLIENTS if client == "all" else [client]
+
+    for c in clients:
+        _uninstall_single_client(c, args, managed)
+
+
+def _uninstall_single_client(client: str, args, managed: bool) -> None:
     label = _client_label(client)
     scope = "managed" if managed else "user"
     config_path = _config_path(client, getattr(args, "file", None), managed=managed)
@@ -627,13 +653,7 @@ def _run_uninstall(args) -> None:
     rich.print("[dim]Other hooks in the file will be preserved.[/dim]")
     rich.print()
 
-    # Detect the installed command to extract push key + tenant for revocation
-    if client == "claude":
-        info = _detect_claude_install(config_path)
-    elif client == "cursor":
-        info = _detect_cursor_install(config_path)
-    else:  # codex
-        info = _detect_codex_install(config_path)
+    info = _detect_existing_install(client, config_path)
 
     # Remove hooks from config
     if client == "claude":
@@ -909,6 +929,8 @@ def _send_test_event(
     config_changed: bool = False,
     hooks_diff: dict | None = None,
     push_key_changed: bool = False,
+    current_checksum: str | None = None,
+    new_checksum: str | None = None,
 ) -> bool:
     """Send a test hooksConfigured event by invoking the hook script. Returns True on success."""
     import subprocess
@@ -926,6 +948,13 @@ def _send_test_event(
             payload_dict["added"] = hooks_diff.get("added", {})
             payload_dict["modified"] = hooks_diff.get("modified", {})
             payload_dict["removed"] = hooks_diff.get("removed", {})
+    hooks_script: dict[str, str] = {}
+    if current_checksum is not None:
+        hooks_script["current_checksum"] = current_checksum
+    if new_checksum is not None:
+        hooks_script["new_checksum"] = new_checksum
+    if hooks_script:
+        payload_dict["hooks_script"] = hooks_script
     redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)
 
@@ -1203,10 +1232,11 @@ def _compact_events(events: list[str]) -> str:
     return f"({', '.join(events[:show])} + {len(events) - show} more)"
 
 
-def _copy_hook_script(client: str, config_path: Path) -> tuple[Path, bool, bool]:
+def _copy_hook_script(config_path: Path) -> tuple[Path, bool, bool, str | None, str]:
     """Copy bundled hook script to a hooks/ dir next to the config file.
 
-    Returns (path, already_existed, was_updated).
+    Returns (path, already_existed, was_updated, current_checksum, new_checksum).
+    current_checksum is None when the script did not exist before.
     """
     dest_dir = config_path.parent / "hooks"
 
@@ -1215,19 +1245,24 @@ def _copy_hook_script(client: str, config_path: Path) -> tuple[Path, bool, bool]
     dest = dest_dir / script_name
     existed = dest.exists()
 
+    current_checksum: str | None = None
+    if existed:
+        current_checksum = hashlib.sha256(dest.read_bytes()).hexdigest()
+
     from agent_scan.version import version_info
 
     hook_pkg = importlib_resources.files("agent_scan.hooks")
     source = hook_pkg.joinpath(script_name)
     new_content = source.read_bytes().replace(b"__AGENT_SCAN_VERSION__", version_info.encode())
+    new_checksum = hashlib.sha256(new_content).hexdigest()
 
-    if existed and dest.read_bytes() == new_content:
-        return dest, existed, False
+    if existed and current_checksum == new_checksum:
+        return dest, existed, False, current_checksum, new_checksum
 
     dest.write_bytes(new_content)
     dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{dest}[/dim]")
-    return dest, existed, True
+    return dest, existed, True, current_checksum, new_checksum
 
 
 def _remove_hook_script(client: str, config_path: Path) -> None:

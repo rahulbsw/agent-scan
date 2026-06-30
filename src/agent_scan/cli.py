@@ -528,7 +528,7 @@ def main():
     )
     guard_install_parser.add_argument(
         "client",
-        choices=["claude", "cursor", "codex"],
+        choices=["claude", "cursor", "codex", "all"],
         help="Client to install hooks for",
     )
     guard_install_parser.add_argument(
@@ -569,7 +569,7 @@ def main():
     )
     guard_uninstall_parser.add_argument(
         "client",
-        choices=["claude", "cursor", "codex"],
+        choices=["claude", "cursor", "codex", "all"],
         help="Client to uninstall hooks from",
     )
     guard_uninstall_parser.add_argument(
