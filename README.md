@@ -72,7 +72,7 @@ Agent Scan auto-discovers agents and their capabilities (MCP servers or skills) 
 | OpenClaw | ✗ | ✓ | ✗ | ✓ | ✗ | ✓ |
 | Amp | ✗ | ✓ | ✗ | ✓ | ✗ | ✓ |
 | Kiro | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| OpenCode | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| OpenCode | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Antigravity | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Codex | ✓ | ✓ | ✓ | ✓ | — | — |
 | Amazon Q | ✓ | ✗ | ✓ | ✗ | ✓ (WSL) | ✗ |
@@ -101,7 +101,7 @@ Legend: **✓** detected · **✗** the agent supports this but Agent Scan does 
 | OpenClaw | N/A | N/A | ✓ | ✗ | ✓ † | N/A | ✗ | ✗ |
 | Amp | N/A | ✗ | ✓ | ✗ | ✗ ‡ | ✗ | ✗ | ✗ |
 | Kiro | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| OpenCode | N/A | ✗ | ✗ | ✗ | ✗ | ✗ | N/A | N/A |
+| OpenCode | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N/A | N/A |
 | Antigravity | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Codex | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Amazon Q | N/A | N/A | N/A | ✓ | N/A | ✗ | N/A | N/A |
