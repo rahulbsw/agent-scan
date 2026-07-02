@@ -1,9 +1,12 @@
 import glob
 import logging
+import sys
 import traceback
 from pathlib import Path
 
+import rich
 from httpx import HTTPStatusError
+from rich.markup import escape
 
 from agent_scan.mcp_client import check_server, scan_mcp_config_file
 from agent_scan.models import (
@@ -342,13 +345,19 @@ async def inspect_client(
             # never start the subprocess / open the connection.
             needle = runtime_cfg.matched_skip_needle(name, server)
             if needle is not None:
-                logger.info(
+                logger.warning(
                     "Skipping MCP server per bootstrap runtime_config.skip_servers",
                     extra={
                         "server_name": name,
                         "mcp_config_path": mcp_config_path,
                         "matched_needle": needle,
                     },
+                )
+                rich.print(
+                    f"[bold yellow]⚠️  Not scanning MCP server '{escape(name)}': "
+                    f"skipped by bootstrap runtime_config.skip_servers "
+                    f"(matched '{escape(str(needle))}' in {escape(mcp_config_path)}).[/bold yellow]",
+                    file=sys.stderr,
                 )
                 extensions_for_mcp_config.append(
                     InspectedExtensions(

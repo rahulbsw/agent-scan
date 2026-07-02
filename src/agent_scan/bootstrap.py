@@ -43,6 +43,41 @@ _RETRY_STATUSES = {408, 429}
 CANONICAL_PUSH_PATH_SUFFIX = "/mcp-scan/push"
 CLIENT_BOOTSTRAP_PATH_SUFFIX = "/mcp-scan/client-bootstrap"
 
+# Hosts Snyk operates. `skip_servers` is the one runtime-config key that
+# *reduces* scan coverage (a matched server is never connected or scanned), so
+# it is only honored when the bootstrap response came from a Snyk-operated
+# endpoint over verified TLS. Reached over a non-Snyk host, over plain HTTP, or
+# with TLS verification disabled, an active MITM or a malicious/mistyped control
+# server could otherwise inject skip rules and silently suppress scanning.
+_TRUSTED_SKIP_HOSTS = frozenset({"snyk.io"})
+_TRUSTED_SKIP_HOST_SUFFIXES = ".snyk.io"
+
+
+def _is_trusted_skip_host(url: str) -> bool:
+    """True if ``url`` is an https Snyk endpoint allowed to deliver skip_servers."""
+    parsed = urlsplit(url)
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    return host in _TRUSTED_SKIP_HOSTS or host.endswith(_TRUSTED_SKIP_HOST_SUFFIXES)
+
+
+def _sanitize_runtime_config(runtime_config: dict, url: str, skip_ssl_verify: bool) -> dict:
+    """Drop server-supplied ``skip_servers`` unless the source is trusted."""
+    if "skip_servers" not in runtime_config:
+        return runtime_config
+    if not skip_ssl_verify and _is_trusted_skip_host(url):
+        return runtime_config
+    reason = "TLS verification is disabled" if skip_ssl_verify else "it is not a verified-TLS Snyk endpoint"
+    logger.warning(
+        "Ignoring server-supplied skip_servers (%r) from control server %r: %s. "
+        "MCP servers will NOT be skipped from scanning.",
+        runtime_config.get("skip_servers"),
+        url,
+        reason,
+    )
+    return {k: v for k, v in runtime_config.items() if k != "skip_servers"}
+
 
 def _client_bootstrap_url(control_server_url: str) -> str | None:
     parsed = urlsplit(control_server_url)
@@ -302,7 +337,7 @@ async def _bootstrap_first_control_server_impl(
                         response_model = ClientBootstrapResponse.model_validate(data)
                         return RuntimeConfig(
                             bootstrap_event_id=response_model.bootstrap_event_id,
-                            config=response_model.runtime_config,
+                            config=_sanitize_runtime_config(response_model.runtime_config, url, skip_ssl_verify),
                             source="bootstrap",
                         )
 
