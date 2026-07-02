@@ -6919,6 +6919,26 @@ def test_claude_desktop_discoverer_parses_remote_mcp_server(tmp_path, monkeypatc
     assert server.url == "https://mcp.example.com/mcp"
 
 
+def test_claude_desktop_discoverer_parses_flat_server_map(tmp_path, monkeypatch):
+    """Regression (legacy parity): Claude Desktop's config was also covered by the
+    deleted ``well_known_clients`` scan, which accepted the wrapper-less flat
+    ``{name: serverConfig}`` map (and the ``serverUrl`` remote alias)."""
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "darwin")
+    install = _claude_desktop_dir(tmp_path, "darwin")
+    install.mkdir(parents=True)
+    (install / "claude_desktop_config.json").write_text('{"figma": {"serverUrl": "https://mcp.figma.example/mcp"}}')
+
+    mcp_configs = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp_configs))
+    name, server = mcp_configs[config_path][0]
+    assert name == "figma"
+    assert isinstance(server, RemoteServer)
+    assert server.url == "https://mcp.figma.example/mcp"
+
+
 def test_claude_desktop_discoverer_ignores_config_without_mcp_servers(tmp_path, monkeypatch):
     """``claude_desktop_config.json`` is multi-purpose (UI settings + ``mcpServers``);
     a config with no ``mcpServers`` key yields no entries -- not a parse failure."""
@@ -7115,6 +7135,87 @@ def test_gemini_cli_discoverer_malformed_settings_is_parse_error(tmp_path):
     assert isinstance(mcp[config_path], CouldNotParseMCPConfig)
 
 
+def test_gemini_cli_discoverer_parses_servers_wrapper_from_settings(tmp_path):
+    """Regression (legacy parity): the deleted ``well_known_clients`` scan accepted
+    the VSCode-style ``{"servers": {...}}`` wrapper for these files."""
+    from agent_scan.agents import GeminiCliDiscoverer
+
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini" / "settings.json").write_text('{"servers": {"s": {"command": "srv"}}}')
+
+    mcp = GeminiCliDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp))
+    name, server = mcp[config_path][0]
+    assert name == "s"
+    assert isinstance(server, StdioServer)
+    assert server.command == "srv"
+
+
+def test_gemini_cli_discoverer_parses_nested_mcp_servers_from_settings(tmp_path):
+    """Regression (legacy parity): the ``{"mcp": {"servers": {...}}}`` nesting was
+    accepted by the deleted scan (``VSCodeConfigFile``)."""
+    from agent_scan.agents import GeminiCliDiscoverer
+
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini" / "settings.json").write_text(
+        '{"mcp": {"servers": {"n": {"url": "https://mcp.example.com/mcp"}}}}'
+    )
+
+    mcp = GeminiCliDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp))
+    name, server = mcp[config_path][0]
+    assert name == "n"
+    assert isinstance(server, RemoteServer)
+    assert server.url == "https://mcp.example.com/mcp"
+
+
+def test_gemini_cli_discoverer_non_server_mcp_category_yields_no_entry(tmp_path):
+    """Gemini CLI settings v2 has a legitimate non-server ``mcp`` category
+    (``mcp.allowed``/``mcp.serverCommand``). It must yield no entry -- and, above
+    all, not a false ``CouldNotParseMCPConfig``."""
+    from agent_scan.agents import GeminiCliDiscoverer
+
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini" / "settings.json").write_text(
+        '{"theme": "dark", "mcp": {"allowed": ["srv"], "serverCommand": "custom-mcp"}}'
+    )
+
+    assert GeminiCliDiscoverer(tmp_path).discover_mcp_servers() == {}
+
+
+def test_gemini_cli_discoverer_invalid_servers_wrapper_is_parse_error(tmp_path):
+    """A structurally present but invalid table is a genuine malformed-MCP signal,
+    consistent with how an invalid ``mcpServers`` table is handled."""
+    from agent_scan.agents import GeminiCliDiscoverer
+
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini" / "settings.json").write_text('{"servers": {"bad": {}}}')
+
+    mcp = GeminiCliDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp))
+    assert isinstance(mcp[config_path], CouldNotParseMCPConfig)
+    assert mcp[config_path].is_failure
+
+
+def test_gemini_cli_discoverer_prefers_mcpservers_over_other_wrappers(tmp_path):
+    """Pins the legacy cascade order: when several wrappers are present, the
+    top-level ``mcpServers`` table wins."""
+    from agent_scan.agents import GeminiCliDiscoverer
+
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini" / "settings.json").write_text(
+        '{"mcpServers": {"primary": {"command": "one"}}, "servers": {"other": {"command": "two"}}}'
+    )
+
+    mcp = GeminiCliDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp))
+    assert [name for name, _ in mcp[config_path]] == ["primary"]
+
+
 def test_gemini_cli_discoverer_discovers_skills_dir(tmp_path):
     from agent_scan.agents import GeminiCliDiscoverer
 
@@ -7266,6 +7367,24 @@ def test_amazon_q_discoverer_parses_mcp_from_default_json(tmp_path):
     assert name == "q"
     assert isinstance(server, StdioServer)
     assert server.command == "qcli"
+
+
+def test_amazon_q_discoverer_parses_flat_server_map_from_mcp_json(tmp_path):
+    """Regression (legacy parity): the deleted scan accepted the wrapper-less flat
+    ``{name: serverConfig}`` map (``PluginMCPConfigFile`` shape) for these files."""
+    from agent_scan.agents import AmazonQDiscoverer
+
+    amazonq_dir = tmp_path / ".aws" / "amazonq"
+    amazonq_dir.mkdir(parents=True)
+    (amazonq_dir / "mcp.json").write_text('{"fetch": {"command": "uvx", "args": ["mcp-fetch"]}}')
+
+    mcp = AmazonQDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(k for k in mcp if k.endswith("/amazonq/mcp.json"))
+    name, server = mcp[config_path][0]
+    assert name == "fetch"
+    assert isinstance(server, StdioServer)
+    assert server.command == "uvx"
 
 
 def test_amazon_q_discoverer_detected_on_win32(tmp_path, monkeypatch):

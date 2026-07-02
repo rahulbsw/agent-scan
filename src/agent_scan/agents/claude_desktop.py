@@ -60,13 +60,14 @@ class ClaudeDesktopDiscoverer(AgentDiscoverer):
     Only one documented scope exists -- a single user-global config file -- so this
     discoverer is intentionally small: no project, plugin, skills, or managed scopes
     (see the module docstring for the deliberately-uncovered, undocumented ones).
-    The config is the wrapped ``{"mcpServers": {...}}`` shape, so MCP discovery
-    mirrors ``ClaudeCodeDiscoverer._discover_global_mcp_servers``: extract the
-    top-level ``mcpServers`` map and route it through the inherited
-    :meth:`AgentDiscoverer._discover_mcpservers_table`. Gating on the presence of
-    ``mcpServers`` (rather than format-union parsing the whole file) avoids
-    misreporting a config that carries only UI settings as a parse failure -- the
-    file is multi-purpose (e.g. ``globalShortcut``).
+    The documented config shape is the wrapped ``{"mcpServers": {...}}`` form; MCP
+    discovery routes the file through the inherited
+    :meth:`AgentDiscoverer._discover_mcpservers_table`, which also tolerates the
+    other legacy-recognized layouts (``mcp.servers``/``servers`` wrappers, flat
+    server map). Gating on the structural presence of a server table (rather than
+    format-union parsing the whole file) avoids misreporting a config that carries
+    only UI settings as a parse failure -- the file is multi-purpose (e.g.
+    ``globalShortcut``).
     """
 
     # Canonical agent name: this discoverer's key in ``agents.DISCOVERERS`` and the
@@ -89,13 +90,13 @@ class ClaudeDesktopDiscoverer(AgentDiscoverer):
         return self._first_existing_path([install_dir])
 
     def discover_mcp_servers(self) -> McpConfigsResult:
-        """Parse the top-level ``mcpServers`` map from ``claude_desktop_config.json``.
+        """Parse the MCP server table from ``claude_desktop_config.json``.
 
         Delegates to the inherited :meth:`AgentDiscoverer._discover_mcpservers_table`
-        (the shared wrapped-``mcpServers`` parser): a missing file or one without a
-        non-empty ``mcpServers`` table yields no entry (not a parse failure),
-        malformed JSON is surfaced as ``CouldNotParseMCPConfig`` keyed by the file,
-        and a valid table is validated into typed servers.
+        (the shared multi-purpose-config server-table parser): a missing file or one
+        without a server table in any recognized wrapper yields no entry (not a
+        parse failure), malformed JSON is surfaced as ``CouldNotParseMCPConfig``
+        keyed by the file, and a valid table is validated into typed servers.
         """
         config_path = self._config_path()
         if config_path is None:

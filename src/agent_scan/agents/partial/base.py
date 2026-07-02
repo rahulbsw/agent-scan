@@ -35,7 +35,9 @@ class PartialDiscoverer(AgentDiscoverer, abstract=True):
 
     # Any one existing path confirms the agent is installed.
     _client_exists_paths: tuple[str, ...] = ()
-    # MCP config files in the wrapped ``{"mcpServers": {...}}`` shape.
+    # MCP config files, documented as the wrapped ``{"mcpServers": {...}}`` shape
+    # but parsed leniently (``mcp.servers``/``servers`` wrappers and flat server
+    # maps are also accepted -- legacy ``well_known_clients`` scan parity).
     _mcp_config_paths: tuple[str, ...] = ()
     # Skills directories (``<dir>/<skill>/SKILL.md``).
     _skills_dir_paths: tuple[str, ...] = ()

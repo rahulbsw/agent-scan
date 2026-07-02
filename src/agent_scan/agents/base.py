@@ -40,8 +40,8 @@ McpConfigsResult = dict[
 ]
 SkillsDirsResult = dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig]
 # Return type of the per-file MCP parsers (``_parse_mcp_file`` /
-# ``_parse_settings_mcp_gated``): parsed servers, a parse failure, or ``None``
-# when the file is absent/empty/not-MCP.
+# ``_discover_mcpservers_table`` / ``_parse_settings_mcp_gated``): parsed
+# servers, a parse failure, or ``None`` when the file is absent/empty/not-MCP.
 McpScanResult = list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None
 
 # Cap traversal into ``~/.claude/plugins/{cache,repos}``
@@ -96,6 +96,24 @@ def _walk_under_depth(base: Path, name: str, max_path_depth: int, *, want_file: 
     yield from hits
 
 
+def _is_flat_server_map(data: dict) -> bool:
+    """True when ``data`` is a non-empty flat ``{name: serverConfig}`` map: every
+    value is a dict bearing a server discriminator
+    (``command``/``url``/``serverUrl``/``httpUrl``) — the wrapper-less shape that
+    is still valid MCP (Claude Code plugin format).
+
+    Single home for the flat-map rule, shared by :func:`_looks_like_mcp_payload`
+    (the opportunistic-walk gate) and
+    :meth:`AgentDiscoverer._discover_mcpservers_table` (the multi-purpose-config
+    parser). Mirrors the ``PluginMCPConfigFile.wrap_flat_dict`` gate in
+    ``models`` (kept separate there: the validator raises granular errors).
+    """
+    return bool(data) and all(
+        isinstance(value, dict) and any(disc in value for disc in SERVER_CONFIG_DISCRIMINATOR_KEYS)
+        for value in data.values()
+    )
+
+
 def _looks_like_mcp_payload(data: dict) -> bool:
     """True if a parsed JSON dict has a recognizable MCP shape.
 
@@ -109,19 +127,14 @@ def _looks_like_mcp_payload(data: dict) -> bool:
     * carries a wrapper key (``mcpServers``/``mcp``/``servers``) — in which case a
       later validation failure is a *genuine* malformed-MCP signal worth
       surfacing rather than swallowing; or
-    * is a non-empty flat ``{name: serverConfig}`` map whose every value is a dict
-      bearing a server discriminator (``command``/``url``/``serverUrl``/``httpUrl``) —
-      the wrapper-less shape that is still valid MCP (Claude Code plugin format).
+    * is a flat ``{name: serverConfig}`` map (see :func:`_is_flat_server_map`).
 
     Everything else is treated as "not an MCP file" and skipped by callers that
     opt in via ``_parse_mcp_file(..., skip_unrecognized=True)``.
     """
     if any(key in data for key in ("mcpServers", "mcp", "servers")):
         return True
-    return bool(data) and all(
-        isinstance(value, dict) and any(disc in value for disc in SERVER_CONFIG_DISCRIMINATOR_KEYS)
-        for value in data.values()
-    )
+    return _is_flat_server_map(data)
 
 
 class AgentDiscoverer(ABC):
@@ -328,15 +341,24 @@ class AgentDiscoverer(ABC):
         return self._servers_to_signed_list(validated)
 
     def _discover_mcpservers_table(self, path: Path) -> McpScanResult:
-        """Parse a single wrapped ``{"mcpServers": {...}}`` config file at ``path``.
+        """Parse the MCP server table from a multi-purpose config file at ``path``,
+        whichever recognized wrapper it sits under.
 
-        The common shape for agents whose config file is multi-purpose: a
-        missing/empty file, a non-object root, or one without a non-empty
-        ``mcpServers`` table yields ``None`` (no entry, not a failure -- these
-        files carry other settings too); malformed JSON becomes
-        ``CouldNotParseMCPConfig``; a valid table is validated into typed servers.
-        Use :meth:`_parse_mcp_file` instead when the wrapper layout varies across
-        formats.
+        Wrappers are probed in the legacy ``mcp_client.scan_mcp_config_file``
+        cascade order and the first *structurally present* one (a non-empty dict)
+        wins: a top-level ``mcpServers`` table, a VSCode-style nested
+        ``mcp.servers`` table, a top-level ``servers`` table, then the
+        wrapper-less flat ``{name: serverConfig}`` map
+        (:func:`_is_flat_server_map`).
+
+        A missing/empty file, a non-object root, or a file carrying none of these
+        shapes yields ``None`` (no entry, not a failure -- these files carry
+        other settings too, e.g. a Gemini CLI ``settings.json`` whose ``mcp``
+        category holds only non-server options). Malformed JSON, or a present
+        table that fails validation, becomes ``CouldNotParseMCPConfig``.
+        (``~/.claude.json``'s ``projects`` shape is deliberately not probed --
+        that file has its own discoverer.) Use :meth:`_parse_mcp_file` instead
+        when an agent-specific format model is needed.
         """
         data = self._load_json_file(path)
         if data is None:
@@ -345,10 +367,20 @@ class AgentDiscoverer(ABC):
             return data
         if not isinstance(data, dict):
             return None
-        servers = data.get("mcpServers")
-        if not isinstance(servers, dict) or not servers:
-            return None
-        return self._validate_servers(servers, source=f"mcpServers in {path.as_posix()}")
+        mcp_servers = data.get("mcpServers")
+        if isinstance(mcp_servers, dict) and mcp_servers:
+            return self._validate_servers(mcp_servers, source=f"mcpServers in {path.as_posix()}")
+        mcp = data.get("mcp")
+        if isinstance(mcp, dict):
+            nested = mcp.get("servers")
+            if isinstance(nested, dict) and nested:
+                return self._validate_servers(nested, source=f"mcp.servers in {path.as_posix()}")
+        servers = data.get("servers")
+        if isinstance(servers, dict) and servers:
+            return self._validate_servers(servers, source=f"servers in {path.as_posix()}")
+        if _is_flat_server_map(data):
+            return self._validate_servers(data, source=f"flat server map in {path.as_posix()}")
+        return None
 
     def _parse_mcp_file(
         self,

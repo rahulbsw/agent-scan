@@ -115,7 +115,7 @@ class ScalarToolLabels(BaseModel):
 # than a ``{name: serverConfig}`` map: ``command`` (StdioServer) and the remote
 # URL aliases (RemoteServer). Single source of truth reused by RemoteServer's
 # ``validation_alias``, the ``PluginMCPConfigFile`` flat-format gate, and
-# ``base._looks_like_mcp_payload``. A drift guard
+# ``base._is_flat_server_map`` (which backs ``_looks_like_mcp_payload``). A drift guard
 # (test_server_config_discriminator_keys_match_model_required_fields) keeps it in
 # sync with the models' required fields.
 _REMOTE_URL_ALIASES = ("url", "serverUrl", "httpUrl")
