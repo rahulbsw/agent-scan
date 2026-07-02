@@ -93,13 +93,12 @@ async def get_mcp_config_per_home_directory(
         | CouldNotParseMCPConfig,
     ] = {}
 
-    all_mcp_config_paths: list[str] = list(client.mcp_config_paths)
-    all_mcp_config_paths = list(
-        dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in all_mcp_config_paths)
+    all_mcp_config_paths: list[str] = list(
+        dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in client.mcp_config_paths)
     )
 
     for mcp_config_path in all_mcp_config_paths:
-        mcp_config_path_expanded = expand_path(Path(mcp_config_path), home_directory)
+        mcp_config_path_expanded = Path(mcp_config_path)
         if not mcp_config_path_expanded.exists():
             if create_file_not_found_error:
                 mcp_configs[mcp_config_path_expanded.as_posix()] = FileNotFoundConfig(
@@ -134,13 +133,12 @@ async def get_mcp_config_per_home_directory(
     # parse skills dirs
     skills_dirs: dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig] = {}
 
-    all_skills_dir_paths: list[str] = list(client.skills_dir_paths)
-    all_skills_dir_paths = list(
-        dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in all_skills_dir_paths)
+    all_skills_dir_paths: list[str] = list(
+        dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in client.skills_dir_paths)
     )
 
     for skills_dir_path in all_skills_dir_paths:
-        skills_dir_path_expanded = expand_path(Path(skills_dir_path), home_directory)
+        skills_dir_path_expanded = Path(skills_dir_path)
         if skills_dir_path_expanded.exists():
             skills_dirs[skills_dir_path_expanded.as_posix()] = inspect_skills_dir(str(skills_dir_path_expanded))
         elif create_file_not_found_error:
