@@ -19,7 +19,7 @@ from agent_scan.models import (
     MCPConfig,
     PluginMCPConfigFile,
 )
-from agent_scan.skill_client import inspect_commands_dir, inspect_skills_dir
+from agent_scan.skill_client import inspect_skills_dir
 
 # Canonical agent name for Claude Code, used as this discoverer's ``name`` and the
 # key under which it registers in ``agents.DISCOVERERS``.
@@ -110,9 +110,6 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         result.update(self._discover_global_skill())
         result.update(self._discover_project_skills())
         result.update(self._discover_plugin_skills())
-        result.update(self._discover_global_commands())
-        result.update(self._discover_project_commands())
-        result.update(self._discover_plugin_commands())
         result.update(self._discover_plugin_manifest_skills())
         # NOTE: enterprise/managed skills are a documented Claude Code scope (the
         # "Enterprise" tier in the skills hierarchy, which overrides personal and
@@ -315,20 +312,13 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
         The single source of plugin MCP-file locations, consumed by both
         ``_discover_plugin_mcp_servers`` (discovery) and ``static_mcp_config_paths``
-        (``--paths`` attribution) so the two cannot drift. The ``is_file()`` guard skips
-        FIFOs/special files ``os.walk`` may surface (a deliberate hang defense).
+        (``--paths`` attribution) so the two cannot drift.
         """
-        for base in self._plugin_base_dirs():
-            for mcp_file in _walk_under_depth(base, ".mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
-                if mcp_file.is_file():
-                    yield mcp_file
+        return self._iter_plugin_mcp_files(self._plugin_base_dirs(), (".mcp.json",))
 
     def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
-        """Scan plugin ``.mcp.json`` files under every plugin base dir.
-
-        Plugin ``.mcp.json`` files use the flat ``{name: serverConfig}`` format
-        (no ``mcpServers`` wrapper). A top-level ``mcpServers`` key is also
-        tolerated for plugins that ship the wrapped format.
+        """Scan plugin ``.mcp.json`` files (flat ``{name: serverConfig}`` or wrapped
+        ``mcpServers``); only the format union is Claude-Code-specific.
         """
         result: McpConfigsResult = {}
         for mcp_file in self._plugin_mcp_files():
@@ -343,35 +333,6 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     def _discover_plugin_skills(self) -> SkillsDirsResult:
         """Scan ``skills/`` subdirs under every plugin base dir."""
         return self._discover_skill_and_command_dirs(self._plugin_base_dirs(), "skills", inspect_skills_dir)
-
-    # --- private: commands discovery ---
-    # Commands are currently surfaced as skills (hence the ``SkillsDirsResult``
-    # return type and the shared ``inspect_*`` machinery), matching how the docs
-    # treat them today. This is a deliberate choice for now, not a permanent one:
-    # if commands gain a distinct identity we may need to map them as commands in
-    # their own right rather than folding them into skills.
-
-    def _discover_global_commands(self) -> SkillsDirsResult:
-        """Scan ``<install>/commands`` for command files under each global folder."""
-        result: SkillsDirsResult = {}
-        for folder in self._discover_global_folders():
-            commands_dir = folder / "commands"
-            if commands_dir.exists():
-                result[commands_dir.as_posix()] = inspect_commands_dir(str(commands_dir))
-        return result
-
-    def _discover_project_commands(self) -> SkillsDirsResult:
-        """For each project (and ancestor), scan ``<path>/.claude/commands`` if present."""
-        result: SkillsDirsResult = {}
-        for path in self._project_paths_with_ancestors():
-            commands_dir = path / self._project_dotclaude_subdir / "commands"
-            if commands_dir.exists():
-                result[commands_dir.as_posix()] = inspect_commands_dir(str(commands_dir))
-        return result
-
-    def _discover_plugin_commands(self) -> SkillsDirsResult:
-        """Scan ``commands/`` subdirs under every plugin base dir."""
-        return self._discover_skill_and_command_dirs(self._plugin_base_dirs(), "commands", inspect_commands_dir)
 
     # --- private: enterprise/managed MCP discovery ---
 
