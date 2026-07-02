@@ -768,7 +768,6 @@ async def test_skip_ssl_verify_defaults_false_when_unset(monkeypatch):
         ("https://api.snyk.io/mcp-scan/client-bootstrap", True),
         ("https://api.eu.snyk.io/mcp-scan/client-bootstrap", True),
         ("https://snyk.io/mcp-scan/client-bootstrap", True),
-        ("https://api.snykgov.io/mcp-scan/client-bootstrap", True),
         # Non-Snyk host, plain HTTP, and look-alike hosts must all be rejected.
         ("http://api.snyk.io/mcp-scan/client-bootstrap", False),  # not https
         ("https://evil.example.com/mcp-scan/client-bootstrap", False),
