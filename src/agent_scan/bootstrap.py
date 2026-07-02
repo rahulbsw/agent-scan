@@ -46,9 +46,7 @@ CLIENT_BOOTSTRAP_PATH_SUFFIX = "/mcp-scan/client-bootstrap"
 # Hosts Snyk operates. `skip_servers` is the one runtime-config key that
 # *reduces* scan coverage (a matched server is never connected or scanned), so
 # it is only honored when the bootstrap response came from a Snyk-operated
-# endpoint over verified TLS. Reached over a non-Snyk host, over plain HTTP, or
-# with TLS verification disabled, an active MITM or a malicious/mistyped control
-# server could otherwise inject skip rules and silently suppress scanning.
+# endpoint over verified TLS.
 _TRUSTED_SKIP_HOSTS = frozenset({"snyk.io"})
 _TRUSTED_SKIP_HOST_SUFFIXES = ".snyk.io"
 
