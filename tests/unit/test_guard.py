@@ -41,7 +41,6 @@ from agent_scan.guard import (
     _filter_cursor_hooks,
     _install_hooks,
     _is_agent_scan_command,
-    _CLIENT_INSTALL_PATHS,
     _is_client_installed,
     _mask_key,
     _parse_codex_requirements_toml,
@@ -2756,9 +2755,7 @@ class TestRunInstallSkipsUninstalledClients:
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
-    def test_all_clients_none_installed_exits(
-        self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch, capsys
-    ):
+    def test_all_clients_none_installed_exits(self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch, capsys):
         monkeypatch.delenv("PUSH_KEY", raising=False)
         monkeypatch.setenv("SNYK_TOKEN", "tok")
         with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
@@ -2822,9 +2819,7 @@ class TestRunInstallSkipsUninstalledClients:
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
-    def test_all_clients_all_installed_installs_all(
-        self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch
-    ):
+    def test_all_clients_all_installed_installs_all(self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch):
         monkeypatch.delenv("PUSH_KEY", raising=False)
         monkeypatch.setenv("SNYK_TOKEN", "tok")
         with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ALL_CLIENTS)):
