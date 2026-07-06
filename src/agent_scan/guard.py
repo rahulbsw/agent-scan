@@ -130,11 +130,11 @@ def run_guard(args) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _get_machine_description(client: str) -> str:
+def _get_machine_description(clients: list[str]) -> str:
     from agent_scan.upload import get_hostname
 
     hostname = get_hostname()
-    label = ", ".join(_client_label(c) for c in ALL_CLIENTS) if client == "all" else _client_label(client)
+    label = ", ".join(_client_label(c) for c in clients)
     return f"agent-guard ({hostname}) {label}"
 
 
@@ -193,6 +193,18 @@ def _run_install(args) -> None:
         rich.print("[bold red]Error:[/bold red] --file cannot be used with client 'all'.")
         sys.exit(1)
 
+    # Filter out clients whose agent is not installed on this machine
+    skipped = [c for c in clients if not _is_client_installed(c)]
+    clients = [c for c in clients if _is_client_installed(c)]
+    for c in skipped:
+        rich.print(
+            f"[yellow]Warning:[/yellow] {_client_label(c)} is not installed on this machine. "
+            f"Skipping hook installation for {_client_label(c)}."
+        )
+    if not clients:
+        rich.print("[bold red]Error:[/bold red] No installed agents found. Nothing to install.")
+        sys.exit(1)
+
     scope = "managed" if managed else "user"
     snyk_token = ""
 
@@ -223,7 +235,7 @@ def _run_install(args) -> None:
         for c in clients:
             _preflight_writable(_config_path(c, getattr(args, "file", None), managed=managed))
 
-        description = _get_machine_description(client)
+        description = _get_machine_description(clients)
         rich.print(f"[dim]Minting push key for {description}...[/dim]")
         try:
             push_key = mint_push_key(url, tenant_id, snyk_token, description=description)
@@ -1144,6 +1156,24 @@ def _extract_env_from_cmd(cmd: str, key: str) -> str:
 
 _CLIENT_LABELS = {"claude": "Claude Code", "cursor": "Cursor", "codex": "Codex"}
 _HOOK_CLIENT_NAMES = {"claude": "claude-code", "cursor": "cursor", "codex": "codex"}
+
+
+_CLIENT_INSTALL_PATHS = {
+    "claude": Path.home() / ".claude",
+    "cursor": Path.home() / ".cursor",
+    "codex": Path.home() / ".codex",
+}
+
+
+def _is_client_installed(client: str) -> bool:
+    """Check whether the agent is installed on this machine by looking for its config directory."""
+    path = _CLIENT_INSTALL_PATHS.get(client)
+    if path is None:
+        return True
+    try:
+        return path.is_dir()
+    except PermissionError:
+        return False
 
 
 def _client_label(client: str) -> str:
