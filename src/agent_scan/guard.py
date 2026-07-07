@@ -193,17 +193,19 @@ def _run_install(args) -> None:
         rich.print("[bold red]Error:[/bold red] --file cannot be used with client 'all'.")
         sys.exit(1)
 
-    # Filter out clients whose agent is not installed on this machine
-    skipped = [c for c in clients if not _is_client_installed(c)]
-    clients = [c for c in clients if _is_client_installed(c)]
-    for c in skipped:
-        rich.print(
-            f"[yellow]Warning:[/yellow] {_client_label(c)} is not installed on this machine. "
-            f"Skipping hook installation for {_client_label(c)}."
-        )
-    if not clients:
-        rich.print("[bold red]Error:[/bold red] No installed agents found. Nothing to install.")
-        sys.exit(1)
+    # Filter out clients whose agent is not installed on this machine.
+    # Skip this check when --file is explicitly provided (the caller knows where to write).
+    if not getattr(args, "file", None):
+        skipped = [c for c in clients if not _is_client_installed(c)]
+        clients = [c for c in clients if _is_client_installed(c)]
+        for c in skipped:
+            rich.print(
+                f"[yellow]Warning:[/yellow] {_client_label(c)} is not installed on this machine. "
+                f"Skipping hook installation for {_client_label(c)}."
+            )
+        if not clients:
+            rich.print("[bold red]Error:[/bold red] No installed agents found. Nothing to install.")
+            sys.exit(1)
 
     scope = "managed" if managed else "user"
     snyk_token = ""
