@@ -86,3 +86,4 @@
 - `0.5.10` Add Codex discoverer for MCP servers and skills. Add Claude Desktop support. Attach config-file path to each MCP server on upload. Fix remote URL handling. Stop probing host tool versions and enumerating home directories during bootstrap.
 - `0.5.11` Discover Cursor's built-in/managed skills. Redact secrets from skill file contents. Extend guard hook change detection. Remove commands discovery from the Claude Code discoverer.
 - `0.5.12` Start CLI binary uploads to S3.
+- `0.5.13` Fix bug in skill serialization.
