@@ -41,6 +41,7 @@ from agent_scan.guard import (
     _filter_cursor_hooks,
     _install_hooks,
     _is_agent_scan_command,
+    _is_client_installed,
     _mask_key,
     _parse_codex_requirements_toml,
     _parse_command_info,
@@ -2521,6 +2522,16 @@ class TestUninstallPreservesCustomHooks:
 class TestRunInstallAll:
     """_run_install with client='all' installs all three clients with a single push key."""
 
+    @pytest.fixture(autouse=True)
+    def _all_clients_installed(self, tmp_path):
+        fake_paths = {}
+        for client in ALL_CLIENTS:
+            d = tmp_path / f".{client}"
+            d.mkdir()
+            fake_paths[client] = d
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", fake_paths):
+            yield
+
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
@@ -2666,3 +2677,161 @@ class TestRunUninstallAll:
         )
         with pytest.raises(SystemExit):
             _run_uninstall(args)
+
+
+# ===================================================================
+# _is_client_installed: agent presence check
+# ===================================================================
+
+
+class TestIsClientInstalled:
+    def test_installed_when_config_dir_exists(self, tmp_path):
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": tmp_path / ".claude"}):
+            (tmp_path / ".claude").mkdir()
+            assert _is_client_installed("claude") is True
+
+    def test_not_installed_when_config_dir_missing(self, tmp_path):
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": tmp_path / ".claude"}):
+            assert _is_client_installed("claude") is False
+
+    def test_not_installed_when_path_is_file_not_dir(self, tmp_path):
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": tmp_path / ".claude"}):
+            (tmp_path / ".claude").write_text("")
+            assert _is_client_installed("claude") is False
+
+    def test_unknown_client_returns_true(self):
+        assert _is_client_installed("unknown-client") is True
+
+    def test_permission_error_returns_false(self, tmp_path):
+        path = MagicMock()
+        path.is_dir.side_effect = PermissionError("denied")
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": path}):
+            assert _is_client_installed("claude") is False
+
+
+# ===================================================================
+# _run_install: skip clients not installed on machine
+# ===================================================================
+
+
+class TestRunInstallSkipsUninstalledClients:
+    """_run_install should skip hook installation for agents not present on the machine."""
+
+    @staticmethod
+    def _fake_paths(tmp_path, installed_clients):
+        """Build a _CLIENT_INSTALL_PATHS dict where only *installed_clients* have real dirs."""
+        paths = {}
+        for client in ALL_CLIENTS:
+            d = tmp_path / f".{client}"
+            if client in installed_clients:
+                d.mkdir(exist_ok=True)
+            paths[client] = d
+        return paths
+
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_single_client_not_installed_exits(
+        self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "tok")
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+            with pytest.raises(SystemExit):
+                _run_install(
+                    SimpleNamespace(
+                        client="claude",
+                        url="https://api.snyk.io",
+                        tenant_id="tid-1",
+                        file=None,
+                        managed=False,
+                    )
+                )
+        mock_mint.assert_not_called()
+        mock_install.assert_not_called()
+        out = capsys.readouterr().out
+        assert "not installed" in out.lower()
+
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_all_clients_none_installed_exits(self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "tok")
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+            with pytest.raises(SystemExit):
+                _run_install(
+                    SimpleNamespace(
+                        client="all",
+                        url="https://api.snyk.io",
+                        tenant_id="tid-1",
+                        file=None,
+                        managed=False,
+                    )
+                )
+        mock_mint.assert_not_called()
+        mock_install.assert_not_called()
+        out = capsys.readouterr().out
+        assert "No installed agents found" in out
+
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_all_clients_some_installed_skips_missing(
+        self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "tok")
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ["claude"])):
+            _run_install(
+                SimpleNamespace(
+                    client="all",
+                    url="https://api.snyk.io",
+                    tenant_id="tid-1",
+                    file=None,
+                    managed=False,
+                )
+            )
+        mock_mint.assert_called_once()
+        mock_install.assert_called_once()
+        assert mock_install.call_args.args[0] == "claude"
+        out = capsys.readouterr().out
+        assert "Cursor" in out and "not installed" in out.lower()
+        assert "Codex" in out
+
+    @patch("agent_scan.guard._install_hooks")
+    def test_headless_skips_uninstalled_client(self, mock_install, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        monkeypatch.setenv("TENANT_ID", "tid-hl")
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+            with pytest.raises(SystemExit):
+                _run_install(
+                    SimpleNamespace(
+                        client="cursor",
+                        url="https://api.snyk.io",
+                        tenant_id="",
+                        file=None,
+                        managed=False,
+                    )
+                )
+        mock_install.assert_not_called()
+
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_all_clients_all_installed_installs_all(self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch):
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "tok")
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ALL_CLIENTS)):
+            _run_install(
+                SimpleNamespace(
+                    client="all",
+                    url="https://api.snyk.io",
+                    tenant_id="tid-1",
+                    file=None,
+                    managed=False,
+                )
+            )
+        assert mock_install.call_count == len(ALL_CLIENTS)
+        called_clients = [c.args[0] for c in mock_install.call_args_list]
+        assert called_clients == ALL_CLIENTS
