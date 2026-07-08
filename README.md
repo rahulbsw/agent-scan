@@ -158,28 +158,27 @@ We use GPG signing on the release checksums file to ensure distribution integrit
 ### Step-by-Step Verification Guide
 
 1. **Download the release assets:**
-   Download the binary for your platform (e.g., `agent-scan-<version>-linux-x86_64`) and the signed checksums file (`sha256sums.txt.asc`) from the [GitHub Releases](https://github.com/snyk/agent-scan/releases) page into the same directory.
+   Download the binary for your platform (e.g., `agent-scan-<version>-<os>-<arch>`) and the signed checksums file (`sha256sums.txt.asc`) from the [GitHub Releases](https://github.com/snyk/agent-scan/releases) page into the same directory.
 
-2. **Import Snyk's GPG public key:**
-   Import the public key from this repository:
+2. **Verify GPG signature of the checksums file:**
+   Download the [GPG public key](https://github.com/snyk/agent-scan/blob/main/help/_about-this-project/snyk-code-signing-public.pgp) into the same directory, then run:
    ```bash
-   gpg --import help/_about-this-project/snyk-code-signing-public.pgp
-   ```
-
-3. **Verify the signature of the checksums file:**
-   Run GPG to verify that the checksums file was signed by Snyk's trusted public key:
-   ```bash
+   gpg --import snyk-code-signing-public.pgp
    gpg --verify sha256sums.txt.asc
    ```
-   *Look for a line in the output saying `gpg: Good signature from "Snyk Limited <code-signing@snyk.io>`.*
+   Look for a line in the output saying `gpg: Good signature from "Snyk Limited <code-signing@snyk.io>"`.
 
-4. **Verify the binary's integrity:**
-   Verify that your downloaded binary matches the cryptographic hash listed in the signed checksums file:
-   ```bash
-   # On Linux/macOS
-   sha256sum --check --ignore-missing sha256sums.txt.asc
-   ```
-   *This will output `agent-scan-<version>-linux-x86_64: OK` (and safely ignore other missing platform binaries).*
+3. **Verify the binary's integrity:**
+   After confirming the signature is valid, check that your downloaded binary matches the checksum:
+   * **On Linux (or macOS with `coreutils`):**
+     ```bash
+     grep agent-scan-<version>-<os>-<arch> sha256sums.txt.asc | sha256sum -c -
+     ```
+   * **On macOS (using default `shasum`):**
+     ```bash
+     grep agent-scan-<version>-<os>-<arch> sha256sums.txt.asc | shasum -a 256 -c -
+     ```
+   This will output `agent-scan-<version>-<os>-<arch>: OK`.
 
 ## Scanner Capabilities
 
