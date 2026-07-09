@@ -151,6 +151,35 @@ uvx snyk-agent-scan@latest ~/.claude/skills
 
 [![Agent Scan security vulnerabilities demo](demo.svg)](https://asciinema.org/a/716858)
 
+## Verifying Standalone Binaries
+
+We use GPG signing on the release checksums file to ensure distribution integrity and authenticity.
+
+### Step-by-Step Verification Guide
+
+1. **Download the release assets:**
+   Download the binary for your platform (e.g., `agent-scan-<version>-<os>-<arch>`) and the signed checksums file (`sha256sums.txt.asc`) from the [GitHub Releases](https://github.com/snyk/agent-scan/releases) page into the same directory.
+
+2. **Verify GPG signature of the checksums file:**
+   Download the [GPG public key](https://github.com/snyk/agent-scan/blob/main/help/_about-this-project/snyk-code-signing-public.pgp) into the same directory, then run:
+   ```bash
+   gpg --import snyk-code-signing-public.pgp
+   gpg --verify sha256sums.txt.asc
+   ```
+   Look for a line in the output saying `gpg: Good signature from "Snyk Limited <code-signing@snyk.io>"`.
+
+3. **Verify the binary's integrity:**
+   After confirming the signature is valid, check that your downloaded binary matches the checksum:
+   * **On Linux (or macOS with `coreutils`):**
+     ```bash
+     grep agent-scan-<version>-<os>-<arch> sha256sums.txt.asc | sha256sum -c -
+     ```
+   * **On macOS (using default `shasum`):**
+     ```bash
+     grep agent-scan-<version>-<os>-<arch> sha256sums.txt.asc | shasum -a 256 -c -
+     ```
+   This will output `agent-scan-<version>-<os>-<arch>: OK`.
+
 ## Scanner Capabilities
 
 Agent Scan is a security scanning tool to both scan and inspect the supply chain of agent components on your machine. It scans for common security vulnerabilities like prompt injections, tool poisoning, toxic flows, or vulnerabilities in agent skills.
