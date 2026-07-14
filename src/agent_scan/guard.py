@@ -131,7 +131,7 @@ def run_guard(args) -> int:
 
 
 def _get_machine_description(clients: list[str]) -> str:
-    from agent_scan.upload import get_hostname
+    from agent_scan.utils import get_hostname
 
     hostname = get_hostname()
     label = ", ".join(_client_label(c) for c in clients)

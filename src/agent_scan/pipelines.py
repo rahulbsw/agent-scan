@@ -22,7 +22,6 @@ from agent_scan.models import (
     TokenAndClientInfo,
 )
 from agent_scan.redact import redact_scan_result
-from agent_scan.upload import upload
 from agent_scan.utils import get_push_key, get_readable_home_directories
 from agent_scan.verify_api import analyze_machine
 from agent_scan.well_known_clients import get_well_known_clients
@@ -212,18 +211,6 @@ async def inspect_analyze_push_pipeline(
         scan_context=scan_context,
         scanned_usernames=scanned_usernames,
     )
-    # push
-    for control_server in push_args.control_servers:
-        await upload(
-            verified_scan_path_results,
-            control_server.url,
-            control_server.identifier,
-            verbose=verbose,
-            additional_headers=control_server.headers,
-            skip_ssl_verify=push_args.skip_ssl_verify,
-            scan_context=scan_context,
-            scanned_usernames=scanned_usernames,
-        )
 
     return verified_scan_path_results
 
