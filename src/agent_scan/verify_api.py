@@ -112,12 +112,47 @@ def setup_aiohttp_debug_logging(verbose: bool) -> list[aiohttp.TraceConfig]:
     return [trace_config]
 
 
+# Environment variables that may point to an additional CA certificate (or bundle)
+# to trust. The Snyk CLI runs agent-scan behind a local authenticating reverse proxy
+# and exports these variables pointing at the proxy's self-signed certificate. Loading
+# them lets proxied TLS calls succeed without requiring --skip-ssl-verify.
+_CA_CERT_ENV_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS")
+
+
+def load_extra_ca_certs(ssl_context: ssl.SSLContext) -> None:
+    """Trust additional CA certificates referenced by environment variables.
+
+    Certificates are added on top of the existing (certifi) trust store rather than
+    replacing it, so both public endpoints and the Snyk CLI's proxy are trusted.
+    Missing or invalid files are logged and skipped rather than raising.
+    """
+    loaded: set[str] = set()
+    for env_var in _CA_CERT_ENV_VARS:
+        cert_path = os.environ.get(env_var)
+        if not cert_path:
+            continue
+        real_path = os.path.realpath(cert_path)
+        if real_path in loaded:
+            continue
+        if not os.path.isfile(real_path):
+            logger.warning("Ignoring %s: certificate file not found at %s", env_var, cert_path)
+            continue
+        try:
+            ssl_context.load_verify_locations(cafile=real_path)
+            loaded.add(real_path)
+            logger.debug("Loaded extra CA certificate from %s (%s)", env_var, cert_path)
+        except (ssl.SSLError, OSError) as exc:
+            logger.warning("Failed to load CA certificate from %s (%s): %s", env_var, cert_path, exc)
+
+
 def setup_tcp_connector(skip_ssl_verify: bool = False) -> aiohttp.TCPConnector:
     """
     Setup a TCP connector with SSL settings.
 
     When skip_ssl_verify is True, disable SSL verification and hostname checking.
-    Otherwise, use a secure default SSL context with certifi CA and TLSv1.2+.
+    Otherwise, use a secure default SSL context with certifi CA and TLSv1.2+, extended
+    with any additional CA certificates referenced by the environment (see
+    load_extra_ca_certs) so calls proxied through the Snyk CLI are trusted.
     """
     if skip_ssl_verify:
         # Disable SSL verification at the connector level
@@ -125,6 +160,7 @@ def setup_tcp_connector(skip_ssl_verify: bool = False) -> aiohttp.TCPConnector:
 
     ssl_context = ssl.create_default_context(cafile=certifi.where())
     ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    load_extra_ca_certs(ssl_context)
     connector = aiohttp.TCPConnector(ssl=ssl_context, enable_cleanup_closed=True)
     return connector
 
