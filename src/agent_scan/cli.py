@@ -18,7 +18,6 @@ import psutil
 import rich
 from rich.logging import RichHandler
 
-from agent_scan.bootstrap import bootstrap_first_control_server
 from agent_scan.consent import collect_consent
 from agent_scan.models import (
     FAILURE_CATEGORY_TO_CODE,
@@ -36,7 +35,6 @@ from agent_scan.pipelines import (
     inspect_pipeline,
 )
 from agent_scan.printer import print_scan_result
-from agent_scan.runtime_config import RuntimeConfig, set_runtime_config
 from agent_scan.utils import ensure_unicode_console, get_hostname, get_push_key, parse_headers, suppress_stdout
 from agent_scan.version import version_info
 
@@ -216,7 +214,6 @@ def add_common_arguments(parser):
         action=argparse.BooleanOptionalAction,
         help="Scan skills beyond mcp servers (default: enabled). Use --no-skills to disable.",
     )
-    add_bootstrap_argument(parser)
     parser.add_argument(
         "--scan-all-users",
         default=False,
@@ -234,15 +231,6 @@ def add_common_arguments(parser):
         type=str,
         default=None,
         help="Comma-separated list of issue codes to ignore (e.g. W001,W015)",
-    )
-
-
-def add_bootstrap_argument(parser):
-    parser.add_argument(
-        "--no-bootstrap",
-        default=False,
-        action="store_true",
-        help="Disable the startup bootstrap call to the control server.",
     )
 
 
@@ -673,7 +661,6 @@ async def evo(args):
             headers=parse_headers([f"x-client-id:{client_id}"]),
         )
     ]
-    await bootstrap_runtime_config(args, command="evo")
     await run_scan(args, mode="scan")
 
     # Revoke the push key
@@ -682,34 +669,6 @@ async def evo(args):
         rich.print("Client ID revoked")
     except RuntimeError as e:
         rich.print(f"[bold red]Error revoking client_id[/bold red]: {e}")
-
-
-async def bootstrap_runtime_config(
-    args,
-    command: Literal["scan", "inspect", "evo", "guard"],
-    subcommand: str | None = None,
-) -> None:
-    # Belt-and-suspenders: bootstrap_first_control_server already swallows all
-    # Exception subclasses, but a future refactor or a bug in
-    # set_runtime_config must not abort the scan. Catching Exception (not
-    # BaseException) keeps KeyboardInterrupt, SystemExit, and
-    # asyncio.CancelledError propagating with their default semantics, so
-    # Ctrl-C / sys.exit() / structured cancellation all still work.
-    try:
-        control_servers: list[ControlServer] = getattr(args, "control_servers", []) or []
-        runtime_config = await bootstrap_first_control_server(
-            control_servers=control_servers,
-            command=command,
-            subcommand=subcommand,
-            control_identifier=control_servers[0].identifier if control_servers else None,
-            argv=sys.argv[1:],
-            no_bootstrap=getattr(args, "no_bootstrap", False),
-            skip_ssl_verify=getattr(args, "skip_ssl_verify", False),
-        )
-        set_runtime_config(runtime_config)
-    except Exception as exc:
-        logging.getLogger(__name__).warning("Client bootstrap wrapper crashed; using defaults: %s", exc)
-        set_runtime_config(RuntimeConfig())
 
 
 async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[ScanPathResult]:
@@ -864,8 +823,6 @@ def _handle_ci_exit(result: list[ScanPathResult], json_output: bool, ignore_code
 
 
 async def print_scan_inspect(mode="scan", args=None):
-    await bootstrap_runtime_config(args, command="inspect" if mode == "inspect" else "scan")
-
     json_output: bool = hasattr(args, "json") and args.json
     print_errors: bool = hasattr(args, "print_errors") and args.print_errors
     full_description: bool = hasattr(args, "print_full_descriptions") and args.print_full_descriptions

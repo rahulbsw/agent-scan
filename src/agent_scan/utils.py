@@ -42,7 +42,7 @@ def get_username() -> str:
 # to hang when the local repository is corrupted, the WinMgmt service is
 # unresponsive, or a domain controller round-trip stalls; 10s is generous
 # enough for healthy hosts (typical query is <500ms) while still preventing
-# scan startup and bootstrap payload build from blocking indefinitely.
+# scan startup from blocking indefinitely.
 _WINDOWS_PROFILE_QUERY_TIMEOUT = 10.0
 
 
@@ -236,8 +236,8 @@ def get_readable_home_directories(all_users: bool = False) -> list[tuple[Path, s
             # Cap the CIM query at 10s. Win32_UserProfile via WMI/CIM can hang
             # indefinitely when the WMI repository is corrupted, the WinMgmt
             # service is unresponsive, or a domain controller round-trip
-            # stalls. Without this cap, both scan discovery and the bootstrap
-            # payload build block before any network timeout could fire.
+            # stalls. Without this cap, scan discovery could block before any
+            # network timeout could fire.
             # On timeout we fall through to WSL enumeration and return an
             # empty Windows profile set rather than aborting the scan.
             result = subprocess.run(
