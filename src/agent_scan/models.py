@@ -3,7 +3,6 @@ import os
 import re
 from itertools import chain
 from typing import Annotated, Any, Literal, TypeAlias
-from uuid import UUID
 
 from lark import Lark
 from mcp.client.auth import TokenStorage
@@ -32,7 +31,6 @@ ErrorCategory = Literal[
     "analysis_error",  # Could not reach/use analysis server
     "skill_scan_error",  # Could not scan skill
     "user_declined",  # User declined to start a stdio server during the consent prompt
-    "skipped_by_runtime_config",  # Server skipped because runtime_config.skip_servers matched
 ]
 
 # Mapping from failure categories to codes
@@ -47,7 +45,6 @@ FAILURE_CATEGORY_TO_CODE: dict[ErrorCategory | None, str] = {
     "analysis_error": "X007",
     None: "X008",
     "user_declined": "X009",
-    "skipped_by_runtime_config": "X010",
 }
 
 logger = logging.getLogger(__name__)
@@ -615,80 +612,6 @@ class ScanPathResultsCreate(BaseModel):
     scan_metadata: dict[str, Any] | None = None
 
 
-# WARNING: These models must stay in sync with backend/models/base.py in
-# invariant-platform. There is NO automated enforcement -- if one side
-# changes without the other, bootstrap will silently degrade to defaults
-# (the Pydantic validation on the client side will reject the response).
-# When modifying these models, search invariant-platform for the matching
-# class names and update both sides in a coordinated PR.
-class HomeDirectoryEntry(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    path: str
-    username: str
-
-
-class ClientInfo(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    name: str
-    version: str
-    command: Literal["scan", "inspect", "evo", "guard"]
-    subcommand: str | None = None
-    control_identifier: str | None = None
-    argv_flags: list[str] = Field(default_factory=list)
-
-
-class HostInfo(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    os: str
-    os_release: str
-    os_version: str
-    arch: str
-    processor: str
-    hostname: str
-    current_username: str
-    is_ci: bool
-    is_wsl: bool
-    is_container: bool
-    shell: str | None = None
-    term: str | None = None
-    locale: str | None = None
-    timezone: str | None = None
-
-
-class PathsInfo(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    cwd: str
-    current_home_dir: str
-    home_directories: list[HomeDirectoryEntry]
-    home_directories_truncated: bool
-    executable: str
-
-
-class ClientBootstrapRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    client: ClientInfo
-    host: HostInfo
-
-
-class ClientBootstrapResponse(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    bootstrap_event_id: UUID
-    # TODO: plumbing only — the bootstrap response carries a free-form
-    # runtime_config dict that the client currently stores on
-    # RuntimeConfig.config but does not yet read. Future work will consume
-    # specific keys (feature flags, scan limits, etc.) on the client side;
-    # until then this field is intentionally parsed-and-stashed so the
-    # control server can begin emitting it without a coordinated client
-    # release. See follow-up tracked alongside the bootstrap rollout.
-    runtime_config: dict[str, Any] = Field(default_factory=dict)
-
-
 class TokenAndClientInfo(BaseModel):
     # Use Field(alias=...) for the 'token' because OAuthToken's
     # internal fields (accessToken) are also camelCase.
@@ -787,10 +710,6 @@ class UserDeclinedError(SerializedException):
     category: Literal["user_declined"] = "user_declined"
 
 
-class SkippedByRuntimeConfigError(SerializedException):
-    category: Literal["skipped_by_runtime_config"] = "skipped_by_runtime_config"
-
-
 class AnalysisError(SerializedException):
     category: Literal["analysis_error"] = "analysis_error"
 
@@ -828,13 +747,7 @@ class InspectedExtensions(BaseModel):
     # path, where the scan never starts the subprocess and the absence
     # of a handshake is the documented behavior rather than a failure.
     signature_or_error: (
-        ServerSignature
-        | ServerStartupError
-        | ServerHTTPError
-        | SkillScannError
-        | UserDeclinedError
-        | SkippedByRuntimeConfigError
-        | None
+        ServerSignature | ServerStartupError | ServerHTTPError | SkillScannError | UserDeclinedError | None
     ) = None
 
 

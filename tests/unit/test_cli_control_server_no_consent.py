@@ -66,15 +66,14 @@ class TestControlServerPushKeySkipsConsent:
         self,
     ):
         """
-        push-key scan: ``collect_consent`` is never invoked; ``analyze_machine`` and
-        ``upload`` are the only code paths that would perform outbound HTTP — they are
-        mocked so ``aiohttp.ClientSession`` is never used in those modules.
+        push-key scan: ``collect_consent`` is never invoked; ``analyze_machine`` is the
+        only code path that would perform outbound HTTP — it is mocked so
+        ``aiohttp.ClientSession`` is never used in that module.
         """
         args = _push_key_scan_args()
         path_result = ScanPathResult(path="/fake/mcp.json", servers=[])
 
         mock_analyze = AsyncMock(side_effect=lambda paths, **kw: paths)
-        mock_upload = AsyncMock()
         mock_inspect = AsyncMock(return_value=([path_result], ["testuser"]))
 
         with (
@@ -85,13 +84,11 @@ class TestControlServerPushKeySkipsConsent:
             ),
             patch("agent_scan.pipelines.inspect_pipeline", new=mock_inspect),
             patch("agent_scan.pipelines.analyze_machine", new=mock_analyze),
-            patch("agent_scan.pipelines.upload", new=mock_upload),
         ):
             await run_scan(args, mode="scan")
 
         mock_consent.assert_not_called()
         mock_analyze.assert_awaited()
-        mock_upload.assert_awaited()
         # Inspect ran with empty declined set (consent not collected)
         call_kw = mock_inspect.call_args.kwargs
         assert call_kw.get("declined_servers") == set()
@@ -120,7 +117,6 @@ class TestControlServerPushKeySkipsConsent:
                 new=AsyncMock(return_value=([path_result], [])),
             ),
             patch("agent_scan.pipelines.analyze_machine", new=AsyncMock(side_effect=lambda p, **kw: p)),
-            patch("agent_scan.pipelines.upload", new=AsyncMock()),
         ):
             await run_scan(args, mode="scan")
 
