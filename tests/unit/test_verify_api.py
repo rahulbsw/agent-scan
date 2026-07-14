@@ -2,6 +2,7 @@
 
 import json
 import os
+import ssl
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -16,7 +17,7 @@ from agent_scan.models import (
     ServerSignature,
     StdioServer,
 )
-from agent_scan.verify_api import analyze_machine, setup_tcp_connector
+from agent_scan.verify_api import analyze_machine, load_extra_ca_certs, setup_tcp_connector
 
 
 class TestProxySupport:
@@ -216,6 +217,91 @@ class TestProxySupport:
             call_kwargs = mock_connector.call_args[1]
             assert call_kwargs["ssl"] is False  # SSL verification disabled
             assert call_kwargs["enable_cleanup_closed"] is True
+
+    def test_setup_tcp_connector_loads_extra_ca_certs(self):
+        """When verifying, setup_tcp_connector augments the context with env CA certs."""
+        with (
+            patch("agent_scan.verify_api.aiohttp.TCPConnector"),
+            patch("agent_scan.verify_api.load_extra_ca_certs") as mock_load,
+        ):
+            setup_tcp_connector(skip_ssl_verify=False)
+            mock_load.assert_called_once()
+            assert isinstance(mock_load.call_args[0][0], ssl.SSLContext)
+
+    def test_setup_tcp_connector_skips_extra_ca_certs_when_insecure(self):
+        """When skip_ssl_verify is True, there is no context to augment."""
+        with (
+            patch("agent_scan.verify_api.aiohttp.TCPConnector"),
+            patch("agent_scan.verify_api.load_extra_ca_certs") as mock_load,
+        ):
+            setup_tcp_connector(skip_ssl_verify=True)
+            mock_load.assert_not_called()
+
+
+class TestLoadExtraCaCerts:
+    """The Snyk CLI proxy exports SSL_CERT_FILE / REQUESTS_CA_BUNDLE / NODE_EXTRA_CA_CERTS
+    pointing at its self-signed certificate; these must be trusted additively."""
+
+    _CERT_ENV_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS")
+
+    def _clear_cert_env(self):
+        for var in self._CERT_ENV_VARS:
+            os.environ.pop(var, None)
+
+    @pytest.mark.parametrize("env_var", _CERT_ENV_VARS)
+    def test_loads_cert_from_each_env_var(self, tmp_path, env_var):
+        cert = tmp_path / "proxy.pem"
+        cert.write_text("dummy")
+        ctx = MagicMock(spec=ssl.SSLContext)
+
+        with patch.dict(os.environ, {}, clear=False):
+            self._clear_cert_env()
+            os.environ[env_var] = str(cert)
+            load_extra_ca_certs(ctx)
+
+        ctx.load_verify_locations.assert_called_once_with(cafile=os.path.realpath(str(cert)))
+
+    def test_deduplicates_when_vars_point_to_same_file(self, tmp_path):
+        cert = tmp_path / "proxy.pem"
+        cert.write_text("dummy")
+        ctx = MagicMock(spec=ssl.SSLContext)
+
+        with patch.dict(os.environ, {var: str(cert) for var in self._CERT_ENV_VARS}, clear=False):
+            load_extra_ca_certs(ctx)
+
+        ctx.load_verify_locations.assert_called_once()
+
+    def test_missing_file_is_skipped(self, tmp_path):
+        ctx = MagicMock(spec=ssl.SSLContext)
+
+        with patch.dict(os.environ, {}, clear=False):
+            self._clear_cert_env()
+            os.environ["SSL_CERT_FILE"] = str(tmp_path / "does-not-exist.pem")
+            load_extra_ca_certs(ctx)
+
+        ctx.load_verify_locations.assert_not_called()
+
+    def test_no_env_vars_is_noop(self):
+        ctx = MagicMock(spec=ssl.SSLContext)
+
+        with patch.dict(os.environ, {}, clear=False):
+            self._clear_cert_env()
+            load_extra_ca_certs(ctx)
+
+        ctx.load_verify_locations.assert_not_called()
+
+    def test_invalid_cert_is_logged_not_raised(self, tmp_path):
+        cert = tmp_path / "bad.pem"
+        cert.write_text("not a certificate")
+        ctx = MagicMock(spec=ssl.SSLContext)
+        ctx.load_verify_locations.side_effect = ssl.SSLError("bad certificate")
+
+        with patch.dict(os.environ, {}, clear=False):
+            self._clear_cert_env()
+            os.environ["SSL_CERT_FILE"] = str(cert)
+            load_extra_ca_certs(ctx)  # must not raise
+
+        ctx.load_verify_locations.assert_called_once()
 
 
 class TestAnalyzeMachineRetries:
