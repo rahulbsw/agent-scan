@@ -214,6 +214,7 @@ def add_common_arguments(parser):
         action=argparse.BooleanOptionalAction,
         help="Scan skills beyond mcp servers (default: enabled). Use --no-skills to disable.",
     )
+    add_bootstrap_argument(parser)
     parser.add_argument(
         "--scan-all-users",
         default=False,
@@ -231,6 +232,15 @@ def add_common_arguments(parser):
         type=str,
         default=None,
         help="Comma-separated list of issue codes to ignore (e.g. W001,W015)",
+    )
+
+
+def add_bootstrap_argument(parser):
+    parser.add_argument(
+        "--no-bootstrap",
+        default=False,
+        action="store_true",
+        help="Disable the startup bootstrap call to the control server.",
     )
 
 
