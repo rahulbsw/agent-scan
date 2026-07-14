@@ -141,7 +141,7 @@ def load_extra_ca_certs(ssl_context: ssl.SSLContext) -> None:
             ssl_context.load_verify_locations(cafile=real_path)
             loaded.add(real_path)
             logger.debug("Loaded extra CA certificate from %s (%s)", env_var, cert_path)
-        except ssl.SSLError as exc:
+        except (ssl.SSLError, OSError) as exc:
             logger.warning("Failed to load CA certificate from %s (%s): %s", env_var, cert_path, exc)
 
 

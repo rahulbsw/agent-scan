@@ -290,11 +290,23 @@ class TestLoadExtraCaCerts:
 
         ctx.load_verify_locations.assert_not_called()
 
-    def test_invalid_cert_is_logged_not_raised(self, tmp_path):
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ssl.SSLError("bad certificate"),
+            OSError("permission denied"),
+            PermissionError("EACCES"),
+            FileNotFoundError("removed after isfile check"),
+        ],
+        ids=["ssl_error", "os_error", "permission_error", "file_not_found"],
+    )
+    def test_load_failure_is_logged_not_raised(self, tmp_path, error):
+        """load_verify_locations failures (bad cert or runtime OS errors) must be
+        swallowed so the connector still gets built and falls back to certifi/OS trust."""
         cert = tmp_path / "bad.pem"
         cert.write_text("not a certificate")
         ctx = MagicMock(spec=ssl.SSLContext)
-        ctx.load_verify_locations.side_effect = ssl.SSLError("bad certificate")
+        ctx.load_verify_locations.side_effect = error
 
         with patch.dict(os.environ, {}, clear=False):
             self._clear_cert_env()
