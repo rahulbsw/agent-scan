@@ -17,6 +17,7 @@ import pytest
 
 from agent_scan.guard import (
     _PERMISSION_DENIED,
+    ALL_CLIENTS,
     CLAUDE_HOOK_EVENTS,
     CLAUDE_MANAGED_SETTINGS_PATH,
     CLAUDE_SETTINGS_PATH,
@@ -40,6 +41,7 @@ from agent_scan.guard import (
     _filter_cursor_hooks,
     _install_hooks,
     _is_agent_scan_command,
+    _is_client_installed,
     _mask_key,
     _parse_codex_requirements_toml,
     _parse_command_info,
@@ -50,6 +52,8 @@ from agent_scan.guard import (
     _prepare_cursor_config,
     _print_client_status,
     _run_install,
+    _run_uninstall,
+    _send_test_event,
     _shell_quote,
     _uninstall_claude,
     _uninstall_codex,
@@ -1623,6 +1627,9 @@ _DIFF_EMPTY: dict = {"added": {}, "modified": {}, "removed": {}}
 
 _PREPARED: dict[str, dict[str, list[object]]] = {"hooks": {"SessionStart": []}}
 
+_CURRENT_CHECKSUM = "a" * 64
+_NEW_CHECKSUM = "b" * 64
+
 
 class TestInstallHooksOrchestration:
     """Tests for _install_hooks: detect changes → send test event → write config."""
@@ -1636,7 +1643,7 @@ class TestInstallHooksOrchestration:
         """
         dest = MagicMock(name="dest_path")
         targets = {
-            "copy": (f"{_G}._copy_hook_script", (dest, True, False)),
+            "copy": (f"{_G}._copy_hook_script", (dest, True, False, _CURRENT_CHECKSUM, _NEW_CHECKSUM)),
             "build": (f"{_G}._build_hook_command", "test-cmd"),
             "prep_claude": (f"{_G}._prepare_claude_config", (_PREPARED, _DIFF_REMOVED, 0)),
             "prep_cursor": (f"{_G}._prepare_cursor_config", (_PREPARED, _DIFF_REMOVED, 0)),
@@ -1682,6 +1689,14 @@ class TestInstallHooksOrchestration:
 
     def _print_messages(self, ctx):
         return [c.args[0] for c in ctx["rich"].print.call_args_list if c.args]
+
+    # ---------------------------------------------------------------
+    # _copy_hook_script receives only config_path
+    # ---------------------------------------------------------------
+
+    def test_copy_hook_script_called_with_config_path_only(self, ctx, tmp_path):
+        config = self._call(tmp_path, client="claude", config_exists=True)
+        ctx["copy"].assert_called_once_with(config)
 
     # ---------------------------------------------------------------
     # Client routing: each client calls its own prepare + write
@@ -1749,7 +1764,7 @@ class TestInstallHooksOrchestration:
 
     def test_test_event_sent_when_script_new(self, ctx, tmp_path):
         """first_install=True because script did not exist prior."""
-        ctx["copy"].return_value = (ctx["dest"], False, True)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path, config_exists=True)
         ctx["test_event"].assert_called_once()
         _, kwargs = ctx["test_event"].call_args
@@ -1769,7 +1784,7 @@ class TestInstallHooksOrchestration:
 
     def test_test_event_receives_diff(self, ctx, tmp_path):
         ctx["prep_claude"].return_value = (_PREPARED, _DIFF_REMOVED, 0)
-        ctx["copy"].return_value = (ctx["dest"], False, True)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -1780,11 +1795,13 @@ class TestInstallHooksOrchestration:
             config_changed=True,
             hooks_diff=_DIFF_REMOVED,
             push_key_changed=False,
+            current_checksum=None,
+            new_checksum=_NEW_CHECKSUM,
         )
 
     def test_test_event_receives_empty_diff(self, ctx, tmp_path):
         ctx["prep_claude"].return_value = (_PREPARED, _DIFF_EMPTY, 0)
-        ctx["copy"].return_value = (ctx["dest"], False, True)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -1795,6 +1812,8 @@ class TestInstallHooksOrchestration:
             config_changed=False,
             hooks_diff=_DIFF_EMPTY,
             push_key_changed=False,
+            current_checksum=None,
+            new_checksum=_NEW_CHECKSUM,
         )
 
     def test_test_event_not_first_install(self, ctx, tmp_path):
@@ -1809,11 +1828,13 @@ class TestInstallHooksOrchestration:
             config_changed=True,
             hooks_diff=_DIFF_REMOVED,
             push_key_changed=False,
+            current_checksum=_CURRENT_CHECKSUM,
+            new_checksum=_NEW_CHECKSUM,
         )
 
     def test_test_event_push_key_changed(self, ctx, tmp_path):
         ctx["detect_existing"].return_value = {"auth_value": "old-push-key"}
-        ctx["copy"].return_value = (ctx["dest"], False, True)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -1824,11 +1845,13 @@ class TestInstallHooksOrchestration:
             config_changed=True,
             hooks_diff=_DIFF_REMOVED,
             push_key_changed=True,
+            current_checksum=None,
+            new_checksum=_NEW_CHECKSUM,
         )
 
     def test_test_event_push_key_unchanged(self, ctx, tmp_path):
         ctx["detect_existing"].return_value = {"auth_value": "pk-test"}
-        ctx["copy"].return_value = (ctx["dest"], False, True)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -1839,7 +1862,28 @@ class TestInstallHooksOrchestration:
             config_changed=True,
             hooks_diff=_DIFF_REMOVED,
             push_key_changed=False,
+            current_checksum=None,
+            new_checksum=_NEW_CHECKSUM,
         )
+
+    # ---------------------------------------------------------------
+    # Test event: hooks_script checksums
+    # ---------------------------------------------------------------
+
+    def test_test_event_checksums_first_install(self, ctx, tmp_path):
+        """First install: current_checksum is None, new_checksum is populated."""
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
+        self._call(tmp_path)
+        _, kwargs = ctx["test_event"].call_args
+        assert kwargs["current_checksum"] is None
+        assert kwargs["new_checksum"] == _NEW_CHECKSUM
+
+    def test_test_event_checksums_existing_install(self, ctx, tmp_path):
+        """Existing install: both checksums are populated."""
+        self._call(tmp_path, minted=True, config_exists=True)
+        _, kwargs = ctx["test_event"].call_args
+        assert kwargs["current_checksum"] == _CURRENT_CHECKSUM
+        assert kwargs["new_checksum"] == _NEW_CHECKSUM
 
     # ---------------------------------------------------------------
     # Test event failure: abort, cleanup, revoke
@@ -1850,7 +1894,7 @@ class TestInstallHooksOrchestration:
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
 
-    def test_test_event_failure_revokes_when_minted(self, ctx, tmp_path):
+    def test_test_event_failure_does_not_revoke_in_install_hooks(self, ctx, tmp_path):
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
@@ -1862,21 +1906,21 @@ class TestInstallHooksOrchestration:
         )
 
     def test_test_event_failure_no_revoke_when_not_minted(self, ctx, tmp_path):
-        ctx["copy"].return_value = (ctx["dest"], False, True)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=False, config_exists=True)
         ctx["revoke"].assert_not_called()
 
     def test_test_event_failure_cleans_new_script(self, ctx, tmp_path):
-        ctx["copy"].return_value = (ctx["dest"], False, True)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path)
         ctx["dest"].unlink.assert_called_once_with(missing_ok=True)
 
     def test_test_event_failure_keeps_existing_script(self, ctx, tmp_path):
-        ctx["copy"].return_value = (ctx["dest"], True, False)
+        ctx["copy"].return_value = (ctx["dest"], True, False, _CURRENT_CHECKSUM, _NEW_CHECKSUM)
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
@@ -1934,7 +1978,7 @@ class TestInstallHooksOrchestration:
         assert any("hooks installed" in m for m in self._print_messages(ctx))
 
     def test_status_installed_when_script_updated(self, ctx, tmp_path):
-        ctx["copy"].return_value = (ctx["dest"], True, True)
+        ctx["copy"].return_value = (ctx["dest"], True, True, _CURRENT_CHECKSUM, _NEW_CHECKSUM)
         ctx["write_claude"].return_value = False
         self._call(tmp_path, config_exists=True)
         assert any("hooks installed" in m for m in self._print_messages(ctx))
@@ -1948,6 +1992,57 @@ class TestInstallHooksOrchestration:
         ctx["write_claude"].return_value = False
         self._call(tmp_path, minted=False, config_exists=True)
         assert any("up to date" in m for m in self._print_messages(ctx))
+
+
+# ===================================================================
+# _send_test_event: hooks_script payload
+# ===================================================================
+
+
+class TestSendTestEventHooksScript:
+    """Verify the hooks_script checksum fields in the test event payload."""
+
+    def _capture_payload(self, **kwargs):
+        """Call _send_test_event with a fake script, capture the JSON payload."""
+        import subprocess
+
+        captured = {}
+
+        def fake_run(cmd, *, input, **kw):
+            captured["payload"] = json.loads(input)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with patch("subprocess.run", side_effect=fake_run), patch(f"{_G}.rich"):
+            _send_test_event(
+                "pk-test",
+                "https://api.snyk.io",
+                "claude-code",
+                Path("/fake/script.sh"),
+                **kwargs,
+            )
+        return captured["payload"]
+
+    def test_first_install_only_new_checksum(self):
+        payload = self._capture_payload(
+            first_install=True,
+            new_checksum="abc123",
+        )
+        assert payload["hooks_script"] == {"new_checksum": "abc123"}
+
+    def test_existing_install_both_checksums(self):
+        payload = self._capture_payload(
+            first_install=False,
+            current_checksum="old111",
+            new_checksum="new222",
+        )
+        assert payload["hooks_script"] == {
+            "current_checksum": "old111",
+            "new_checksum": "new222",
+        }
+
+    def test_no_checksums_omits_hooks_script(self):
+        payload = self._capture_payload(first_install=True)
+        assert "hooks_script" not in payload
 
 
 # ===================================================================
@@ -2445,3 +2540,291 @@ class TestUninstallPreservesCustomHooks:
         assert "Stop" not in data["hooks"]
         assert "CustomEvent" in data["hooks"]
         assert data["hooks"]["CustomEvent"] == [_claude_group(OTHER_CMD)]
+
+
+# ===================================================================
+# client="all" support
+# ===================================================================
+
+
+class TestRunInstallAll:
+    """_run_install with client='all' installs all three clients with a single push key."""
+
+    @pytest.fixture(autouse=True)
+    def _all_clients_installed(self, tmp_path):
+        fake_paths = {}
+        for client in ALL_CLIENTS:
+            d = tmp_path / f".{client}"
+            d.mkdir()
+            fake_paths[client] = d
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", fake_paths):
+            yield
+
+    @patch("agent_scan.guard._install_hooks")
+    def test_install_all_calls_install_hooks_for_each_client(self, mock_install, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "provided-pk")
+        args = SimpleNamespace(
+            client="all",
+            url="https://hooks.example.com",
+            tenant_id="tid-1",
+            file=None,
+            managed=False,
+        )
+        _run_install(args)
+        assert mock_install.call_count == len(ALL_CLIENTS)
+        called_clients = [c.args[0] for c in mock_install.call_args_list]
+        assert called_clients == ALL_CLIENTS
+
+    @patch("agent_scan.guard._install_hooks")
+    def test_install_all_reuses_single_push_key(self, mock_install, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "provided-pk")
+        args = SimpleNamespace(
+            client="all",
+            url="https://hooks.example.com",
+            tenant_id="tid-1",
+            file=None,
+            managed=False,
+        )
+        _run_install(args)
+        for call in mock_install.call_args_list:
+            assert call.args[2] == "provided-pk"
+
+    @patch("agent_scan.guard._install_hooks")
+    def test_install_all_headless(self, mock_install, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        monkeypatch.setenv("TENANT_ID", "tid-hl")
+        args = SimpleNamespace(
+            client="all",
+            url="https://hooks.example.com",
+            tenant_id="",
+            file=None,
+            managed=False,
+        )
+        _run_install(args)
+        assert mock_install.call_count == len(ALL_CLIENTS)
+        for call in mock_install.call_args_list:
+            assert call.args[2] == "headless-pk"
+
+    def test_install_all_with_file_override_exits(self, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "provided-pk")
+        args = SimpleNamespace(
+            client="all",
+            url="https://hooks.example.com",
+            tenant_id="tid-1",
+            file="/tmp/override.json",
+            managed=False,
+        )
+        with pytest.raises(SystemExit):
+            _run_install(args)
+
+    @patch("agent_scan.guard._revoke_after_failure")
+    @patch("agent_scan.guard._install_hooks")
+    def test_install_all_partial_failure_does_not_revoke(
+        self, mock_install, mock_revoke, tmp_path, monkeypatch
+    ):
+        """First client succeeds, second raises; a provided push key is never revoked."""
+        monkeypatch.setenv("PUSH_KEY", "provided-pk")
+
+        call_count = 0
+
+        def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return None
+            raise RuntimeError("config write failed")
+
+        mock_install.side_effect = side_effect
+        args = SimpleNamespace(
+            client="all",
+            url="https://hooks.example.com",
+            tenant_id="tid-1",
+            file=None,
+            managed=False,
+        )
+        with pytest.raises(RuntimeError, match="config write failed"):
+            _run_install(args)
+        mock_revoke.assert_not_called()
+
+    @patch("agent_scan.guard._revoke_after_failure")
+    @patch("agent_scan.guard._install_hooks")
+    def test_install_all_first_client_failure_does_not_revoke_provided_key(
+        self, mock_install, mock_revoke, tmp_path, monkeypatch
+    ):
+        """First client fails; _run_install did not mint the key, so it must not revoke it."""
+        monkeypatch.setenv("PUSH_KEY", "provided-pk")
+        mock_install.side_effect = RuntimeError("first client failed")
+        args = SimpleNamespace(
+            client="all",
+            url="https://hooks.example.com",
+            tenant_id="tid-1",
+            file=None,
+            managed=False,
+        )
+        with pytest.raises(RuntimeError, match="first client failed"):
+            _run_install(args)
+        mock_revoke.assert_not_called()
+
+
+class TestRunUninstallAll:
+    """_run_uninstall with client='all' uninstalls all three clients."""
+
+    @patch("agent_scan.guard._uninstall_single_client")
+    def test_uninstall_all_calls_each_client(self, mock_single):
+        args = SimpleNamespace(
+            client="all",
+            file=None,
+            managed=False,
+        )
+        _run_uninstall(args)
+        assert mock_single.call_count == len(ALL_CLIENTS)
+        called_clients = [c.args[0] for c in mock_single.call_args_list]
+        assert called_clients == ALL_CLIENTS
+
+    def test_uninstall_all_with_file_override_exits(self):
+        args = SimpleNamespace(
+            client="all",
+            file="/tmp/override.json",
+            managed=False,
+        )
+        with pytest.raises(SystemExit):
+            _run_uninstall(args)
+
+
+# ===================================================================
+# _is_client_installed: agent presence check
+# ===================================================================
+
+
+class TestIsClientInstalled:
+    def test_installed_when_config_dir_exists(self, tmp_path):
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": tmp_path / ".claude"}):
+            (tmp_path / ".claude").mkdir()
+            assert _is_client_installed("claude") is True
+
+    def test_not_installed_when_config_dir_missing(self, tmp_path):
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": tmp_path / ".claude"}):
+            assert _is_client_installed("claude") is False
+
+    def test_not_installed_when_path_is_file_not_dir(self, tmp_path):
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": tmp_path / ".claude"}):
+            (tmp_path / ".claude").write_text("")
+            assert _is_client_installed("claude") is False
+
+    def test_unknown_client_returns_true(self):
+        assert _is_client_installed("unknown-client") is True
+
+    def test_permission_error_returns_false(self, tmp_path):
+        path = MagicMock()
+        path.is_dir.side_effect = PermissionError("denied")
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": path}):
+            assert _is_client_installed("claude") is False
+
+
+# ===================================================================
+# _run_install: skip clients not installed on machine
+# ===================================================================
+
+
+class TestRunInstallSkipsUninstalledClients:
+    """_run_install should skip hook installation for agents not present on the machine."""
+
+    @staticmethod
+    def _fake_paths(tmp_path, installed_clients):
+        """Build a _CLIENT_INSTALL_PATHS dict where only *installed_clients* have real dirs."""
+        paths = {}
+        for client in ALL_CLIENTS:
+            d = tmp_path / f".{client}"
+            if client in installed_clients:
+                d.mkdir(exist_ok=True)
+            paths[client] = d
+        return paths
+
+    @patch("agent_scan.guard._install_hooks")
+    def test_single_client_not_installed_exits(self, mock_install, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("PUSH_KEY", "provided-pk")
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+            with pytest.raises(SystemExit):
+                _run_install(
+                    SimpleNamespace(
+                        client="claude",
+                        url="https://hooks.example.com",
+                        tenant_id="tid-1",
+                        file=None,
+                        managed=False,
+                    )
+                )
+        mock_install.assert_not_called()
+        out = capsys.readouterr().out
+        assert "not installed" in out.lower()
+
+    @patch("agent_scan.guard._install_hooks")
+    def test_all_clients_none_installed_exits(self, mock_install, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("PUSH_KEY", "provided-pk")
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+            with pytest.raises(SystemExit):
+                _run_install(
+                    SimpleNamespace(
+                        client="all",
+                        url="https://hooks.example.com",
+                        tenant_id="tid-1",
+                        file=None,
+                        managed=False,
+                    )
+                )
+        mock_install.assert_not_called()
+        out = capsys.readouterr().out
+        assert "No installed agents found" in out
+
+    @patch("agent_scan.guard._install_hooks")
+    def test_all_clients_some_installed_skips_missing(self, mock_install, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("PUSH_KEY", "provided-pk")
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ["claude"])):
+            _run_install(
+                SimpleNamespace(
+                    client="all",
+                    url="https://hooks.example.com",
+                    tenant_id="tid-1",
+                    file=None,
+                    managed=False,
+                )
+            )
+        mock_install.assert_called_once()
+        assert mock_install.call_args.args[0] == "claude"
+        out = capsys.readouterr().out
+        assert "Cursor" in out and "not installed" in out.lower()
+        assert "Codex" in out
+
+    @patch("agent_scan.guard._install_hooks")
+    def test_headless_skips_uninstalled_client(self, mock_install, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        monkeypatch.setenv("TENANT_ID", "tid-hl")
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+            with pytest.raises(SystemExit):
+                _run_install(
+                    SimpleNamespace(
+                        client="cursor",
+                        url="https://hooks.example.com",
+                        tenant_id="",
+                        file=None,
+                        managed=False,
+                    )
+                )
+        mock_install.assert_not_called()
+
+    @patch("agent_scan.guard._install_hooks")
+    def test_all_clients_all_installed_installs_all(self, mock_install, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "provided-pk")
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ALL_CLIENTS)):
+            _run_install(
+                SimpleNamespace(
+                    client="all",
+                    url="https://hooks.example.com",
+                    tenant_id="tid-1",
+                    file=None,
+                    managed=False,
+                )
+            )
+        assert mock_install.call_count == len(ALL_CLIENTS)
+        called_clients = [c.args[0] for c in mock_install.call_args_list]
+        assert called_clients == ALL_CLIENTS

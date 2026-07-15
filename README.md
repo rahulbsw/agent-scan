@@ -70,7 +70,7 @@ Agent Scan auto-discovers agents and their capabilities (MCP servers or skills) 
 | OpenClaw | ✗ | ✓ | ✗ | ✓ | ✗ | ✓ |
 | Amp | ✗ | ✓ | ✗ | ✓ | ✗ | ✓ |
 | Kiro | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| OpenCode | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| OpenCode | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Antigravity | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Codex | ✓ | ✓ | ✓ | ✓ | — | — |
 | Amazon Q | ✓ | ✗ | ✓ | ✗ | ✓ (WSL) | ✗ |
@@ -99,7 +99,7 @@ Legend: **✓** detected · **✗** the agent supports this but Agent Scan does 
 | OpenClaw | N/A | N/A | ✓ | ✗ | ✓ † | N/A | ✗ | ✗ |
 | Amp | N/A | ✗ | ✓ | ✗ | ✗ ‡ | ✗ | ✗ | ✗ |
 | Kiro | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| OpenCode | N/A | ✗ | ✗ | ✗ | ✗ | ✗ | N/A | N/A |
+| OpenCode | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N/A | N/A |
 | Antigravity | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Codex | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Amazon Q | N/A | N/A | N/A | ✓ | N/A | ✗ | N/A | N/A |
@@ -150,7 +150,7 @@ Agent Scan operates in two main modes which can be used jointly or separately:
 
 1. **Scan Mode**: The CLI command `agent-scan` scans the current machine for agents and agent components such as skills and MCP servers. Upon completion, it will output a comprehensive report for the user to review.
 
-2. **Managed Mode**: Agent Scan can upload scan results to a configured control server using `--control-server`, `--control-server-H`, and `--control-identifier`. Agent hooks can also forward events to a remote hook server using a pre-provisioned push key.
+2. **Managed Mode**: Agent Scan runs local analysis by default. Managed deployments can opt into explicit remote analysis with `--analysis-mode remote`, `--analysis-url`, and authorization headers, and agent hooks can forward events to a remote hook server using a pre-provisioned push key.
 
 ## How It Works
 
@@ -184,18 +184,6 @@ Remote analysis is optional and explicit. Use `--analysis-mode remote --analysis
 
 Agent Scan does not store or log any usage data, i.e. the contents and results of your MCP tool calls.
 
-#### Control Server Bootstrap
-
-When `--control-server` is configured, Agent Scan sends a startup bootstrap request to the first configured control server before doing any other work. This applies to every command that accepts `--control-server` — `scan` and `inspect` — including the read-only `inspect` command that performs no other network egress on its own. The `guard` command does not bootstrap. If more than one `--control-server` is configured, only the first one receives the bootstrap; the rest receive the eventual scan-result push only.
-
-The request contains an allowlisted host/process fingerprint: Agent Scan version and command, redacted CLI arguments, OS and Python details, hostname, current username, CI/WSL/container flags, shell, terminal, locale, timezone, current working directory, current home directory, executable path, and readable home directories capped at 1000 entries. It does not include `schema_version` or scanned usernames.
-
-Home-directory enumeration mirrors the scan itself: by default the payload only reports the current user's home directory. Passing `--scan-all-users` opts in to enumerating every readable human home directory on the machine (and, on Windows, WSL profile directories) — exactly the set the scan would touch — for inclusion in the bootstrap payload.
-
-Bootstrap failures never abort the command. Timeouts, network errors, HTTP errors, and malformed responses fall back to defaults. The HTTP call uses a 3-second per-attempt timeout and retries up to three times on transient failures (5xx, 408, 429), with a linear backoff of 0s, 1s, and 2s between attempts — so on a flaky network a command can wait up to ~12 seconds at startup (3s + 1s + 3s + 2s + 3s) before falling through to the no-bootstrap path. Definitive 4xx responses and malformed payloads do not retry. Home-directory enumeration may take noticeably longer on Windows with `--scan-all-users` because it can query Windows profiles and WSL homes; the HTTP timeout only applies after the payload has been assembled. Use `--no-bootstrap` to disable this startup request on any command.
-
-> **managed control server required.** Bootstrap is only sent when the configured `--control-server` URL ends in `/agent-scan/push` — the canonical managed endpoint. Self-hosted or custom control-server deployments whose URLs do not match this shape will skip the bootstrap call (a warning is logged) and uploads will not include the `X-Bootstrap-Event-Id` correlation header. Self-hosted deployments should pass `--no-bootstrap` to suppress the warning and make the opt-out explicit.
-
 ## CLI Parameters
 
 Agent Scan provides the following commands:
@@ -210,11 +198,13 @@ These options are available for all commands:
 
 ```
 --storage-file FILE    Path to store scan results and scanner state (default: ~/.agent-scan)
---base-url URL         Base URL for the verification server
+--analysis-url URL     Remote analysis endpoint, used only for explicit remote analysis
+--analysis-mode MODE   Choose auto, local, or remote analysis (default: auto)
+--analysis-provider    Analysis provider for remote analysis selection
+--verification-H       Additional header for the remote analysis endpoint
 --verbose              Enable detailed logging output
 --print-errors         Show error details and tracebacks
 --json                 Output results in JSON format instead of rich text
---no-bootstrap         Disable the startup bootstrap call to the control server
 ```
 
 ### Commands
@@ -244,8 +234,6 @@ Options:
 #### inspect
 
 Print descriptions of tools, prompts, and resources without verification.
-
-When invoked with `--control-server`, `inspect` also sends a one-shot startup bootstrap to that server before reading any config files — see [Control Server Bootstrap](#control-server-bootstrap). Use `--no-bootstrap` to skip it.
 
 ```
 agent-scan inspect [CONFIG_FILE...]
@@ -320,7 +308,7 @@ How to demo MCP security issues?
 }
 ```
 
-3. Run Agent Scan: `uvx --python 3.13 agent-scan@latest scan --full-toxic-flows mcp.json`
+3. Run Agent Scan: `uvx --python 3.13 agent-scan@latest scan mcp.json`
 
 Note: if you place the `mcp.json` configuration filepath elsewhere then adjust the `args` path inside the MCP server configuration to reflect the path to the MCP Server (`demoserver/server.py`) as well as the `uvx` command that runs Agent Scan with the correct filepath to `mcp.json`.
 
@@ -341,7 +329,7 @@ uv run -m src.agent_scan.cli
 
 ## Including Agent Scan results in your own project / registry
 
-If you want to include Agent Scan results in your own project or registry, configure a control server and pass explicit upload headers with `--control-server-H`.
+If you want to include Agent Scan results in your own project or registry, run with `--analysis-mode remote --analysis-url <URL>` and pass explicit authorization headers with `--verification-H`.
 
 ## Documentation
 

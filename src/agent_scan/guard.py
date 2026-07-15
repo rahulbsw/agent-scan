@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import json
 import os
 import re
@@ -30,6 +31,7 @@ IS_WINDOWS = sys.platform == "win32"
 # Constants
 # ---------------------------------------------------------------------------
 
+ALL_CLIENTS = ["claude", "cursor", "codex"]
 DEFAULT_REMOTE_URL = ""
 _DETECTION_RE = re.compile(
     r"PUSH_KEY=.*agent-guard"
@@ -127,11 +129,11 @@ def run_guard(args) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _get_machine_description(client: str) -> str:
-    from agent_scan.upload import get_hostname
+def _get_machine_description(clients: list[str]) -> str:
+    from agent_scan.utils import get_hostname
 
     hostname = get_hostname()
-    label = _client_label(client)
+    label = ", ".join(_client_label(c) for c in clients)
     return f"agent-guard ({hostname}) {label}"
 
 
@@ -183,11 +185,31 @@ def _run_install(args) -> None:
         tenant_id = (os.environ.get("TENANT_ID", "") or "").strip()
     managed: bool = getattr(args, "managed", False)
 
-    label = _client_label(client)
+    clients = ALL_CLIENTS if client == "all" else [client]
+
+    if client == "all" and getattr(args, "file", None):
+        rich.print("[bold red]Error:[/bold red] --file cannot be used with client 'all'.")
+        sys.exit(1)
+
+    # Filter out clients whose agent is not installed on this machine.
+    # Skip this check when --file is explicitly provided (the caller knows where to write).
+    if not getattr(args, "file", None):
+        skipped = [c for c in clients if not _is_client_installed(c)]
+        clients = [c for c in clients if _is_client_installed(c)]
+        for c in skipped:
+            rich.print(
+                f"[yellow]Warning:[/yellow] {_client_label(c)} is not installed on this machine. "
+                f"Skipping hook installation for {_client_label(c)}."
+            )
+        if not clients:
+            rich.print("[bold red]Error:[/bold red] No installed agents found. Nothing to install.")
+            sys.exit(1)
+
     scope = "managed" if managed else "user"
     admin_token = ""
 
     if not headless:
+        label = ", ".join(_client_label(c) for c in clients)
         rich.print(f"Installing [bold magenta]agent hooks[/bold magenta] {scope} hooks for [bold]{label}[/bold]")
         rich.print("[bold red]Error:[/bold red] A push key is required. Pass --push-key or set PUSH_KEY.")
         sys.exit(1)
@@ -196,23 +218,22 @@ def _run_install(args) -> None:
         rich.print("[bold red]Error:[/bold red] A remote hook base URL is required. Pass --url.")
         sys.exit(1)
 
-    hook_client = _hook_client_name(client)
     minted = False
-    config_path = _config_path(client, getattr(args, "file", None), managed=managed)
 
     try:
-        _install_hooks(
-            client,
-            hook_client,
-            push_key,
-            url,
-            config_path,
-            scope,
-            label,
-            minted,
-            tenant_id,
-            admin_token,
-        )
+        for c in clients:
+            _install_hooks(
+                c,
+                _hook_client_name(c),
+                push_key,
+                url,
+                _config_path(c, getattr(args, "file", None), managed=managed),
+                scope,
+                _client_label(c),
+                minted,
+                tenant_id,
+                admin_token,
+            )
     except (SystemExit, KeyboardInterrupt):
         raise
     except BaseException:
@@ -292,7 +313,7 @@ def _install_hooks(
     old_push_key = existing_info.get("auth_value", "") if existing_info else ""
     push_key_changed = bool(old_push_key) and old_push_key != push_key
 
-    dest_path, script_existed, script_updated = _copy_hook_script(client, config_path)
+    dest_path, script_existed, script_updated, current_checksum, new_checksum = _copy_hook_script(config_path)
     command = _build_hook_command(push_key, url, dest_path, hook_client, tenant_id=tenant_id)
     prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(client, command, config_path)
 
@@ -308,6 +329,8 @@ def _install_hooks(
         config_changed=config_changed,
         hooks_diff=hooks_diff,
         push_key_changed=push_key_changed,
+        current_checksum=current_checksum,
+        new_checksum=new_checksum,
     ):
         if not script_existed:
             dest_path.unlink(missing_ok=True)
@@ -587,6 +610,18 @@ def _uninstall_codex_managed(path: Path) -> None:
 def _run_uninstall(args) -> None:
     client: str = args.client
     managed: bool = getattr(args, "managed", False)
+
+    if client == "all" and getattr(args, "file", None):
+        rich.print("[bold red]Error:[/bold red] --file cannot be used with client 'all'.")
+        sys.exit(1)
+
+    clients = ALL_CLIENTS if client == "all" else [client]
+
+    for c in clients:
+        _uninstall_single_client(c, args, managed)
+
+
+def _uninstall_single_client(client: str, args, managed: bool) -> None:
     label = _client_label(client)
     scope = "managed" if managed else "user"
     config_path = _config_path(client, getattr(args, "file", None), managed=managed)
@@ -595,13 +630,7 @@ def _run_uninstall(args) -> None:
     rich.print("[dim]Other hooks in the file will be preserved.[/dim]")
     rich.print()
 
-    # Detect the installed command to extract push key + tenant for revocation
-    if client == "claude":
-        info = _detect_claude_install(config_path)
-    elif client == "cursor":
-        info = _detect_cursor_install(config_path)
-    else:  # codex
-        info = _detect_codex_install(config_path)
+    info = _detect_existing_install(client, config_path)
 
     # Remove hooks from config
     if client == "claude":
@@ -865,6 +894,8 @@ def _send_test_event(
     config_changed: bool = False,
     hooks_diff: dict | None = None,
     push_key_changed: bool = False,
+    current_checksum: str | None = None,
+    new_checksum: str | None = None,
 ) -> bool:
     """Send a test hooksConfigured event by invoking the hook script. Returns True on success."""
     import subprocess
@@ -882,6 +913,13 @@ def _send_test_event(
             payload_dict["added"] = hooks_diff.get("added", {})
             payload_dict["modified"] = hooks_diff.get("modified", {})
             payload_dict["removed"] = hooks_diff.get("removed", {})
+    hooks_script: dict[str, str] = {}
+    if current_checksum is not None:
+        hooks_script["current_checksum"] = current_checksum
+    if new_checksum is not None:
+        hooks_script["new_checksum"] = new_checksum
+    if hooks_script:
+        payload_dict["hooks_script"] = hooks_script
     redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)
 
@@ -1073,6 +1111,24 @@ _CLIENT_LABELS = {"claude": "Claude Code", "cursor": "Cursor", "codex": "Codex"}
 _HOOK_CLIENT_NAMES = {"claude": "claude-code", "cursor": "cursor", "codex": "codex"}
 
 
+_CLIENT_INSTALL_PATHS = {
+    "claude": Path.home() / ".claude",
+    "cursor": Path.home() / ".cursor",
+    "codex": Path.home() / ".codex",
+}
+
+
+def _is_client_installed(client: str) -> bool:
+    """Check whether the agent is installed on this machine by looking for its config directory."""
+    path = _CLIENT_INSTALL_PATHS.get(client)
+    if path is None:
+        return True
+    try:
+        return path.is_dir()
+    except PermissionError:
+        return False
+
+
 def _client_label(client: str) -> str:
     return _CLIENT_LABELS.get(client, client)
 
@@ -1159,10 +1215,11 @@ def _compact_events(events: list[str]) -> str:
     return f"({', '.join(events[:show])} + {len(events) - show} more)"
 
 
-def _copy_hook_script(client: str, config_path: Path) -> tuple[Path, bool, bool]:
+def _copy_hook_script(config_path: Path) -> tuple[Path, bool, bool, str | None, str]:
     """Copy bundled hook script to a hooks/ dir next to the config file.
 
-    Returns (path, already_existed, was_updated).
+    Returns (path, already_existed, was_updated, current_checksum, new_checksum).
+    current_checksum is None when the script did not exist before.
     """
     dest_dir = config_path.parent / "hooks"
 
@@ -1171,19 +1228,24 @@ def _copy_hook_script(client: str, config_path: Path) -> tuple[Path, bool, bool]
     dest = dest_dir / script_name
     existed = dest.exists()
 
+    current_checksum: str | None = None
+    if existed:
+        current_checksum = hashlib.sha256(dest.read_bytes()).hexdigest()
+
     from agent_scan.version import version_info
 
     hook_pkg = importlib_resources.files("agent_scan.hooks")
     source = hook_pkg.joinpath(script_name)
     new_content = source.read_bytes().replace(b"__AGENT_SCAN_VERSION__", version_info.encode())
+    new_checksum = hashlib.sha256(new_content).hexdigest()
 
-    if existed and dest.read_bytes() == new_content:
-        return dest, existed, False
+    if existed and current_checksum == new_checksum:
+        return dest, existed, False, current_checksum, new_checksum
 
     dest.write_bytes(new_content)
     dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{dest}[/dim]")
-    return dest, existed, True
+    return dest, existed, True, current_checksum, new_checksum
 
 
 def _remove_hook_script(client: str, config_path: Path) -> None:

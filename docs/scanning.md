@@ -6,7 +6,7 @@ Agent Scan operates in two main modes which can be used jointly or separately:
 
 1. **Scan Mode**: The CLI command `agent-scan` scans the current machine for agents and agent components such as skills and MCP servers. Upon completion, it will output a comprehensive report for the user to review.
 
-2. **Managed Mode**: Agent Scan can upload scan results to a configured control server, and agent hooks can forward events to a remote hook server using a pre-provisioned push key.
+2. **Managed Mode**: Agent Scan runs local analysis by default. Managed deployments can opt into explicit remote analysis with `--analysis-mode remote`, `--analysis-url`, and authorization headers, and agent hooks can forward events to a remote hook server using a pre-provisioned push key.
 
 ## Quick Start
 
@@ -51,10 +51,12 @@ These options are available for all commands:
 
 ```
 --storage-file FILE    Path to store scan results and scanner state (default: ~/.agent-scan)
---base-url URL         Base URL for the verification server
+--analysis-url URL     Remote analysis endpoint, used only for explicit remote analysis
+--analysis-mode MODE   Choose auto, local, or remote analysis (default: auto)
+--analysis-provider    Analysis provider for remote analysis selection
+--verification-H       Additional header for the remote analysis endpoint
 --verbose              Enable detailed logging output
 --print-errors         Show error details and tracebacks
---full-toxic-flows     Show all tools that could take part in toxic flow. By default only the top 3 are shown.
 --json                 Output results in JSON format instead of rich text
 ```
 

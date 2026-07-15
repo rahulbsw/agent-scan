@@ -3,7 +3,6 @@ import os
 import re
 from itertools import chain
 from typing import Annotated, Any, Literal, TypeAlias
-from uuid import UUID
 
 from lark import Lark
 from mcp.client.auth import TokenStorage
@@ -32,7 +31,6 @@ ErrorCategory = Literal[
     "analysis_error",  # Could not reach/use analysis server
     "skill_scan_error",  # Could not scan skill
     "user_declined",  # User declined to start a stdio server during the consent prompt
-    "skipped_by_runtime_config",  # Server skipped because runtime_config.skip_servers matched
 ]
 
 # Mapping from failure categories to codes
@@ -47,7 +45,6 @@ FAILURE_CATEGORY_TO_CODE: dict[ErrorCategory | None, str] = {
     "analysis_error": "X007",
     None: "X008",
     "user_declined": "X009",
-    "skipped_by_runtime_config": "X010",
 }
 
 logger = logging.getLogger(__name__)
@@ -298,6 +295,84 @@ class PluginMCPConfigFile(MCPConfig):
         self.servers = servers
 
 
+class OpenCodeConfigFile(MCPConfig):
+    """opencode's ``opencode.json`` ``mcp`` block: ``{"mcp": {name: {type:"local"|"remote", ...}}}``.
+
+    Translates opencode's per-entry shape into the canonical
+    ``StdioServer`` / ``RemoteServer`` types via a ``before`` model validator,
+    which lets this model slot into ``_parse_mcp_file``'s format union like the
+    other file-format models. Per-entry rules:
+
+    * ``type: "local"`` -> ``StdioServer`` (``command`` is a single array combining
+      executable + args; ``environment`` maps onto ``env``).
+    * ``type: "remote"`` -> ``RemoteServer`` (``url`` matches; ``type`` is folded
+      onto ``"http"`` since opencode does not distinguish sse vs streamable-http).
+    * Entries whose ``enabled`` field is exactly ``False`` are dropped before
+      typed validation runs — opencode treats unset/``true`` as enabled.
+    """
+
+    model_config = ConfigDict()
+    servers: dict[str, StdioServer | RemoteServer]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _extract_mcp_block(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            raise ValueError("opencode config must be a JSON object")
+        mcp = data.get("mcp")
+        if not isinstance(mcp, dict):
+            raise ValueError("opencode config has no 'mcp' block")
+        servers: dict[str, dict[str, Any]] = {}
+        for name, entry in mcp.items():
+            if not isinstance(entry, dict):
+                raise ValueError(f"opencode mcp entry {name!r} must be an object")
+            if entry.get("enabled") is False:
+                continue
+            entry_type = entry.get("type")
+            if entry_type == "local":
+                command = entry.get("command")
+                if not isinstance(command, list) or not command or not all(isinstance(c, str) for c in command):
+                    raise ValueError(f"opencode mcp entry {name!r} 'command' must be a non-empty string array")
+                servers[name] = {
+                    "command": command[0],
+                    "args": list(command[1:]),
+                    "env": entry.get("environment"),
+                    "type": "stdio",
+                }
+            elif entry_type == "remote":
+                url = entry.get("url")
+                if not isinstance(url, str) or not url:
+                    raise ValueError(f"opencode mcp entry {name!r} 'url' must be a non-empty string")
+                servers[name] = {
+                    "url": url,
+                    "type": "http",
+                    "headers": entry.get("headers") or {},
+                }
+            else:
+                # Unknown ``type`` (e.g. a transport added in a future opencode
+                # release). Skip the single entry rather than sinking the whole
+                # file: dropping parseable siblings on the floor would silently
+                # hide every other MCP server in the same config. The warning
+                # is the audit trail — operators who see it can file a ticket to
+                # add the new transport. Malformed *known* entries (e.g.
+                # ``local`` with no ``command``) still raise above; the
+                # tolerance applies only to entirely unrecognized types.
+                logger.warning(
+                    "opencode mcp entry %r has unrecognized type %r; skipping entry "
+                    "(file an issue if opencode added a new transport)",
+                    name,
+                    entry_type,
+                )
+                continue
+        return {"servers": servers}
+
+    def get_servers(self) -> dict[str, StdioServer | RemoteServer]:
+        return self.servers
+
+    def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
+        self.servers = servers
+
+
 class UnknownMCPConfig(MCPConfig):
     """
     Represents an MCP configuration the scanner cannot interpret.
@@ -537,80 +612,6 @@ class ScanPathResultsCreate(BaseModel):
     scan_metadata: dict[str, Any] | None = None
 
 
-# WARNING: These models must stay in sync with backend/models/base.py in
-# managed backend. There is NO automated enforcement -- if one side
-# changes without the other, bootstrap will silently degrade to defaults
-# (the Pydantic validation on the client side will reject the response).
-# When modifying these models, search managed backend for the matching
-# class names and update both sides in a coordinated PR.
-class HomeDirectoryEntry(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    path: str
-    username: str
-
-
-class ClientInfo(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    name: str
-    version: str
-    command: Literal["scan", "inspect", "guard"]
-    subcommand: str | None = None
-    control_identifier: str | None = None
-    argv_flags: list[str] = Field(default_factory=list)
-
-
-class HostInfo(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    os: str
-    os_release: str
-    os_version: str
-    arch: str
-    processor: str
-    hostname: str
-    current_username: str
-    is_ci: bool
-    is_wsl: bool
-    is_container: bool
-    shell: str | None = None
-    term: str | None = None
-    locale: str | None = None
-    timezone: str | None = None
-
-
-class PathsInfo(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    cwd: str
-    current_home_dir: str
-    home_directories: list[HomeDirectoryEntry]
-    home_directories_truncated: bool
-    executable: str
-
-
-class ClientBootstrapRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    client: ClientInfo
-    host: HostInfo
-
-
-class ClientBootstrapResponse(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    bootstrap_event_id: UUID
-    # TODO: plumbing only — the bootstrap response carries a free-form
-    # runtime_config dict that the client currently stores on
-    # RuntimeConfig.config but does not yet read. Future work will consume
-    # specific keys (feature flags, scan limits, etc.) on the client side;
-    # until then this field is intentionally parsed-and-stashed so the
-    # control server can begin emitting it without a coordinated client
-    # release. See follow-up tracked alongside the bootstrap rollout.
-    runtime_config: dict[str, Any] = Field(default_factory=dict)
-
-
 class TokenAndClientInfo(BaseModel):
     # Use Field(alias=...) for the 'token' because OAuthToken's
     # internal fields (accessToken) are also camelCase.
@@ -709,10 +710,6 @@ class UserDeclinedError(SerializedException):
     category: Literal["user_declined"] = "user_declined"
 
 
-class SkippedByRuntimeConfigError(SerializedException):
-    category: Literal["skipped_by_runtime_config"] = "skipped_by_runtime_config"
-
-
 class AnalysisError(SerializedException):
     category: Literal["analysis_error"] = "analysis_error"
 
@@ -750,13 +747,7 @@ class InspectedExtensions(BaseModel):
     # path, where the scan never starts the subprocess and the absence
     # of a handshake is the documented behavior rather than a failure.
     signature_or_error: (
-        ServerSignature
-        | ServerStartupError
-        | ServerHTTPError
-        | SkillScannError
-        | UserDeclinedError
-        | SkippedByRuntimeConfigError
-        | None
+        ServerSignature | ServerStartupError | ServerHTTPError | SkillScannError | UserDeclinedError | None
     ) = None
 
 

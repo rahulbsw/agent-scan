@@ -2059,7 +2059,7 @@ wheels = [
 
 [[package]]
 name = "agent-scan"
-version = "0.5.12"
+version = "0.5.14"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
