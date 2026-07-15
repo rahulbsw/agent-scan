@@ -16,7 +16,7 @@
 - `0.1.15` Added local-only mode for scanning.
 - `0.1.16` Fix when handling tools or args that contain dots.
 - `0.1.17` Fix single server would throw an error.
-- `0.2.1` `mcp-scan proxy` for live MCP call scanning, [MCP guardrails](https://explorer.invariantlabs.ai/docs/mcp-scan/guardrails/); removed NPM support
+- `0.2.1` `agent-scan proxy` for live MCP call scanning, [MCP guardrails](https://explorer.invariantlabs.ai/docs/agent-scan/guardrails/); removed NPM support
 - `0.2.2` Fix bug with non-serializable exceptions. Move cross reference analysis to server-side. Now supports fuzzy similarity. Support `streamable-http` as transport.
 - `0.2.3` Bug fix. A broken MCP server would compromise the output for all the other servers within the same client.
 - `0.3.0` Add Toxic Flow analysis.
@@ -26,9 +26,9 @@
 - `0.3.4` Various fixes. Scanning of built-in IDE tools.
 - `0.3.5` Improving description of some built-in IDE tools.
 - `0.3.6` Bug fix: tools without description were not working.
-- `0.3.7` Added (experimental) feature to run mcp-scan as a mcp-server.
+- `0.3.7` Added (experimental) feature to run agent-scan as a mcp-server.
 - `0.3.8` Argument Handling fix
-- `0.3.9` Fixed bug in `entity_to_tool`, function exposed only when `mcp-scan` is used as a library
+- `0.3.9` Fixed bug in `entity_to_tool`, function exposed only when `agent-scan` is used as a library
 - `0.3.10` Remove Trio dependency.
 - `0.3.11` Binary builds.
 - `0.3.12` Improved SSL handling; ability to pass headers for API interaction.
@@ -44,7 +44,7 @@
 - `0.3.26` Now pushing agent configurations once for the full machine, not once per agent
 - `0.3.27` Comability updated for new server version and new python version
 - `0.3.28` Support unknown MCP configurations
-- `0.3.29` Add `evo` command to push scan results to Snyk Evo
+- `0.3.29` Add `sync` command to push scan results to remote platform
 - `0.3.30` Add `--skip-ssl-verify` flag to skip SSL cert verification
 - `0.3.31` Add metadata on push and more detailed error logging
 - `0.3.32` Adaptivly support sse urls.
@@ -59,9 +59,9 @@
 - `0.4.1` Add more agent support and rebalance command args earlier.
 - `0.4.2` Add support for HTTP_PROXY and HTTPS_PROXY configuration.
 - `0.4.3` Rename to agent-scan.
-- `0.4.4` Use Snyk API Key for analysis.
+- `0.4.4` Use remote API Key for analysis.
 - `0.4.5` Add possibility to scan agent on multiple users.
-- `0.4.6` Add Snyk CLI support.
+- `0.4.6` Add remote CLI support.
 - `0.4.7` Bug fixes.
 - `0.4.8` Bug fixes.
 - `0.4.9` Bug fixes and improvements.

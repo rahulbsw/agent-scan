@@ -30,7 +30,7 @@
         </tspan><tspan x="143.19666661" style="fill: #b58900">
           ~
         </tspan><tspan x="168.4666666">
-          % uvx mcp-scan@latest
+          % uvx agent-scan@latest
         </tspan>
       </tspan><tspan y="18.666662000000002">
         <tspan dy="1em" x="0.0" class="fa">
@@ -184,7 +184,7 @@
         <tspan dy="1em" x="0.0">
           │
         </tspan><tspan x="67.38666664" class="br" style="fill: #9E9E9E">
-          You can whitelist this tool by running `mcp-scan whitelist tool &quot;add&quot;
+          You can whitelist this tool by running `agent-scan whitelist tool &quot;add&quot;
         </tspan>
       </tspan><tspan y="559.99986">
         <tspan dy="1em" x="0.0">

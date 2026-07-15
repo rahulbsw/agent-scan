@@ -183,11 +183,11 @@
              rx="7" />
         </g>
         <text
-           id="snyk-agent-scan-text"
+           id="agent-scan-text"
            style="font-size:24px;font-family:AndaleMono, 'Andale Mono', 'Courier New', monospace;fill:#303030"
            x="22"
            y="40"
-           aria-label="&gt; snyk-agent-scan">&gt; snyk-agent-scan</text>
+           aria-label="&gt; agent-scan">&gt; agent-scan</text>
       </g>
       <g
          id="Group-4-Copy"

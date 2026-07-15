@@ -1,19 +1,19 @@
-# Scanning with `snyk-agent-scan`
+# Scanning with `agent-scan`
 
 Scan your machine for agents, MCP servers, and skills, and detect security vulnerabilities like prompt injections, tool poisoning, toxic flows, or malware payloads. See the [Issue Code Reference](issue-codes.md) for a full list of detected issues.
 
 Agent Scan operates in two main modes which can be used jointly or separately:
 
-1. **Scan Mode**: The CLI command `snyk-agent-scan` scans the current machine for agents and agent components such as skills and MCP servers. Upon completion, it will output a comprehensive report for the user to review.
+1. **Scan Mode**: The CLI command `agent-scan` scans the current machine for agents and agent components such as skills and MCP servers. Upon completion, it will output a comprehensive report for the user to review.
 
-2. **Background Mode** (MDM, Crowdstrike): Agent Scan scans the machine in regular intervals in the background, and reports the results to a [Snyk Evo](https://evo.ai.snyk.io) instance. This can be used by security teams to monitor the company-wide agent supply chain in a central location. To set this up, please [contact us](https://evo.ai.snyk.io/#contact-us).
+2. **Managed Mode**: Agent Scan can upload scan results to a configured control server, and agent hooks can forward events to a remote hook server using a pre-provisioned push key.
 
 ## Quick Start
 
 To run a full scan of your machine (auto-discovers agents, MCP servers, skills), run:
 
 ```bash
-uvx snyk-agent-scan@latest --skills
+uvx agent-scan@latest --skills
 ```
 
 This will scan for security vulnerabilities in servers, skills, tools, prompts, and resources. It will automatically discover a variety of agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf.
@@ -22,11 +22,11 @@ You can also scan particular configuration files or skills:
 
 ```bash
 # scan mcp configurations
-uvx snyk-agent-scan@latest ~/.vscode/mcp.json
+uvx agent-scan@latest ~/.vscode/mcp.json
 # scan a single agent skill
-uvx snyk-agent-scan@latest  --skills ~/path/to/my/SKILL.md
+uvx agent-scan@latest  --skills ~/path/to/my/SKILL.md
 # scan all claude skills
-uvx snyk-agent-scan@latest  --skills ~/.claude/skills
+uvx agent-scan@latest  --skills ~/.claude/skills
 ```
 
 ## How It Works
@@ -35,14 +35,14 @@ uvx snyk-agent-scan@latest  --skills ~/.claude/skills
 
 Agent Scan searches through your local agent's configuration files to find agents, skills, and MCP servers. For MCP, it connects to servers and retrieves tool descriptions. Omit `--skills` to skip skill analysis.
 
-It then validates the components, both with local checks and by invoking the Agent Scan API. For this, skills, agent applications, tool names, and descriptions are shared with Snyk. By using Agent Scan, you agree to the Snyk [terms of use for Agent Scan](../TERMS.md).
+It then validates components with local checks by default. Remote analysis is optional and explicit through `--analysis-mode remote`, `--analysis-provider`, `--analysis-url`, and `--verification-H`.
 
 Agent Scan does not store or log any usage data, i.e. the contents and results of your MCP tool calls.
 
 ## CLI Parameters
 
 ```
-snyk-agent-scan - Security scanner for agents, MCP servers, and skills
+agent-scan - Security scanner for agents, MCP servers, and skills
 ```
 
 ### Common Options
@@ -50,7 +50,7 @@ snyk-agent-scan - Security scanner for agents, MCP servers, and skills
 These options are available for all commands:
 
 ```
---storage-file FILE    Path to store scan results and scanner state (default: ~/.mcp-scan)
+--storage-file FILE    Path to store scan results and scanner state (default: ~/.agent-scan)
 --base-url URL         Base URL for the verification server
 --verbose              Enable detailed logging output
 --print-errors         Show error details and tracebacks
@@ -65,7 +65,7 @@ These options are available for all commands:
 Scan MCP configurations for security vulnerabilities in tools, prompts, and resources.
 
 ```
-snyk-agent-scan scan [CONFIG_FILE...]
+agent-scan scan [CONFIG_FILE...]
 ```
 
 Options:
@@ -84,7 +84,7 @@ Options:
 Print descriptions of tools, prompts, and resources without verification.
 
 ```
-snyk-agent-scan inspect [CONFIG_FILE...]
+agent-scan inspect [CONFIG_FILE...]
 ```
 
 Options:
@@ -99,18 +99,18 @@ Options:
 Display detailed help information and examples.
 
 ```bash
-snyk-agent-scan help
+agent-scan help
 ```
 
 ### Examples
 
 ```bash
 # Scan all known MCP configs
-snyk-agent-scan
+agent-scan
 
 # Scan a specific config file
-snyk-agent-scan ~/custom/config.json
+agent-scan ~/custom/config.json
 
 # Just inspect tools without verification
-snyk-agent-scan inspect
+agent-scan inspect
 ```

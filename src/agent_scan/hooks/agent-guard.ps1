@@ -1,11 +1,11 @@
 #
-# Thin-client hook handler for forwarding agent hook events to Evo Agent Guard.
+# Thin-client hook handler for forwarding agent hook events to a remote hook server.
 # Supports Claude Code, Cursor, and Codex via the -Client argument.
 #
 # Usage:
-#   powershell -File snyk-agent-guard.ps1 -Client claude-code -PushKey '...' -RemoteUrl 'https://...'
+#   powershell -File agent-guard.ps1 -Client claude-code -PushKey '...' -RemoteUrl 'https://...'
 #
-# Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
+# Reads a JSON payload from stdin and POSTs it (base64-encoded) to the hook endpoint.
 #
 # Requirements: PowerShell 5.1+ (built-in on Windows 10+)
 #
@@ -48,17 +48,17 @@ if (-not $RemoteUrl) {
 
 switch ($Client) {
     "claude-code" {
-        $endpoint = "/hidden/agent-monitor/hooks/claude-code"
+        $endpoint = "/agent-scan/hooks/claude-code"
     }
     "cursor" {
-        $endpoint = "/hidden/agent-monitor/hooks/cursor"
+        $endpoint = "/agent-scan/hooks/cursor"
     }
     "codex" {
-        $endpoint = "/hidden/agent-monitor/hooks/codex"
+        $endpoint = "/agent-scan/hooks/codex"
     }
 }
 
-$userAgent = "snyk/snyk-agent-guard.ps1 Agent Scan v$AGENT_SCAN_VERSION"
+$userAgent = "agent-scan/agent-guard.ps1 Agent Scan v$AGENT_SCAN_VERSION"
 $url = "${RemoteUrl}${endpoint}?version=$VERSION"
 
 # Read payload from stdin as UTF-8 (strips BOM automatically)

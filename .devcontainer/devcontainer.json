@@ -8,15 +8,6 @@
         "ghcr.io/devcontainer-community/devcontainer-features/astral.sh-uv:1": {},
         "ghcr.io/devcontainers/features/node:1": {}
     },
-    // Snyk CLI auth:
-    // map host port 8080 to the local port 8080
-    "ports": [
-        {
-            "host": 8080,
-            "container": 8080
-        }
-    ],
-    // -------------
     // Install OpenCode CLI
     "postCreateCommand": "bash .devcontainer/post-create.sh"
 }

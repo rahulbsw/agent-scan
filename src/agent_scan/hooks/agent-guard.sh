@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# Thin-client hook handler for forwarding agent hook events to Evo Agent Guard.
+# Thin-client hook handler for forwarding agent hook events to a remote hook server.
 # Supports Claude Code, Cursor, and Codex via the --client argument.
 #
 # Usage:
-#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client claude-code
-#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client cursor
-#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client codex
+#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash agent-guard.sh --client claude-code
+#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash agent-guard.sh --client cursor
+#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash agent-guard.sh --client codex
 #
-# Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
+# Reads a JSON payload from stdin and POSTs it (base64-encoded) to the hook endpoint.
 #
 # Requirements: bash, curl, base64, tr
 #
@@ -93,16 +93,16 @@ hook_main() {
   local endpoint user_agent
   case "$client" in
     claude-code)
-      endpoint="/hidden/agent-monitor/hooks/claude-code"
-      user_agent="snyk/snyk-agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
+      endpoint="/agent-scan/hooks/claude-code"
+      user_agent="agent-scan/agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
       ;;
     cursor)
-      endpoint="/hidden/agent-monitor/hooks/cursor"
-      user_agent="snyk/snyk-agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
+      endpoint="/agent-scan/hooks/cursor"
+      user_agent="agent-scan/agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
       ;;
     codex)
-      endpoint="/hidden/agent-monitor/hooks/codex"
-      user_agent="snyk/snyk-agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
+      endpoint="/agent-scan/hooks/codex"
+      user_agent="agent-scan/agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
       ;;
     *) die "Unknown client: ${client}. Expected claude-code, cursor, or codex." ;;
   esac
@@ -133,7 +133,7 @@ hook_main() {
 
   # Execute request
   local resp body http_code marker
-  marker="__SNYK_AGENT_SCAN_HOOK_HTTP_CODE__="
+  marker="__AGENT_SCAN_HOOK_HTTP_CODE__="
 
   local -a curl_args
   curl_args=(

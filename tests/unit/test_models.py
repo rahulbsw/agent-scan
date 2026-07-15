@@ -98,7 +98,7 @@ class TestRemoteServerTransportType:
         # ``ws`` is a documented Claude Code transport, but it is intentionally
         # NOT accepted yet -- emitting it breaks the downstream backend/platform
         # (which validate against {sse, http} only). Re-add it end-to-end via
-        # TODO(ADS-384): https://snyksec.atlassian.net/browse/ADS-384
+        # TODO(ADS-384): ADS-384
         with pytest.raises(ValidationError):
             RemoteServer.model_validate({"url": "wss://mcp.example.com/ws", "type": "ws"})
 

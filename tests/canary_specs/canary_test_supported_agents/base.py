@@ -2,7 +2,7 @@
 
 These are **declarative and runner-agnostic**: a :class:`Scope` says how to drive the real agent binary
 to write a detection scope (a list of :class:`SeedCommand`) and what ``inspect`` must then detect
-(:class:`ExpectedItem`), but it does NOT execute anything. An external executor (the agent-scan-backoffice
+(:class:`ExpectedItem`), but it does NOT execute anything. An external executor (the canary executor
 canary) imports an :class:`AgentCanary`, runs its commands in an isolated home against the real binary,
 runs ``inspect``, and compares. Co-location means the seed recipe + expectation for a scope live in the
 same repo (same PR) as the discoverer method they test, so they cannot drift; ``test_canary_covers_scopes``
@@ -73,7 +73,7 @@ class FixtureFile:
     :class:`SeedCommand`. A committed ``.mcp.json`` fixture and a later ``claude mcp add -s project`` seed
     both write ``<project>/.mcp.json``; fixtures-first lets the CLI *merge* into the committed file
     (both servers detected) instead of the copy clobbering the CLI's write. The companion executor guard
-    is agent-scan-backoffice ``tests/unit/test_canary_dispatch.py``."""
+    is canary executor ``tests/unit/test_canary_dispatch.py``."""
 
     src: str
     dest: str

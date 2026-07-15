@@ -91,7 +91,7 @@ class TestControlServerParsing:
                     "--control-identifier",
                     "id2",
                     "--storage-file",
-                    "~/.mcp-scan",
+                    "~/.agent-scan",
                 ],
                 [
                     ControlServer(url="https://server1.com", headers={}, identifier="user1"),
@@ -186,7 +186,7 @@ class TestCLIArgumentParsing:
     def test_scan_with_multiple_control_servers_parses_correctly(self):
         """Test that multiple control servers are parsed correctly."""
         test_argv = [
-            "mcp-scan",
+            "agent-scan",
             "scan",
             "--control-server",
             "https://server1.com",

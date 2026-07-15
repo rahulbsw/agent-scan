@@ -145,15 +145,15 @@ def test_fixture_scopes_declare_files_and_assert_items_but_run_no_command():
 
 def test_committed_fixtures_are_locatable():
     # Every declared FixtureFile.src must resolve to a real committed path under the package dir — the
-    # same lookup the backoffice executor does (it imports canary_test_supported_agents from the cloned
-    # source tree and resolves src against the package dir). A miss here means the backoffice would copy
+    # same lookup the canary executor executor does (it imports canary_test_supported_agents from the cloned
+    # source tree and resolves src against the package dir). A miss here means the canary executor would copy
     # nothing and the scope would fail MISSING in CI. These fixtures are test support, not shipped in the
     # agent_scan wheel, so this guards the source tree (not a built artifact).
     root = files("canary_test_supported_agents")
     for canary in CANARIES.values():
         for scope in canary.scopes:
             for f in scope.files():
-                # Join segment-by-segment (root.joinpath(*src.split("/"))) the way the backoffice
+                # Join segment-by-segment (root.joinpath(*src.split("/"))) the way the canary executor
                 # executor resolves it, rather than as one slash-bearing string, so the lookup is
                 # identical on Windows.
                 src = root.joinpath(*f.src.split("/"))

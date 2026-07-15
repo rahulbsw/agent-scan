@@ -59,8 +59,8 @@ class _BootstrapServer:
 
 
 def _control_server(url: str) -> ControlServer:
-    if "/mcp-scan/push" not in url:
-        url = f"{url.rstrip('/')}/mcp-scan/push"
+    if "/agent-scan/push" not in url:
+        url = f"{url.rstrip('/')}/agent-scan/push"
     return ControlServer(url=url, headers={"x-client-id": str(uuid4())}, identifier="machine-1")
 
 
@@ -113,7 +113,7 @@ async def test_single_control_server_posts_to_bootstrap_endpoint():
     assert cfg.source == "bootstrap"
     assert cfg.bootstrap_event_id == bootstrap_event_id
     assert len(server.requests) == 1
-    assert server.requests[0]["path"] == "/mcp-scan/client-bootstrap"
+    assert server.requests[0]["path"] == "/agent-scan/client-bootstrap"
 
 
 @pytest.mark.asyncio
@@ -161,14 +161,14 @@ async def test_non_canonical_url_skips_bootstrap(caplog):
 
     assert cfg.source == "default"
     assert server.requests == []
-    assert "does not end in /mcp-scan/push" in caplog.text
+    assert "does not end in /agent-scan/push" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_push_url_is_rewritten_to_sibling_bootstrap_endpoint():
     async with _BootstrapServer() as server:
         await bootstrap_first_control_server(
-            [_control_server(f"{server.url}/hidden/mcp-scan/push?version=2025-08-28")],
+            [_control_server(f"{server.url}/managed/agent-scan/push?version=2025-08-28")],
             command="scan",
             subcommand=None,
             control_identifier="machine-1",
@@ -176,7 +176,7 @@ async def test_push_url_is_rewritten_to_sibling_bootstrap_endpoint():
             no_bootstrap=False,
         )
 
-    assert server.requests[0]["path"] == "/hidden/mcp-scan/client-bootstrap"
+    assert server.requests[0]["path"] == "/managed/agent-scan/client-bootstrap"
     assert server.requests[0]["query_string"] == "version=2025-08-28"
 
 
@@ -376,7 +376,7 @@ async def test_control_server_headers_forwarded_to_bootstrap_request():
     """Custom headers configured on ControlServer (e.g. auth) must be sent on the bootstrap POST."""
     async with _BootstrapServer() as server:
         cs = ControlServer(
-            url=f"{server.url}/mcp-scan/push",
+            url=f"{server.url}/agent-scan/push",
             headers={
                 "x-client-id": "client-abc",
                 "Authorization": "Bearer secret-token",
@@ -433,7 +433,7 @@ async def test_cli_parsed_headers_reach_bootstrap_post_intact():
 
     async with _BootstrapServer() as server:
         cs = ControlServer(
-            url=f"{server.url}/mcp-scan/push",
+            url=f"{server.url}/agent-scan/push",
             headers=parsed,
             identifier="machine-1",
         )
@@ -462,8 +462,8 @@ async def test_cli_parsed_headers_reach_bootstrap_post_intact():
 async def test_caller_supplied_content_type_header_is_not_overwritten():
     async with _BootstrapServer() as server:
         cs = ControlServer(
-            url=f"{server.url}/mcp-scan/push",
-            headers={"x-client-id": "client-abc", "Content-Type": "application/vnd.snyk+json"},
+            url=f"{server.url}/agent-scan/push",
+            headers={"x-client-id": "client-abc", "Content-Type": "application/vnd.agent-scan+json"},
             identifier="machine-1",
         )
         await bootstrap_first_control_server(
@@ -475,7 +475,7 @@ async def test_caller_supplied_content_type_header_is_not_overwritten():
             no_bootstrap=False,
         )
 
-    assert server.requests[0]["headers"]["Content-Type"] == "application/vnd.snyk+json"
+    assert server.requests[0]["headers"]["Content-Type"] == "application/vnd.agent-scan+json"
 
 
 @pytest.mark.asyncio

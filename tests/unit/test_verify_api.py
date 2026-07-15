@@ -285,7 +285,7 @@ class TestAnalyzeMachineHeaders:
         """Test that additional headers are included in the request."""
         scan_paths = [ScanPathResult(path="/test/path")]
         analysis_url = "https://test.example.com/api"
-        additional_headers = {"X-Custom-Header": "custom-value"}
+        additional_headers = {"X-Custom-Header": "custom-value", "Authorization": "Bearer explicit-token"}
 
         with patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class:
             mock_session = MagicMock()
@@ -319,8 +319,7 @@ class TestAnalyzeMachineHeaders:
             headers = call_kwargs["headers"]
 
             assert "X-Custom-Header" in headers
-            # Snyk token is included in the Authorization header
-            assert "Authorization" in headers
+            assert headers["Authorization"] == "Bearer explicit-token"
             assert headers["X-Custom-Header"] == "custom-value"
             assert headers["Content-Type"] == "application/json"
 
@@ -439,7 +438,6 @@ class TestAnalyzeMachineUserInfo:
             patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class,
             patch("agent_scan.verify_api.get_username", return_value="local-user"),
             patch("agent_scan.verify_api.get_hostname", return_value="test-host"),
-            patch.dict(os.environ, {"SNYK_TOKEN": "test-token"}),
         ):
             mock_session_class.return_value = self._make_mock_session()
 
@@ -466,7 +464,6 @@ class TestAnalyzeMachineUserInfo:
             patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class,
             patch("agent_scan.verify_api.get_username", return_value="local-user"),
             patch("agent_scan.verify_api.get_hostname", return_value="test-host"),
-            patch.dict(os.environ, {"SNYK_TOKEN": "test-token"}),
         ):
             mock_session_class.return_value = self._make_mock_session()
 
@@ -492,7 +489,6 @@ class TestAnalyzeMachineUserInfo:
             patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class,
             patch("agent_scan.verify_api.get_username", return_value="local-user"),
             patch("agent_scan.verify_api.get_hostname", return_value="test-host"),
-            patch.dict(os.environ, {"SNYK_TOKEN": "test-token"}),
         ):
             mock_session_class.return_value = self._make_mock_session()
 
@@ -511,20 +507,13 @@ class TestAnalyzeMachineUserInfo:
 
 class TestAnalyzeMachineAuthPrecedence:
     """
-    Auth selection in ``analyze_machine`` follows an explicit precedence:
-
-    1. ``push_key`` (from ``--control-server-H x-client-id:...``) wins
-       — explicit CLI args beat implicit env state, and split-auth
-       (push-key for upload + SNYK_TOKEN for analysis) caused
-       hard-to-debug routing issues for users with both set.
-    2. ``SNYK_TOKEN`` env var.
-    3. ``SNYK_CLI_USE`` env var (proxy mode).
-    4. Otherwise → error.
-
-    These tests pin that exact ordering.
+    Auth selection in ``analyze_machine`` is explicit:
+    push keys are sent as ``X-Push-Key`` and ambient auth environment
+    variables are ignored. Any bearer/API authorization must be supplied via
+    ``additional_headers`` by the caller.
     """
 
-    _ANALYSIS_URL = "https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2025-09-02"
+    _ANALYSIS_URL = "https://hooks.example.com/agent-scan/analysis?version=2025-09-02"
 
     @staticmethod
     def _make_mock_session():
@@ -567,9 +556,7 @@ class TestAnalyzeMachineAuthPrecedence:
         return posted_url, posted_headers
 
     @pytest.mark.asyncio
-    async def test_push_key_only_uses_x_push_key_header_on_unrewritten_url(self):
-        # SNYK_TOKEN must not leak from a real test environment; drop it.
-        os.environ.pop("SNYK_TOKEN", None)
+    async def test_push_key_uses_x_push_key_header_on_unrewritten_url(self):
         posted_url, posted_headers = await self._run(push_key="push-abc", env={})
 
         assert posted_headers.get("X-Push-Key") == "push-abc"
@@ -577,23 +564,20 @@ class TestAnalyzeMachineAuthPrecedence:
         assert posted_url == self._ANALYSIS_URL  # not rewritten
 
     @pytest.mark.asyncio
-    async def test_snyk_token_only_uses_authorization_header_on_cli_url(self):
-        posted_url, posted_headers = await self._run(push_key=None, env={"SNYK_TOKEN": "snyk-tok-123"})
+    async def test_ambient_auth_environment_is_ignored(self):
+        posted_url, posted_headers = await self._run(push_key=None, env={"AGENT_SCAN_AUTH_TOKEN": "remote-tok-123"})
 
-        assert posted_headers.get("Authorization") == "token snyk-tok-123"
+        assert "Authorization" not in posted_headers
         assert "X-Push-Key" not in posted_headers
-        assert "/cli/analysis-machine" in posted_url
+        assert posted_url == self._ANALYSIS_URL
 
     @pytest.mark.asyncio
     async def test_both_present_push_key_wins(self):
         """
-        Load-bearing precedence: when both a push key and SNYK_TOKEN are
-        set, the push key wins. Explicit CLI args beat implicit env state.
-        The analysis URL is *not* rewritten to /cli/analysis-machine and
-        Authorization is *not* set — every byte of the call matches the
-        push-key-only case.
+        Explicit push-key args beat ambient env state. The analysis URL is
+        not rewritten and Authorization is not set.
         """
-        posted_url, posted_headers = await self._run(push_key="push-abc", env={"SNYK_TOKEN": "snyk-tok-123"})
+        posted_url, posted_headers = await self._run(push_key="push-abc", env={"AGENT_SCAN_AUTH_TOKEN": "remote-tok-123"})
 
         assert posted_headers.get("X-Push-Key") == "push-abc"
         assert "Authorization" not in posted_headers
@@ -665,7 +649,7 @@ class TestAnalyzeMachineHttpErrors:
         "status_code, status_message, expected_error_substring",
         [
             (400, "Bad Request", "The analysis server returned an error for your request: 400 - Bad Request"),
-            (401, "Unauthorized", "Unauthorized. To use Agent Scan, set the SNYK_TOKEN environment variable."),
+            (401, "Unauthorized", "Unauthorized. Please check your remote analysis authorization headers or push key."),
             (403, "Forbidden", "The analysis server returned an error for your request: 403 - Forbidden"),
             (
                 413,
@@ -680,7 +664,7 @@ class TestAnalyzeMachineHttpErrors:
             (
                 429,
                 "Too Many Requests",
-                "Daily usage limit reached for the public version of Agent-Scan",
+                "Remote analysis rate limit reached",
             ),
             (500, "Internal Server Error", "Could not reach analysis server: 500 - Internal Server Error"),
             (502, "Bad Gateway", "Could not reach analysis server: 502 - Bad Gateway"),
@@ -721,13 +705,12 @@ class TestAnalyzeMachineHttpErrors:
 
             mock_session_class.return_value = mock_session
 
-            with patch.dict(os.environ, {"SNYK_TOKEN": "test-token"}):
-                result = await analyze_machine(
-                    scan_paths=scan_paths,
-                    analysis_url=analysis_url,
-                    identifier=None,
-                    max_retries=1,
-                )
+            result = await analyze_machine(
+                scan_paths=scan_paths,
+                analysis_url=analysis_url,
+                identifier=None,
+                max_retries=1,
+            )
 
         assert len(result) == 3
         claude, vscode, cursor = result

@@ -1,6 +1,6 @@
 # Small MCP Demo Server
 
-A minimal MCP server built with [fast-mcp](https://github.com/modelcontextprotocol/python-sdk) for testing and demonstrating mcp-scan security detection capabilities.
+A minimal MCP server built with [fast-mcp](https://github.com/modelcontextprotocol/python-sdk) for testing and demonstrating agent-scan security detection capabilities.
 
 ⚠️ **This is a demo server with intentional security vulnerabilities for testing purposes. Do not use in production.**
 
@@ -16,7 +16,7 @@ A minimal MCP server built with [fast-mcp](https://github.com/modelcontextprotoc
 
 ## Security Issues Demonstrated
 
-This server intentionally includes several security anti-patterns that mcp-scan should detect:
+This server intentionally includes several security anti-patterns that agent-scan should detect:
 
 1. **Prompt Injection**: Tool descriptions contain malicious instructions
 2. **Rug Pull**: The `multiply` tool changes behavior after first run

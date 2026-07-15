@@ -20,8 +20,8 @@ from agent_scan.runtime_config import RuntimeConfig, get_runtime_config
 
 
 def _control_server(url: str) -> ControlServer:
-    if "/mcp-scan/push" not in url:
-        url = f"{url.rstrip('/')}/mcp-scan/push"
+    if "/agent-scan/push" not in url:
+        url = f"{url.rstrip('/')}/agent-scan/push"
     return ControlServer(url=url, headers={"x-client-id": str(uuid4())}, identifier="machine-1")
 
 
@@ -64,7 +64,7 @@ async def test_bootstrap_runtime_config_passes_no_bootstrap_true_to_helper():
     """
     fake_helper = AsyncMock(return_value=RuntimeConfig())
     args = Namespace(
-        control_servers=[_control_server("http://example/mcp-scan/push")],
+        control_servers=[_control_server("http://example/agent-scan/push")],
         no_bootstrap=True,
     )
 
@@ -80,7 +80,7 @@ async def test_bootstrap_runtime_config_passes_no_bootstrap_false_when_flag_unse
     """When `args.no_bootstrap` is False, the wrapper forwards False (not True)."""
     fake_helper = AsyncMock(return_value=RuntimeConfig())
     args = Namespace(
-        control_servers=[_control_server("http://example/mcp-scan/push")],
+        control_servers=[_control_server("http://example/agent-scan/push")],
         no_bootstrap=False,
     )
 
@@ -99,7 +99,7 @@ async def test_bootstrap_runtime_config_defaults_no_bootstrap_to_false_when_attr
     default to running bootstrap, matching the documented opt-out semantics.
     """
     fake_helper = AsyncMock(return_value=RuntimeConfig())
-    args = Namespace(control_servers=[_control_server("http://example/mcp-scan/push")])
+    args = Namespace(control_servers=[_control_server("http://example/agent-scan/push")])
     # Deliberately no `no_bootstrap` attribute on args.
 
     with patch("agent_scan.cli.bootstrap_first_control_server", fake_helper):
@@ -142,7 +142,7 @@ async def test_bootstrap_runtime_config_stores_helper_result_in_runtime_config()
         return_value=RuntimeConfig(bootstrap_event_id=expected_event_id, source="bootstrap"),
     )
     args = Namespace(
-        control_servers=[_control_server("http://example/mcp-scan/push")],
+        control_servers=[_control_server("http://example/agent-scan/push")],
         no_bootstrap=False,
     )
 
@@ -164,7 +164,7 @@ async def test_bootstrap_runtime_config_outer_guard_catches_unexpected_exception
         raise RuntimeError("inner guard was bypassed somehow")
 
     args = Namespace(
-        control_servers=[_control_server("http://example/mcp-scan/push")],
+        control_servers=[_control_server("http://example/agent-scan/push")],
         no_bootstrap=False,
     )
 
@@ -185,7 +185,7 @@ async def test_bootstrap_runtime_config_lets_keyboard_interrupt_propagate():
         raise KeyboardInterrupt()
 
     args = Namespace(
-        control_servers=[_control_server("http://example/mcp-scan/push")],
+        control_servers=[_control_server("http://example/agent-scan/push")],
         no_bootstrap=False,
     )
 
@@ -212,7 +212,7 @@ async def test_bootstrap_runtime_config_lets_cancelled_error_propagate():
         raise asyncio.CancelledError()
 
     args = Namespace(
-        control_servers=[_control_server("http://example/mcp-scan/push")],
+        control_servers=[_control_server("http://example/agent-scan/push")],
         no_bootstrap=False,
     )
 
@@ -232,7 +232,7 @@ async def test_bootstrap_runtime_config_forwards_skip_ssl_verify():
     """
     fake_helper = AsyncMock(return_value=RuntimeConfig())
     args = Namespace(
-        control_servers=[_control_server("http://example/mcp-scan/push")],
+        control_servers=[_control_server("http://example/agent-scan/push")],
         no_bootstrap=False,
         skip_ssl_verify=True,
     )
@@ -252,7 +252,7 @@ async def test_bootstrap_runtime_config_defaults_skip_ssl_verify_to_false_when_a
     """
     fake_helper = AsyncMock(return_value=RuntimeConfig())
     args = Namespace(
-        control_servers=[_control_server("http://example/mcp-scan/push")],
+        control_servers=[_control_server("http://example/agent-scan/push")],
         no_bootstrap=False,
     )
     # Deliberately no `skip_ssl_verify` attribute on args.

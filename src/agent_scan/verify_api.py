@@ -7,7 +7,6 @@ import traceback
 
 import aiohttp
 import certifi
-import rich
 
 from agent_scan.models import (
     ScalarToolLabels,
@@ -20,10 +19,6 @@ from agent_scan.utils import get_environment, get_relative_path
 from agent_scan.well_known_clients import get_client_from_path
 
 logger = logging.getLogger(__name__)
-
-
-class SnykTokenError(Exception):
-    """Raised when SNYK_TOKEN is required but not set. Handled at top level to exit without traceback."""
 
 
 def get_hostname() -> str:
@@ -194,29 +189,9 @@ async def analyze_machine(
     if skip_pushing:
         headers["X-Push"] = "skip"
 
-    snyk_token = os.getenv("SNYK_TOKEN")
     if push_key:
         # Enterprise MDM mode with push key
-        # The analysis_url in this case has authentication through push_key (not on api-gateway)
         headers["X-Push-Key"] = push_key
-    elif snyk_token:
-        # CLI mode with SNYK_TOKEN environment variable for authentication
-        analysis_url = analysis_url.replace(
-            "/hidden/mcp-scan/analysis-machine", "/hidden/mcp-scan/cli/analysis-machine"
-        )
-        headers["Authorization"] = f"token {snyk_token}"
-    elif os.getenv("SNYK_CLI_USE", "false").lower() == "true":
-        # Snyk CLI mode with authentication through the proxy
-        # Update the analysis_url to use the use the api gateway authenticated endpoint
-        analysis_url = analysis_url.replace(
-            "/hidden/mcp-scan/analysis-machine", "/hidden/mcp-scan/cli/analysis-machine"
-        )
-    else:
-        rich.print(
-            "[bold red]To use Agent Scan, set the SNYK_TOKEN environment variable. "
-            "To get a token, go to https://app.snyk.io/account (API Token -> KEY -> click to show).[/bold red]"
-        )
-        raise SnykTokenError("SNYK_TOKEN environment variable not set")
 
     for attempt in range(max_retries):
         try:
@@ -257,11 +232,11 @@ async def analyze_machine(
 
         except aiohttp.ClientResponseError as e:
             if e.status == 401:
-                error_text = "Unauthorized. Please check your SNYK_TOKEN environment variable or your push key."
+                error_text = "Unauthorized. Please check your remote analysis authorization headers or push key."
             elif e.status == 413:
                 error_text = "Analysis scope too large (e.g. too many or very large MCP servers/skills). Please consider scanning individual MCP servers or skill directories."
             elif e.status == 429:
-                error_text = "Daily usage limit reached for the public version of Agent-Scan. Unlock higher limits and enterprise features by contacting us at https://evo.ai.snyk.io/#contact-us."
+                error_text = "Remote analysis rate limit reached. Try again later or run with --analysis-mode local."
             elif 400 <= e.status < 500:
                 error_text = f"The analysis server returned an error for your request: {e.status} - {e.message}"
             else:

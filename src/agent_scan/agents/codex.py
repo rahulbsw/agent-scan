@@ -72,7 +72,7 @@ class CodexDiscoverer(AgentDiscoverer):
     TODO(ADS-422): the macOS MDM ``com.openai.codex`` managed-preferences layer DOES
     land on disk (``/Library/Managed Preferences/com.openai.codex.plist``) and its
     ``config_toml_base64`` key carries a full ``[mcp_servers]`` table — currently
-    unscanned. https://snyksec.atlassian.net/browse/ADS-422
+    unscanned.
     """
 
     # MUST match the Codex entry in ``well_known_clients.py`` so the Phase-A /

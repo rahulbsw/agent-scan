@@ -21,7 +21,6 @@ jobs:
     env:
       AGENT_SCAN_ENVIRONMENT: ci
       AGENT_SCAN_CI_HOSTNAME: ${{ secrets.AGENT_SCAN_CI_HOSTNAME }}
-      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
     strategy:
       max-parallel: 1
       matrix:

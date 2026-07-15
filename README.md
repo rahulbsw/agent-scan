@@ -1,6 +1,6 @@
 <p align="center">
   <h1 align="center">
-  Snyk Agent Scan
+  Agent Scan
   </h1>
 </p>
 
@@ -13,14 +13,12 @@
 >
 > The raw output of this CLI — including issue codes, field names, severity labels, and response structure — is experimental and may change without notice between releases. We do not recommend building production workflows that depend on specific CLI output fields or issue codes.
 >
-> If you are an enterprise customer using Snyk to manage agent security risk at scale, the CLI output may not reflect what is sent to and shown in the Evo platform. The underlying integration, discovery, and risk assessment that powers enterprise deployments is stable and supported — any changes will be communicated in line with standard Snyk product practices. Contact your account team for deployment guidance.
-
 > **NEW** Read our [technical report on the emerging threats of the agent skill eco-system](.github/reports/skills-report.pdf) published together with Agent Scan 0.4, which adds support for scanning agent skills.
 
 <p align="center">
-  <a href="https://pypi.python.org/pypi/snyk-agent-scan"><img src="https://img.shields.io/pypi/v/snyk-agent-scan.svg" alt="snyk-agent-scan"/></a>
-  <a href="https://pypi.python.org/pypi/snyk-agent-scan"><img src="https://img.shields.io/pypi/l/snyk-agent-scan.svg" alt="snyk-agent-scan license"/></a>
-  <a href="https://pypi.python.org/pypi/snyk-agent-scan"><img src="https://img.shields.io/pypi/pyversions/snyk-agent-scan.svg" alt="snyk-agent-scan python version requirements"/></a>
+  <a href="https://pypi.python.org/pypi/agent-scan"><img src="https://img.shields.io/pypi/v/agent-scan.svg" alt="agent-scan"/></a>
+  <a href="https://pypi.python.org/pypi/agent-scan"><img src="https://img.shields.io/pypi/l/agent-scan.svg" alt="agent-scan license"/></a>
+  <a href="https://pypi.python.org/pypi/agent-scan"><img src="https://img.shields.io/pypi/pyversions/agent-scan.svg" alt="agent-scan python version requirements"/></a>
 </p>
 
 <div align="center">
@@ -112,39 +110,32 @@ Legend: **✓** detected · **✗** the agent supports this but Agent Scan does 
 
 ## Quick Start
 
-To get started:
-
-1. **Sign up at [Snyk](https://snyk.io)** and get an API token from [https://app.snyk.io/account](https://app.snyk.io/account) (API Token → KEY → click to show).
-2. **Set the token as an environment variable** before running any scan:
-   ```bash
-   export SNYK_TOKEN=your-api-token-here
-   ```
-3. Have [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on your system.
+To get started, have [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on your system. No account or API token is required for the default local scan.
 
 ### Scanning
 
 To run a full scan of your machine (auto-discovers agents, MCP servers, skills), run:
 
 ```bash
-uvx snyk-agent-scan@latest
+uvx agent-scan@latest
 ```
 
 
 This will scan for security vulnerabilities in MCP servers, tools, prompts, and resources. It will automatically discover a variety of agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf.
 
 ```bash
-uvx snyk-agent-scan@latest
+uvx agent-scan@latest
 ```
 
 You can also scan particular MCP configuration files or skills:
 
 ```bash
 # scan a specific mcp configuration
-uvx snyk-agent-scan@latest ~/.vscode/mcp.json
+uvx agent-scan@latest ~/.vscode/mcp.json
 # scan a single agent skill
-uvx snyk-agent-scan@latest ~/path/to/my/SKILL.md
+uvx agent-scan@latest ~/path/to/my/SKILL.md
 # scan all claude skills
-uvx snyk-agent-scan@latest ~/.claude/skills
+uvx agent-scan@latest ~/.claude/skills
 ```
 
 #### Example Run
@@ -157,9 +148,9 @@ Agent Scan is a security scanning tool to both scan and inspect the supply chain
 
 Agent Scan operates in two main modes which can be used jointly or separately:
 
-1. **Scan Mode**: The CLI command `snyk-agent-scan` scans the current machine for agents and agent components such as skills and MCP servers. Upon completion, it will output a comprehensive report for the user to review.
+1. **Scan Mode**: The CLI command `agent-scan` scans the current machine for agents and agent components such as skills and MCP servers. Upon completion, it will output a comprehensive report for the user to review.
 
-2. **Background Mode** (MDM, Crowdstrike). Agent Scan scans the machine in regular intervals in the background, and reports the results to a [Snyk Evo](https://evo.ai.snyk.io) instance. This can be used by security teams to monitor the company-wide agent supply chain in a central location. To set this up, please [contact us](https://evo.ai.snyk.io/#contact-us).
+2. **Managed Mode**: Agent Scan can upload scan results to a configured control server using `--control-server`, `--control-server-H`, and `--control-identifier`. Agent hooks can also forward events to a remote hook server using a pre-provisioned push key.
 
 ## How It Works
 
@@ -187,13 +178,15 @@ For non-interactive environments (e.g., CI/CD pipelines), you must use the `--da
 
 #### Analysis and Validation
 
-Agent Scan validates the components, both with local checks and by invoking the Agent Scan API. For this, skills, agent applications, tool names, and descriptions are shared with Snyk. By using Agent Scan, you agree to the Snyk [terms of use for Agent Scan](./TERMS.md).
+Agent Scan validates components with local checks by default. Local analysis flags high-confidence risks such as suspicious tool descriptions, hidden Unicode, hardcoded or redacted secrets in skills, external download dependencies, untrusted-content exposure, private-data exposure, and destructive capabilities.
+
+Remote analysis is optional and explicit. Use `--analysis-mode remote --analysis-provider snyk --analysis-url <URL>` only when you intentionally want to send scan metadata to a remote analyzer. Supply any required authorization with `--verification-H`.
 
 Agent Scan does not store or log any usage data, i.e. the contents and results of your MCP tool calls.
 
 #### Control Server Bootstrap
 
-When `--control-server` is configured, Agent Scan sends a startup bootstrap request to the first configured control server before doing any other work. This applies to every command that accepts `--control-server` — `scan`, `inspect`, and `evo` — including the read-only `inspect` command that performs no other network egress on its own. The `guard` command does not bootstrap. If more than one `--control-server` is configured, only the first one receives the bootstrap; the rest receive the eventual scan-result push only.
+When `--control-server` is configured, Agent Scan sends a startup bootstrap request to the first configured control server before doing any other work. This applies to every command that accepts `--control-server` — `scan` and `inspect` — including the read-only `inspect` command that performs no other network egress on its own. The `guard` command does not bootstrap. If more than one `--control-server` is configured, only the first one receives the bootstrap; the rest receive the eventual scan-result push only.
 
 The request contains an allowlisted host/process fingerprint: Agent Scan version and command, redacted CLI arguments, OS and Python details, hostname, current username, CI/WSL/container flags, shell, terminal, locale, timezone, current working directory, current home directory, executable path, and readable home directories capped at 1000 entries. It does not include `schema_version` or scanned usernames.
 
@@ -201,14 +194,14 @@ Home-directory enumeration mirrors the scan itself: by default the payload only 
 
 Bootstrap failures never abort the command. Timeouts, network errors, HTTP errors, and malformed responses fall back to defaults. The HTTP call uses a 3-second per-attempt timeout and retries up to three times on transient failures (5xx, 408, 429), with a linear backoff of 0s, 1s, and 2s between attempts — so on a flaky network a command can wait up to ~12 seconds at startup (3s + 1s + 3s + 2s + 3s) before falling through to the no-bootstrap path. Definitive 4xx responses and malformed payloads do not retry. Home-directory enumeration may take noticeably longer on Windows with `--scan-all-users` because it can query Windows profiles and WSL homes; the HTTP timeout only applies after the payload has been assembled. Use `--no-bootstrap` to disable this startup request on any command.
 
-> **Snyk-managed control server required.** Bootstrap is only sent when the configured `--control-server` URL ends in `/mcp-scan/push` — the canonical Snyk-managed endpoint. Self-hosted or custom control-server deployments whose URLs do not match this shape will skip the bootstrap call (a warning is logged) and uploads will not include the `X-Bootstrap-Event-Id` correlation header. Self-hosted deployments should pass `--no-bootstrap` to suppress the warning and make the opt-out explicit.
+> **managed control server required.** Bootstrap is only sent when the configured `--control-server` URL ends in `/agent-scan/push` — the canonical managed endpoint. Self-hosted or custom control-server deployments whose URLs do not match this shape will skip the bootstrap call (a warning is logged) and uploads will not include the `X-Bootstrap-Event-Id` correlation header. Self-hosted deployments should pass `--no-bootstrap` to suppress the warning and make the opt-out explicit.
 
 ## CLI Parameters
 
 Agent Scan provides the following commands:
 
 ```
-snyk-agent-scan - Security scanner for agents, MCP servers, and skills
+agent-scan - Security scanner for agents, MCP servers, and skills
 ```
 
 ### Common Options
@@ -216,7 +209,7 @@ snyk-agent-scan - Security scanner for agents, MCP servers, and skills
 These options are available for all commands:
 
 ```
---storage-file FILE    Path to store scan results and scanner state (default: ~/.mcp-scan)
+--storage-file FILE    Path to store scan results and scanner state (default: ~/.agent-scan)
 --base-url URL         Base URL for the verification server
 --verbose              Enable detailed logging output
 --print-errors         Show error details and tracebacks
@@ -231,7 +224,7 @@ These options are available for all commands:
 Scan MCP configurations for security vulnerabilities in tools, prompts, and resources.
 
 ```
-snyk-agent-scan scan [CONFIG_FILE...]
+agent-scan scan [CONFIG_FILE...]
 ```
 
 Options:
@@ -255,7 +248,7 @@ Print descriptions of tools, prompts, and resources without verification.
 When invoked with `--control-server`, `inspect` also sends a one-shot startup bootstrap to that server before reading any config files — see [Control Server Bootstrap](#control-server-bootstrap). Use `--no-bootstrap` to skip it.
 
 ```
-snyk-agent-scan inspect [CONFIG_FILE...]
+agent-scan inspect [CONFIG_FILE...]
 ```
 
 Options:
@@ -275,35 +268,35 @@ Options:
 Display detailed help information and examples.
 
 ```bash
-snyk-agent-scan help
+agent-scan help
 ```
 
 ### Examples
 
 ```bash
 # Scan all known MCP configs and agent skills
-snyk-agent-scan
+agent-scan
 
 # Scan a specific config file
-snyk-agent-scan ~/custom/config.json
+agent-scan ~/custom/config.json
 
 # Scan a specific skill file
-snyk-agent-scan ~/path/to/my/SKILL.md
+agent-scan ~/path/to/my/SKILL.md
 
 # Scan a directory for skills
-snyk-agent-scan ~/.claude/skills
+agent-scan ~/.claude/skills
 
 # Just inspect tools without verification
-snyk-agent-scan inspect
+agent-scan inspect
 
 # Skip consent prompts and run all servers (ONLY for CI/CD or fully trusted environments)
-snyk-agent-scan --dangerously-run-mcp-servers
+agent-scan --dangerously-run-mcp-servers
 
 # Suppress MCP server stderr output during scanning
-snyk-agent-scan --suppress-mcpserver-io=true
+agent-scan --suppress-mcpserver-io=true
 
 # CI mode (requires --dangerously-run-mcp-servers in non-interactive environments)
-snyk-agent-scan --ci --dangerously-run-mcp-servers
+agent-scan --ci --dangerously-run-mcp-servers
 ```
 
 ## Demo
@@ -327,7 +320,7 @@ How to demo MCP security issues?
 }
 ```
 
-3. Run Agent Scan: `uvx --python 3.13 snyk-agent-scan@latest scan --full-toxic-flows mcp.json`
+3. Run Agent Scan: `uvx --python 3.13 agent-scan@latest scan --full-toxic-flows mcp.json`
 
 Note: if you place the `mcp.json` configuration filepath elsewhere then adjust the `args` path inside the MCP server configuration to reflect the path to the MCP Server (`demoserver/server.py`) as well as the `uvx` command that runs Agent Scan with the correct filepath to `mcp.json`.
 
@@ -348,7 +341,7 @@ uv run -m src.agent_scan.cli
 
 ## Including Agent Scan results in your own project / registry
 
-If you want to include Agent Scan results in your own project or registry, please [reach out](https://evo.ai.snyk.io/#contact-us). There are designated APIs for this purpose. Using the standard Agent Scan API for large scale scanning is considered abuse and will result in your account being blocked.
+If you want to include Agent Scan results in your own project or registry, configure a control server and pass explicit upload headers with `--control-server-H`.
 
 ## Documentation
 
@@ -357,7 +350,7 @@ If you want to include Agent Scan results in your own project or registry, pleas
 
 ## Further Reading
 
-- [Introducing MCP-Scan](https://invariantlabs.ai/blog/introducing-mcp-scan)
+- [Introducing Agent Scan](https://invariantlabs.ai/blog/introducing-agent-scan)
 - [MCP Security Notification Tool Poisoning Attacks](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks)
 - [WhatsApp MCP Exploited](https://invariantlabs.ai/blog/whatsapp-mcp-exploited)
 - [MCP Prompt Injection](https://simonwillison.net/2025/Apr/9/mcp-prompt-injection/)

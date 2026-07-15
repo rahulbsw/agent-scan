@@ -2,6 +2,6 @@
 
 agent-scan no longer accepts external contributions.
 
-In the spirit of transparency to Snyk customers and agent-scan users, we will continue working in public. However, going forward, agent-scan CLI is closed to contributions.
+In the spirit of transparency to Agent Scan users, we will continue working in public. However, going forward, agent-scan CLI is closed to contributions.
 
-Snyk appreciates and extends gratitude to the Snyk community.
+The maintainers appreciate the community's interest and feedback.

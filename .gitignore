@@ -51,8 +51,8 @@ src/agent_scan/todo.md
 npm/package.json
 .cursor/
 
-# Snyk Security Extension - AI Rules (auto-generated)
-.cursor/rules/snyk_rules.mdc
+# External security extension - AI rules (auto-generated)
+.cursor/rules/*_rules.mdc
 .venv-x86_64/
 
 # Coverage reports

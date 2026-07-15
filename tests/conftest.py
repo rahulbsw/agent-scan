@@ -65,7 +65,7 @@ def _reset_runtime_config():
 
 
 def _get_binary_path() -> Path:
-    """Path to the PyInstaller-built mcp-scan binary."""
+    """Path to the PyInstaller-built agent-scan binary."""
     return REPO_ROOT / "dist" / ("agent-scan.exe" if sys.platform == "win32" else "agent-scan")
 
 
@@ -75,7 +75,19 @@ def _build_binary() -> None:
         (["uv", "sync"], "uv sync"),
         (["uv", "pip", "install", "-e", ".[dev]"], "uv pip install -e .[dev]"),
         (
-            ["uv", "run", "pyinstaller", "--onefile", "--name", "mcp-scan", "src/agent_scan/run.py"],
+            [
+                "uv",
+                "run",
+                "pyinstaller",
+                "--onefile",
+                "--name",
+                "agent-scan",
+                "--add-data",
+                "src/agent_scan/hooks:agent_scan/hooks",
+                "--collect-all",
+                "detect_secrets",
+                "src/agent_scan/run.py",
+            ],
             "pyinstaller",
         ),
     ]
@@ -92,6 +104,8 @@ def agent_scan_cmd(request):
         return ["uv", "run", "-m", "src.agent_scan.run"]
     if request.param == "binary":
         binary = _get_binary_path()
+        if not binary.exists():
+            _build_binary()
         return [binary]
     raise ValueError(f"Unknown agent_scan_cmd param: {request.param}")
 
@@ -308,12 +322,12 @@ def remote_server_with_oauth_in_catalog_file(remote_server_with_oauth_in_catalog
 
 @pytest.fixture
 def remote_server_with_oauth_in_catalog_config():
-    """Sample VSCode settings.json with MCP config."""
+    """Sample VSCode settings.json with an unavailable remote MCP config."""
     return """// settings.json
 {
     "mcpServers": {
-        "atlassian": {
-            "url": "https://mcp.atlassian.com/v1/mcp"
+        "unavailable": {
+            "url": "http://127.0.0.1:9/mcp"
         }
     }
 }"""

@@ -37,7 +37,7 @@ from agent_scan.pipelines import (
 )
 from agent_scan.printer import print_scan_result
 from agent_scan.runtime_config import RuntimeConfig, set_runtime_config
-from agent_scan.utils import ensure_unicode_console, get_hostname, get_push_key, parse_headers, suppress_stdout
+from agent_scan.utils import ensure_unicode_console, get_push_key, parse_headers, suppress_stdout
 from agent_scan.version import version_info
 
 # Configure logging to suppress all output by default
@@ -159,16 +159,28 @@ def add_common_arguments(parser):
     parser.add_argument(
         "--storage-file",
         type=str,
-        default="~/.mcp-scan",
+        default="~/.agent-scan",
         help="Path to store scan results and scanner state",
         metavar="FILE",
     )
     parser.add_argument(
         "--analysis-url",
         type=str,
-        default="https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2025-09-02",
-        help="URL endpoint for the verification server",
+        default="",
+        help="Remote analysis endpoint. Only used with --analysis-mode remote or an explicit remote provider.",
         metavar="URL",
+    )
+    parser.add_argument(
+        "--analysis-mode",
+        choices=["auto", "local", "remote"],
+        default="auto",
+        help="Choose local analysis, remote analysis, or auto (default: local unless a push key or remote provider is configured).",
+    )
+    parser.add_argument(
+        "--analysis-provider",
+        choices=["local", "snyk"],
+        default="local",
+        help="Analysis provider to use when --analysis-mode is remote or auto selects remote.",
     )
     parser.add_argument(
         "--verification-H",
@@ -368,8 +380,8 @@ def decide_handshake(args) -> HandshakeDecision:
         scan / None   no        yes            True                False
         scan / None   yes       no             False               False
         scan / None   yes       yes            True                False
-        evo / other   any       no             False               False
-        evo / other   any       yes            True                False
+        other         any       no             False               False
+        other         any       yes            True                False
     """
     command = getattr(args, "command", None)
     dangerously_run_mcp_servers = bool(getattr(args, "dangerously_run_mcp_servers", False))
@@ -388,8 +400,7 @@ def decide_handshake(args) -> HandshakeDecision:
     if is_attended_scan:
         return HandshakeDecision(do_stdio_handshake=True, collect_consent=True)
 
-    # 3. Default - unattended (push-key scan, evo, or any
-    # future subcommand).
+    # 3. Default - unattended (push-key scan or any future subcommand).
     # Safe default — no handshake, no consent.
     return HandshakeDecision(do_stdio_handshake=False, collect_consent=False)
 
@@ -440,7 +451,7 @@ def main():
     program_name = get_invoking_name()
     parser = argparse.ArgumentParser(
         prog=program_name,
-        description="Snyk Agent Scan: Security scanner for Model Context Protocol servers, agents, skills and tools",
+        description="Agent Scan: Security scanner for Model Context Protocol servers, agents, skills and tools",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
@@ -503,12 +514,6 @@ def main():
         description="Display detailed help information and examples.",
     )
 
-    # EVO command
-    evo_parser = subparsers.add_parser("evo", help="Push scan results to Snyk Evo")
-
-    # use the same parser as scan
-    setup_scan_parser(evo_parser)
-
     # GUARD command
     guard_parser = subparsers.add_parser(
         "guard",
@@ -534,15 +539,22 @@ def main():
     guard_install_parser.add_argument(
         "--url",
         type=str,
-        default="https://api.snyk.io",
-        help="Remote hooks base URL (default: https://api.snyk.io)",
+        default="",
+        help="Remote hooks base URL (required for install)",
+    )
+    guard_install_parser.add_argument(
+        "--push-key",
+        type=str,
+        default=None,
+        dest="push_key",
+        help="Push key provisioned by your hook server administrator. Can also be set with PUSH_KEY.",
     )
     guard_install_parser.add_argument(
         "--tenant-id",
         type=str,
         default=None,
         dest="tenant_id",
-        help="Snyk tenant ID (required when minting a push key; not needed if PUSH_KEY is set)",
+        help="Tenant ID to embed in installed hooks when provided",
     )
     guard_install_parser.add_argument(
         "--test",
@@ -605,7 +617,7 @@ def main():
 
     # Display version banner
     if not (hasattr(args, "json") and args.json):
-        rich.print(f"[bold blue]Snyk Agent Scan v{version_info}[/bold blue]\n")
+        rich.print(f"[bold blue]Agent Scan v{version_info}[/bold blue]\n")
 
     # Set up logging if verbose flag is enabled
     do_log = hasattr(args, "verbose") and args.verbose
@@ -621,9 +633,6 @@ def main():
     elif args.command == "scan" or args.command is None:  # default to scan
         asyncio.run(print_scan_inspect(args=args))
         sys.exit(0)
-    elif args.command == "evo":
-        asyncio.run(evo(args))
-        sys.exit(0)
     elif args.command == "guard":
         from agent_scan.guard import run_guard
 
@@ -636,57 +645,9 @@ def main():
         sys.exit(1)
 
 
-async def evo(args):
-    """
-    Pushes the scan results to the Evo API.
-
-    1. Creates a client_id (shared secret)
-    2. Pushes scan results to the Evo API
-    3. Revokes the client_id
-    """
-    from agent_scan.pushkeys import mint_push_key, revoke_push_key
-
-    rich.print(
-        "Go to https://app.snyk.io and select the tenant on the left nav bar. "
-        "Copy the Tenant ID from the URL and paste it here: "
-    )
-    tenant_id = input().strip()
-    rich.print("Paste the Authorization token from https://app.snyk.io/account (API Token -> KEY -> click to show): ")
-    token = input().strip()
-
-    base_url = "https://api.snyk.io"
-    push_scan_url = f"{base_url}/hidden/mcp-scan/push?version=2025-08-28"
-
-    # Mint a push key
-    try:
-        client_id = mint_push_key(base_url, tenant_id, token)
-        rich.print("Client ID created")
-    except RuntimeError as e:
-        rich.print(f"[bold red]Error calling Snyk API[/bold red]: {e}")
-        return
-
-    # Run scan with the push key
-    args.control_servers = [
-        ControlServer(
-            url=push_scan_url,
-            identifier=get_hostname() or None,
-            headers=parse_headers([f"x-client-id:{client_id}"]),
-        )
-    ]
-    await bootstrap_runtime_config(args, command="evo")
-    await run_scan(args, mode="scan")
-
-    # Revoke the push key
-    try:
-        revoke_push_key(base_url, tenant_id, token, client_id)
-        rich.print("Client ID revoked")
-    except RuntimeError as e:
-        rich.print(f"[bold red]Error revoking client_id[/bold red]: {e}")
-
-
 async def bootstrap_runtime_config(
     args,
-    command: Literal["scan", "inspect", "evo", "guard"],
+    command: Literal["scan", "inspect", "guard"],
     subcommand: str | None = None,
 ) -> None:
     # Belt-and-suspenders: bootstrap_first_control_server already swallows all
@@ -779,6 +740,8 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
             additional_headers=parse_headers(args.verification_H),
             max_retries=3,
             skip_ssl_verify=skip_ssl_verify,
+            analysis_mode=getattr(args, "analysis_mode", "auto"),
+            analysis_provider=getattr(args, "analysis_provider", "local"),
         )
         push_args = PushArgs(
             control_servers=control_servers,

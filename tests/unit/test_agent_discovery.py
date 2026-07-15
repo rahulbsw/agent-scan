@@ -98,7 +98,7 @@ def test_claude_code_discoverer_ws_server_sinks_file_pending_ads_384(tmp_path):
     validates as a single unit, one ``ws`` server turns the whole file into
     ``CouldNotParseMCPConfig`` -- losing its valid siblings too. Re-adding ``ws``
     end-to-end (and/or per-server validation so siblings survive) is tracked in
-    TODO(ADS-384): https://snyksec.atlassian.net/browse/ADS-384
+    TODO(ADS-384): ADS-384
     """
     from agent_scan.agents import ClaudeCodeDiscoverer
 

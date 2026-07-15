@@ -1,6 +1,6 @@
 # Issue Code Reference
 
-This is the reference for all issues that can be detected via `snyk-agent-scan`.
+This is the reference for all issues that can be detected via `agent-scan`.
 
 ---
 

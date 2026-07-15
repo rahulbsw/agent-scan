@@ -126,7 +126,7 @@ def collect_consent(
     if declined:
         _stderr_console.print(
             "Note: declined servers will not be started on this machine. "
-            "Agent Scan may still show analysis results for them if Snyk recognizes the "
+            "Agent Scan may still show analysis results for them if the configured analyzer recognizes the "
             "server from prior scans — these results are not based on your "
             "own machine's behavior.\n"
         )

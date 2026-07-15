@@ -1,1 +1,1 @@
-"""Test package for mcp-scan."""
+"""Test package for agent-scan."""

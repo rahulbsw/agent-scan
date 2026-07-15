@@ -12,16 +12,16 @@
             "command": "uv run python",
             "args": ["-c", "'raise Exception(\"Invalid Server\")'"]
         },
-        "Snyk": {
-            "command": "~/Library/Application Support/snyk/vscode-cli/snyk-macos-arm64",
+        "Vendor": {
+            "command": "~/Library/Application Support/vendor/vscode-cli/vendor-macos-arm64",
             "args": [
               "mcp",
               "-t",
               "stdio"
             ],
             "env": {
-              "SNYK_API": "https://api.snyk.io",
-              "TRUSTED_FOLDERS": "~/Documents/snyk/invariant-mcp-scan-backend;~/Documents/personal/probable-spork-web",
+              "AGENT_SCAN_API": "https://hooks.example.com",
+              "TRUSTED_FOLDERS": "~/Documents/vendor/agent-scan-backend;~/Documents/personal/probable-spork-web",
               "IDE_CONFIG_PATH": "Cursor"
             }
         }

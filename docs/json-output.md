@@ -1,11 +1,11 @@
-# JSON Output Reference for `mcp-scan`
+# JSON Output Reference for `agent-scan`
 
-The `mcp-scan` CLI provides a structured JSON output that allows for programmatic verification of skill scans. This is particularly useful for CI/CD pipelines or automated auditing tools.
+The `agent-scan` CLI provides a structured JSON output that allows for programmatic verification of skill scans. This is particularly useful for CI/CD pipelines or automated auditing tools.
 
 To generate this output, run the scan with the `--json` flag:
 
 ```bash
-uvx mcp-scan --skills <path-to-skill-directory> --json
+uvx agent-scan --skills <path-to-skill-directory> --json
 ```
 
 ## JSON Structure Overview
@@ -73,7 +73,7 @@ You can use `jq` to parse the output and determine if a skill passes or fails yo
 To check if there are any critical errors (`E` codes) or execution failures:
 
 ```bash
-uvx mcp-scan --skills ./my-skill --json | jq '
+uvx agent-scan --skills ./my-skill --json | jq '
   [ .[] ] | map(
     select(
       .error != null or
@@ -92,7 +92,7 @@ uvx mcp-scan --skills ./my-skill --json | jq '
 To get a list of "real" issues (ignoring internal warnings `W003`-`W006` and whitelisted items `X002`):
 
 ```bash
-uvx mcp-scan --skills ./my-skill --json | jq '
+uvx agent-scan --skills ./my-skill --json | jq '
   .[] | (.issues // [])[] |
   select(
     .code as $c | ["W003", "W004", "W005", "W006", "X002"] | index($c) | not
@@ -104,7 +104,7 @@ uvx mcp-scan --skills ./my-skill --json | jq '
 A strict check that fails if there are **any** errors or warnings (excluding internal ones), or if the scan itself failed:
 
 ```bash
-uvx mcp-scan --skills ./my-skill --json | jq '
+uvx agent-scan --skills ./my-skill --json | jq '
   [ .[] ] | map(
     select(
       # Check for execution errors (path or server level)
@@ -128,7 +128,7 @@ If the output is `true`, the skill **failed** the check.
 If you need a concise command for scripts or CI/CD pipelines that simply passes (exit 0) or fails (exit 1) based on policy violations:
 
 ```bash
-uvx mcp-scan --skills . --json | jq -e '[.[].issues[].code] - ["W003","W004","W005","W006","X002"] == []' > /dev/null
+uvx agent-scan --skills . --json | jq -e '[.[].issues[].code] - ["W003","W004","W005","W006","X002"] == []' > /dev/null
 ```
 
 ### Why this works:
@@ -140,14 +140,14 @@ uvx mcp-scan --skills . --json | jq -e '[.[].issues[].code] - ["W003","W004","W0
 
 ## Node.js Integration
 
-If you are integrating `mcp-scan` into a Node.js tool, you can use the following pattern to detect failures and policy violations programmatically.
+If you are integrating `agent-scan` into a Node.js tool, you can use the following pattern to detect failures and policy violations programmatically.
 
 ```javascript
 const { execSync } = require('child_process');
 
 function checkSkillSecurity(targetPath) {
   try {
-    const scanOutput = execSync(`uvx mcp-scan@latest --skills ${targetPath} --json`).toString();
+    const scanOutput = execSync(`uvx agent-scan@latest --skills ${targetPath} --json`).toString();
     const scanResult = JSON.parse(scanOutput);
 
     // Internal codes to ignore

@@ -2,13 +2,12 @@ import asyncio
 import sys
 
 from agent_scan.cli import MissingIdentifierError, main
-from agent_scan.verify_api import SnykTokenError
 
 
 def run():
     try:
         asyncio.run(main())
-    except (SnykTokenError, MissingIdentifierError):
+    except MissingIdentifierError:
         sys.exit(1)
 
 

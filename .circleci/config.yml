@@ -1,14 +1,9 @@
 version: 2.1
 
 orbs:
-  prodsec: snyk/prodsec-orb@1
   slack: circleci/slack@4.12.5
 
 parameters:
-  snyk-scan-context:
-    description: CircleCI context that provides SNYK_TOKEN to Snyk security scanning.
-    type: string
-    default: etso_llm
   run-daily-security-scan:
     description: When true, runs the daily security-scans workflow (used by scheduled trigger).
     type: boolean
@@ -19,7 +14,7 @@ commands:
     steps:
       - slack/notify:
           branch_pattern: main
-          channel: mcp-scan-alerting
+          channel: agent-scan-alerting
           event: fail
           custom: |
             {
@@ -79,10 +74,6 @@ commands:
 
 jobs:
   security-scans:
-    parameters:
-      mode:
-        type: string
-        default: auto
     resource_class: small
     docker:
       - image: cimg/python:3.12
@@ -91,29 +82,25 @@ jobs:
       - run:
           name: Update uv
           command: curl -LsSf https://astral.sh/uv/install.sh | sh
-      - prodsec/security_scans:
-          mode: << parameters.mode >>
-          open-source-additional-arguments: --exclude=mcp-builder,slack-gif-creator
-          open-source-scan: medium
-          iac-scan: disabled
+      - run:
+          name: Install project dependencies
+          command: ~/.local/bin/uv sync --all-extras
+      - run:
+          name: Python dependency audit
+          command: ~/.local/bin/uv run --with pip-audit pip-audit --strict
+      - run:
+          name: Secret scan
+          command: ~/.local/bin/uv run detect-secrets scan --all-files --exclude-files '^tests/skills/'
       - notify_slack_on_failure
 
 workflows:
   version: 2
   CICD:
     jobs:
-      - prodsec/secrets-scan:
-          name: Scan repository for secrets
-          context:
-            - snyk-bot-slack
-          channel: mcp-scan-alerting
-          trusted-branch: main
-
       - security-scans:
           name: Security Scans
           context:
-            - << pipeline.parameters.snyk-scan-context >>
-            - snyk-bot-slack
+            - security-alerting
 
 
   daily-security-scan:
@@ -121,7 +108,5 @@ workflows:
     jobs:
       - security-scans:
           name: Daily Security Scans
-          mode: gate
           context:
-            - << pipeline.parameters.snyk-scan-context >>
-            - snyk-bot-slack
+            - security-alerting

@@ -29,7 +29,7 @@ class TestFullScanFlow:
     )
     def test_basic(self, agent_scan_cmd, sample_config_file):
         """Test a basic complete scan workflow from CLI to results. This does not mean that the results are correct or the servers can be run."""
-        # Run mcp-scan with JSON output mode
+        # Run agent-scan with JSON output mode
         result = subprocess.run(
             [*agent_scan_cmd, "scan", "--json", "--dangerously-run-mcp-servers", sample_config_file],
             capture_output=True,
@@ -93,7 +93,7 @@ class TestFullScanFlow:
                 "--dangerously-run-mcp-servers",
                 path,
                 "--analysis-url",
-                "https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2025-09-07",
+                "https://hooks.example.com/agent-scan/analysis?version=2025-09-07",
             ],
             capture_output=True,
             text=True,
@@ -117,16 +117,18 @@ class TestFullScanFlow:
 
         issue_set = {issue["code"] for issue in issues}
 
+        if server_names == ["Weather"]:
+            assert not issue_set
         if "Weather" in server_names:
-            assert "W016" in issue_set
+            assert "W016" not in issue_set
         if "Math" in server_names:
-            assert "W001" in issue_set and "W020" in issue_set
+            assert "W001" in issue_set
 
     @pytest.mark.parametrize("agent_scan_cmd", ["binary"], indirect=True)
     def test_ci_exit_code_with_flag(self, agent_scan_cmd):
         """Math config + analysis yields W001; --ci exits 1."""
         math_config = "tests/mcp_servers/configs_files/math_config.json"
-        analysis_url = "https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2025-09-07"
+        analysis_url = "https://hooks.example.com/agent-scan/analysis?version=2025-09-07"
         base_cmd = [
             *agent_scan_cmd,
             "scan",
@@ -170,14 +172,18 @@ class TestFullScanFlow:
         )
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv"], indirect=True)
-    def test_scan_server_in_catalog(self, agent_scan_cmd, remote_server_with_oauth_in_catalog_file):
-        """Test that scanning a server in the catalog works."""
+    def test_scan_unavailable_remote_server_reports_nonfatal_error(
+        self, agent_scan_cmd, remote_server_with_oauth_in_catalog_file
+    ):
+        """Unavailable remote servers are reported in JSON without failing the whole scan."""
         result = subprocess.run(
             [
                 *agent_scan_cmd,
                 "scan",
                 "--json",
                 "--dangerously-run-mcp-servers",
+                "--server-timeout",
+                "1",
                 remote_server_with_oauth_in_catalog_file,
             ],
             capture_output=True,
@@ -187,9 +193,9 @@ class TestFullScanFlow:
         output = json.loads(result.stdout)
         assert len(output) == 1, "Output should contain exactly one entry for the config file"
         key = posix(remote_server_with_oauth_in_catalog_file)
-        assert output[key]["servers"][0]["signature"] is not None, "Signature should not be None"
+        assert output[key]["servers"][0]["signature"] is None, "Signature should not be present for a failed server"
         assert output[key]["servers"][0]["error"] is not None, json.dumps(output, indent=4)
-        assert output[key]["servers"][0]["error"]["is_failure"] is False, "Error should not be a failure"
+        assert output[key]["servers"][0]["error"]["is_failure"] is True, "Connection failure should be reported"
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     def test_ci_without_dangerous_flag_exits_2(self, agent_scan_cmd):

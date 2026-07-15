@@ -2,6 +2,7 @@ import getpass
 import logging
 import os
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -12,6 +13,7 @@ from agent_scan.inspect import (
     inspect_client,
     inspected_client_to_scan_path_result,
 )
+from agent_scan.local_analysis import analyze_locally
 from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
@@ -44,6 +46,8 @@ class AnalyzeArgs(BaseModel):
     additional_headers: dict | None = None
     max_retries: int = 3
     skip_ssl_verify: bool = False
+    analysis_mode: Literal["auto", "local", "remote"] = "auto"
+    analysis_provider: Literal["local", "snyk"] = "local"
 
 
 class PushArgs(BaseModel):
@@ -198,20 +202,23 @@ async def inspect_analyze_push_pipeline(
     redacted_scan_path_results = [redact_scan_result(rv) for rv in scan_path_results]
 
     scan_context = {"cli_version": push_args.version}
-    # analyze
-    verified_scan_path_results = await analyze_machine(
-        redacted_scan_path_results,
-        analysis_url=analyze_args.analysis_url,
-        identifier=analyze_args.identifier,
-        additional_headers=analyze_args.additional_headers,
-        verbose=verbose,
-        skip_pushing=bool(push_args.control_servers),
-        push_key=get_push_key(push_args.control_servers),
-        max_retries=analyze_args.max_retries,
-        skip_ssl_verify=analyze_args.skip_ssl_verify,
-        scan_context=scan_context,
-        scanned_usernames=scanned_usernames,
-    )
+    push_key = get_push_key(push_args.control_servers)
+    if _use_remote_analysis(analyze_args, push_key):
+        verified_scan_path_results = await analyze_machine(
+            redacted_scan_path_results,
+            analysis_url=analyze_args.analysis_url,
+            identifier=analyze_args.identifier,
+            additional_headers=analyze_args.additional_headers,
+            verbose=verbose,
+            skip_pushing=bool(push_args.control_servers),
+            push_key=push_key,
+            max_retries=analyze_args.max_retries,
+            skip_ssl_verify=analyze_args.skip_ssl_verify,
+            scan_context=scan_context,
+            scanned_usernames=scanned_usernames,
+        )
+    else:
+        verified_scan_path_results = analyze_locally(redacted_scan_path_results)
     # push
     for control_server in push_args.control_servers:
         await upload(
@@ -226,6 +233,14 @@ async def inspect_analyze_push_pipeline(
         )
 
     return verified_scan_path_results
+
+
+def _use_remote_analysis(analyze_args: AnalyzeArgs, push_key: str | None) -> bool:
+    if analyze_args.analysis_mode == "local":
+        return False
+    if analyze_args.analysis_mode == "remote":
+        return True
+    return bool(push_key) or analyze_args.analysis_provider != "local"
 
 
 async def client_to_inspect_from_path(

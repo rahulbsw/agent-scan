@@ -1,6 +1,6 @@
 # Documentation
 
-This is the documentation for [Agent Scan](https://github.com/snyk/agent-scan). For an overview of the project, quick start guide, and features, see the [project README](../README.md).
+This is the documentation for [Agent Scan](https://github.com/agent-scan/agent-scan). For an overview of the project, quick start guide, and features, see the [project README](../README.md).
 
 ## Contents
 

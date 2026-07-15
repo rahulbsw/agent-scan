@@ -1,7 +1,7 @@
 """Executor-interface contract: every ``Scope`` subclass emits well-formed ``SeedCommand``s and
 ``FixtureFile``s.
 
-The backoffice executor (agent-scan-backoffice ``canary.run_canary``) is a *generic interpreter* with two
+The canary executor executor (canary executor ``canary.run_canary``) is a *generic interpreter* with two
 primitives: it calls ``scope.commands(ctx)`` and runs each :class:`~canary_test_supported_agents.base.SeedCommand` as
 a subprocess (reading ``argv`` / ``run_in_project`` / ``timeout`` / ``non_fatal``), and it calls
 ``scope.files()`` and copies each :class:`~canary_test_supported_agents.base.FixtureFile` into the project (reading
@@ -10,7 +10,7 @@ a subprocess (reading ``argv`` / ``run_in_project`` / ``timeout`` / ``non_fatal`
 the executor can run (non-empty string ``argv``, sane flags, positive ``timeout``) and fixtures the executor
 can copy (non-empty *relative* ``src``/``dest``, no ``..`` escape). A new Scope subclass that returns
 malformed commands/files — or that no canary uses — fails HERE, before the executor ever sees it. Companion
-guard on the executor side: agent-scan-backoffice ``tests/unit/test_canary_dispatch.py``.
+guard on the executor side: canary executor ``tests/unit/test_canary_dispatch.py``.
 """
 
 from __future__ import annotations

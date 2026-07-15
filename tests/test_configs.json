@@ -8,7 +8,7 @@
                 "mcp[cli]",
                 "mcp",
                 "run",
-                "/Users/marcomilanta/Documents/invariant/mcp-injection-experiments/whatsapp-takeover.py"
+                "/Users/marcomilanta/Documents/agent-scan/mcp-injection-experiments/whatsapp-takeover.py"
             ],
             "type": "stdio",
             "env": {}
@@ -23,7 +23,7 @@
                 "requests",
                 "mcp",
                 "run",
-                "/Users/marcomilanta/Documents/invariant/mcp-injection-experiments/whatsapp.py"
+                "/Users/marcomilanta/Documents/agent-scan/mcp-injection-experiments/whatsapp.py"
             ],
             "type": "stdio",
             "env": {}

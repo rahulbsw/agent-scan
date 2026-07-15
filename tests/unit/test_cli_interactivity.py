@@ -68,27 +68,22 @@ class TestIsInteractiveRun:
         )
         assert is_interactive_run(args) is True
 
-    def test_evo_without_push_key_in_args_is_interactive(self):
+    def test_guard_without_push_key_in_args_is_interactive(self):
         """
-        At ``main()``-time, ``args.control_servers`` for evo is whatever the
-        user passed (typically empty). The fallthrough then reports the run
-        as interactive, which is correct for the upfront tenant/token
-        prompts. ``evo()`` later mints a push key into
-        ``args.control_servers`` before calling ``run_scan``, which flips
-        the predicate to False at that downstream call site.
+        ``guard`` is not a local scan command, but the generic interactivity
+        predicate still falls through to the push-key check. With no
+        provisioned control server, that path is treated as interactive.
         """
-        assert is_interactive_run(_ns(command="evo")) is True
-        assert is_interactive_run(_ns(command="evo", control_servers=[])) is True
+        assert is_interactive_run(_ns(command="guard")) is True
+        assert is_interactive_run(_ns(command="guard", control_servers=[])) is True
 
-    def test_evo_with_push_key_in_args_is_not_interactive(self):
+    def test_guard_with_push_key_in_args_is_not_interactive(self):
         """
-        Once ``evo()`` has minted and injected a push key into
-        ``args.control_servers``, ``is_interactive_run`` correctly reports
-        False — matching the push-key semantics and ensuring no consent
-        prompt or dangerous-flag warning would fire even if the consent
-        gate's push-key short-circuit were ever removed.
+        A command with an explicit push-key control server is treated as
+        non-interactive by the shared predicate, even if that command is
+        outside the local scan allowlist.
         """
-        args = _ns(command="evo", control_servers=[_control_server_with_push_key()])
+        args = _ns(command="guard", control_servers=[_control_server_with_push_key()])
         assert is_interactive_run(args) is False
 
     def test_scan_without_control_servers_is_interactive(self):
@@ -145,15 +140,12 @@ class TestIsInteractiveRunMatrix:
         ("scan", False, True),
         # scan + push key (CI/MDM): non-interactive upload.
         ("scan", True, False),
-        # evo at ``main()``-time (control_servers empty): interactive — the
-        # user types tenant/token at startup. Push key is only injected by
-        # ``evo()`` before ``run_scan``, so the fallthrough sees no
-        # push-key here.
-        ("evo", False, True),
-        # evo at ``run_scan``-time (push key minted into control_servers
-        # already): fallthrough correctly reports False — matching the
-        # push-key semantics at that downstream call site.
-        ("evo", True, False),
+        # guard with no explicit control server: generic fallthrough sees
+        # no push key and reports interactive.
+        ("guard", False, True),
+        # guard with an explicit push-key control server: generic
+        # fallthrough reports non-interactive.
+        ("guard", True, False),
         # inspect: always interactive (special-case), even if a push key
         # somehow appears in args.
         ("inspect", False, True),
@@ -189,14 +181,14 @@ class TestDecideHandshake:
 
     The function is **allowlist-first**: only commands explicitly
     listed in ``_LOCAL_SCAN_COMMANDS`` (currently ``scan``, ``inspect``,
-    and the ``None`` fallback) may handshake. Anything else — ``evo``,
-    ``guard``, ``help``, or any future command — defaults to no
+    and the ``None`` fallback) may handshake. Anything else — ``guard``,
+    ``help``, or any future command — defaults to no
     handshake, no consent, no warning. ``--dangerously-run-mcp-servers``
     is the universal explicit opt-in override.
 
     The decision combines four dimensions:
 
-    * ``command`` (``scan`` / ``evo`` / ``inspect`` / other)
+    * ``command`` (``scan`` / ``guard`` / ``inspect`` / other)
     * push-key in ``args.control_servers``
     * ``--ci``  (only matters via ``enforce_consent_requirements``,
       not this function)
@@ -284,24 +276,24 @@ class TestDecideHandshake:
         assert decision.do_stdio_handshake is False
         assert decision.collect_consent is False
 
-    # -- evo: outside _LOCAL_SCAN_COMMANDS, same dangerous override -------
+    # -- guard: outside _LOCAL_SCAN_COMMANDS, same dangerous override -------
 
     @pytest.mark.parametrize("ci", [True, False])
     @pytest.mark.parametrize("dangerous", [True, False])
-    def test_evo_handshake_depends_on_dangerous_override(self, ci: bool, dangerous: bool):
+    def test_guard_handshake_depends_on_dangerous_override(self, ci: bool, dangerous: bool):
         """
-        evo is not in the local-scan allowlist (it uploads via a minted
-        push key), so it defaults to no handshake regardless of
-        ``control_servers`` contents. The only thing that flips the
-        handshake decision is ``--dangerously-run-mcp-servers``. As on
-        every other unattended path, consent / warning are silent.
+        guard is not in the local-scan allowlist, so it defaults to no
+        handshake regardless of ``control_servers`` contents. The only thing
+        that flips the handshake decision is
+        ``--dangerously-run-mcp-servers``. As on every other unattended path,
+        consent / warning are silent.
         """
         for control_servers in (
             [],
             [_control_server_with_push_key()],
         ):
             args = _ns(
-                command="evo",
+                command="guard",
                 control_servers=control_servers,
                 ci=ci,
                 dangerously_run_mcp_servers=dangerous,
@@ -411,8 +403,8 @@ class TestDecideHandshake:
         assert decide_handshake(Namespace(command="scan")).do_stdio_handshake is True
         # inspect always handshakes.
         assert decide_handshake(Namespace(command="inspect")).do_stdio_handshake is True
-        # evo is outside the allowlist → safe-default skip.
-        assert decide_handshake(Namespace(command="evo")).do_stdio_handshake is False
+        # guard is outside the allowlist → safe-default skip.
+        assert decide_handshake(Namespace(command="guard")).do_stdio_handshake is False
 
 
 class TestEnforceConsentRequirements:
@@ -481,15 +473,13 @@ class TestEnforceConsentRequirements:
         assert excinfo.value.code == 2
         assert "--ci requires --dangerously-run-mcp-servers" in capsys.readouterr().err
 
-    def test_ci_with_evo_still_requires_dangerous_flag(self, capsys):
+    def test_ci_with_guard_still_requires_dangerous_flag(self, capsys):
         """
-        Same rule for evo: ``--ci`` always requires ``--dangerously``, even
-        though evo is always a push-key run. (Combining ``--ci`` with evo
-        is unusual in practice — evo prompts for tenant+token — but the
-        gate must be consistent across commands so a future CI invocation
-        of evo cannot silently switch behaviour.)
+        Same rule for guard: ``--ci`` always requires ``--dangerously`` so a
+        future CI invocation of a non-scan command cannot silently switch
+        stdio-handshake behaviour.
         """
-        args = _ns(command="evo", ci=True, dangerously_run_mcp_servers=False)
+        args = _ns(command="guard", ci=True, dangerously_run_mcp_servers=False)
         with pytest.raises(SystemExit) as excinfo:
             enforce_consent_requirements(args)
         assert excinfo.value.code == 2
@@ -562,19 +552,14 @@ class TestResolveServerIoDefault:
         resolve_server_io_default(args)
         assert args.suppress_mcpserver_io is True
 
-    def test_unset_on_evo_resolves_to_false(self):
+    def test_unset_on_guard_resolves_to_false(self):
         """
-        ``resolve_server_io_default`` runs in ``main()`` *before* ``evo()``
-        mints a push key, so at this point ``args.control_servers`` is
-        empty and ``is_interactive_run`` returns True via the fallthrough.
-        The default is therefore "stream stderr", which is right for the
-        upfront tenant/token prompts. (Note: stream_stderr is later moot
-        in ``run_scan`` since ``do_stdio_handshake`` returns False on this
-        path → no stdio subprocess ever produces stderr — harmless
-        dead-code path on this
-        run type.)
+        With no explicit push-key control server, the shared interactivity
+        predicate treats guard as interactive. The stderr default follows
+        that predicate even though ``guard`` itself is outside the local
+        scan handshake allowlist.
         """
-        args = _ns(command="evo", suppress_mcpserver_io=None)
+        args = _ns(command="guard", suppress_mcpserver_io=None)
         resolve_server_io_default(args)
         assert args.suppress_mcpserver_io is False
 
@@ -794,11 +779,10 @@ class TestRunScanConsentAndStreamStderrWiring:
         assert "--dangerously-run-mcp-servers is set" not in capsys.readouterr().out
 
     @pytest.mark.asyncio
-    async def test_evo_skips_consent_and_stdio_handshake(self, capsys):
-        """evo is a push-key run: stdio handshakes are skipped and the
-        consent prompt is not shown — there are no stdio subprocesses for
-        the user to allow."""
-        args = self._scan_args(command="evo", control_servers=[_control_server_with_push_key()])
+    async def test_guard_skips_consent_and_stdio_handshake(self, capsys):
+        """guard is outside the local-scan allowlist, so stdio handshakes
+        and the consent prompt are skipped by default."""
+        args = self._scan_args(command="guard", control_servers=[_control_server_with_push_key()])
 
         with (
             patch(
@@ -822,16 +806,16 @@ class TestRunScanConsentAndStreamStderrWiring:
         assert "--dangerously-run-mcp-servers is set" not in capsys.readouterr().out
 
     @pytest.mark.asyncio
-    async def test_evo_with_dangerous_flag_handshakes_silently(self, capsys):
+    async def test_guard_with_dangerous_flag_handshakes_silently(self, capsys):
         """
-        evo + ``--dangerously-run-mcp-servers`` → do_stdio_handshake
+        guard + ``--dangerously-run-mcp-servers`` → do_stdio_handshake
         becomes True (the flag is the universal explicit opt-in for
         stdio subprocesses). No consent prompt or dangerous-flag warning
-        fires because evo's push-key state makes the run non-interactive
-        at the consent gate.
+        fires when the fixture includes a push-key control server, making the
+        run non-interactive at the consent gate.
         """
         args = self._scan_args(
-            command="evo",
+            command="guard",
             control_servers=[_control_server_with_push_key()],
             dangerously_run_mcp_servers=True,
             suppress_mcpserver_io=False,
@@ -859,9 +843,9 @@ class TestRunScanConsentAndStreamStderrWiring:
         assert "--dangerously-run-mcp-servers is set" not in out
 
     @pytest.mark.asyncio
-    async def test_evo_preserves_explicit_suppress_io(self):
+    async def test_guard_preserves_explicit_suppress_io(self):
         """
-        evo overlaps the two predicates (interactive + push-key). Even
+        Guard can be represented with explicit push-key fixture data. Even
         though the suppress_io flag has no practical effect when stdio
         handshakes are skipped, an explicit user choice must still be
         preserved verbatim — this guards the
@@ -869,12 +853,12 @@ class TestRunScanConsentAndStreamStderrWiring:
         accidentally re-resolved based on the wrong predicate.
         """
         args_true = self._scan_args(
-            command="evo",
+            command="guard",
             control_servers=[_control_server_with_push_key()],
             suppress_mcpserver_io=True,
         )
         args_false = self._scan_args(
-            command="evo",
+            command="guard",
             control_servers=[_control_server_with_push_key()],
             suppress_mcpserver_io=False,
         )
@@ -973,10 +957,9 @@ class TestStdioHandshakeInvariants:
     * ``inspect`` — *never* runs with a push key. A push key in args is
       ignored. Stdio handshakes always happen, and consent is always
       collected (no upload step exists for the push key to govern).
-    * ``evo`` — *always* a push-key run (``evo()`` mints one). Stdio
-      handshakes are skipped on this path *unless* the explicit
-      ``--ci --dangerously-run-mcp-servers`` override is set, in which
-      case they happen.
+    * ``guard`` — outside the local-scan allowlist. Stdio handshakes are
+      skipped on this path unless the explicit
+      ``--dangerously-run-mcp-servers`` override is set.
     * ``scan`` + push-key — stdio handshakes are skipped by default. The
       same ``--ci --dangerously-run-mcp-servers`` override re-enables
       them. ``--json`` alone has no effect.
@@ -1052,22 +1035,23 @@ class TestStdioHandshakeInvariants:
         assert kwargs["do_stdio_handshake"] is True
         assert kwargs["declined_servers"] == declined
 
-    # -- evo invariants ----------------------------------------------------
+    # -- guard invariants ----------------------------------------------------
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("dangerous", [True, False])
     @pytest.mark.parametrize("ci", [True, False])
     @pytest.mark.parametrize("json_flag", [True, False])
-    async def test_evo_stdio_handshake_skip_depends_on_dangerous_override(
+    async def test_guard_stdio_handshake_skip_depends_on_dangerous_override(
         self, dangerous: bool, ci: bool, json_flag: bool
     ):
         """
-        evo skips stdio handshakes by default (push-key path). The
-        exception is ``--dangerously-run-mcp-servers``, which re-enables
-        handshakes. ``--ci`` and ``--json`` are orthogonal.
+        guard skips stdio handshakes by default because it is outside the
+        local-scan allowlist. The exception is
+        ``--dangerously-run-mcp-servers``, which re-enables handshakes.
+        ``--ci`` and ``--json`` are orthogonal.
         """
         args = self._scan_args(
-            command="evo",
+            command="guard",
             control_servers=[_control_server_with_push_key()],
             ci=ci,
             json=json_flag,
@@ -1145,7 +1129,7 @@ class TestStdioHandshakeInvariants:
         ):
             await run_scan(args, mode="scan")
 
-        # Same reasoning as the evo test above: push-key path is always
+        # Same reasoning as the guard test above: this non-scan path is
         # unattended, so consent is never collected regardless of the
         # handshake outcome.
         mock_consent.assert_not_called()
@@ -1217,13 +1201,12 @@ class TestStdioHandshakeInvariants:
         assert "--ci requires --dangerously-run-mcp-servers" in capsys.readouterr().err
 
     @pytest.mark.parametrize("json_flag", [True, False])
-    def test_enforce_consent_requirements_rejects_ci_plus_evo_without_dangerous(self, json_flag: bool, capsys):
+    def test_enforce_consent_requirements_rejects_ci_plus_guard_without_dangerous(self, json_flag: bool, capsys):
         """
-        Same rule for evo, which is always a push-key run: ``--ci`` still
-        demands ``--dangerously``.
+        Same rule for guard: ``--ci`` still demands ``--dangerously``.
         """
         args = _ns(
-            command="evo",
+            command="guard",
             ci=True,
             json=json_flag,
             dangerously_run_mcp_servers=False,
@@ -1357,15 +1340,15 @@ class TestStdioHandshakeInvariants:
         assert mock_pipeline.call_args.kwargs["do_stdio_handshake"] is False
 
     @pytest.mark.asyncio
-    async def test_evo_ci_dangerous_overrides_stdio_skip(self):
+    async def test_guard_ci_dangerous_overrides_stdio_skip(self):
         """
-        The override applies to evo too: ``evo --ci --dangerously`` runs
-        stdio handshakes despite evo always being a push-key path. As
-        with the scan case, the override is actually driven by
+        The override applies to guard too: ``guard --ci --dangerously`` runs
+        stdio handshakes despite guard being outside the local-scan
+        allowlist. As with the scan case, the override is actually driven by
         ``--dangerously`` alone.
         """
         args = self._scan_args(
-            command="evo",
+            command="guard",
             control_servers=[_control_server_with_push_key()],
             ci=True,
             dangerously_run_mcp_servers=True,
@@ -1390,12 +1373,12 @@ class TestStdioHandshakeInvariants:
         assert mock_pipeline.call_args.kwargs["do_stdio_handshake"] is True
 
     @pytest.mark.asyncio
-    async def test_evo_dangerous_alone_overrides_stdio_skip(self):
-        """Symmetric to the scan case: ``evo --dangerously`` (no
-        ``--ci``) also overrides the push-key stdio skip. The override
+    async def test_guard_dangerous_alone_overrides_stdio_skip(self):
+        """Symmetric to the scan case: ``guard --dangerously`` (no
+        ``--ci``) also overrides the default stdio skip. The override
         is the dangerous flag, not the pair."""
         args = self._scan_args(
-            command="evo",
+            command="guard",
             control_servers=[_control_server_with_push_key()],
             ci=False,
             dangerously_run_mcp_servers=True,

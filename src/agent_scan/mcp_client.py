@@ -55,7 +55,7 @@ async def streamablehttp_client_without_session(
         oauth_client_provider = OAuthClientProvider(
             server_url=token.mcp_server_url,
             client_metadata=OAuthClientMetadata(
-                client_name="mcp-scan",
+                client_name="agent-scan",
                 grant_types=["authorization_code", "refresh_token"],
                 response_types=["code"],
                 redirect_uris=["http://localhost:3030/callback"],

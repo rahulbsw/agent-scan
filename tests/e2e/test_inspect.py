@@ -50,18 +50,18 @@ class TestInspect:
         [
             (
                 json.dumps(
-                    {"mcp": {"servers": {"http_server": {"url": "http://www.mcp-scan.com/mcp", "type": "http"}}}}
+                    {"mcp": {"servers": {"http_server": {"url": "http://agent-scan.example.com/mcp", "type": "http"}}}}
                 ),
                 "http",
             ),
             (
                 json.dumps(
-                    {"mcp": {"servers": {"http_server": {"url": "http://www.mcp-scan.com/sse", "type": "sse"}}}}
+                    {"mcp": {"servers": {"http_server": {"url": "http://agent-scan.example.com/sse", "type": "sse"}}}}
                 ),
                 "sse",
             ),
             (
-                json.dumps({"mcp": {"servers": {"http_server": {"url": "http://www.mcp-scan.com/mcp"}}}}),
+                json.dumps({"mcp": {"servers": {"http_server": {"url": "http://agent-scan.example.com/mcp"}}}}),
                 "http",
             ),  # default to http
         ],

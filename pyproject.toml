@@ -1,5 +1,5 @@
 [project]
-name = "snyk-agent-scan"
+name = "agent-scan"
 version = "0.5.12"
 description = "Agent supply chain security scanner."
 readme = "README.md"
@@ -39,7 +39,7 @@ override-dependencies = [
 ]
 
 [project.scripts]
-snyk-agent-scan = "agent_scan.run:run"
+agent-scan = "agent_scan.run:run"
 
 [build-system]
 requires = ["hatchling"]
@@ -64,7 +64,7 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Put ONLY the canary spec root on sys.path so the (unshipped) live-test specs import as a top-level
-# `canary_test_supported_agents` package — the same name the agent-scan-backoffice executor imports them
+# `canary_test_supported_agents` package — the same name the canary executor executor imports them
 # under (it clones this repo and runs with PYTHONPATH=<clone>/tests/canary_specs). A dedicated root that
 # contains just that package keeps the import name identical on both sides WITHOUT leaking the other
 # tests/ subdirs (unit, e2e, skills, mcp_servers, ...) onto sys.path. The specs deliberately live under

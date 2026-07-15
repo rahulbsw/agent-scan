@@ -25,7 +25,7 @@ def _push_key_scan_args(**overrides) -> Namespace:
                 identifier="some-machine-id-dh7g62dyug7d",
             )
         ],
-        "analysis_url": "https://some.analysis.endpoint.com/hidden/mcp-scan/analysis-machine?version=2025-09-02",
+        "analysis_url": "https://some.analysis.endpoint.com/agent-scan/analysis?version=2025-09-02",
         "verification_H": None,
         "skip_ssl_verify": True,
         "verbose": False,

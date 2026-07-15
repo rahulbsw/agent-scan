@@ -1,4 +1,4 @@
-"""Push key minting and revocation for EVO."""
+"""Push key minting and revocation helpers for remote hook servers."""
 
 from __future__ import annotations
 
@@ -16,21 +16,17 @@ PLATFORM_API_VERSION = "2025-08-28"
 
 
 class GuardEnabledAccessDeniedError(Exception):
-    """GET /hidden/tenants/{id}/guard-enabled returned HTTP 403 (forbidden for this principal)."""
+    """The tenant hook-status endpoint returned HTTP 403 for this principal."""
 
 
 def _build_push_key_url(base_url: str, tenant_id: str) -> str:
     base = base_url.rstrip("/")
-    if "/hidden" not in base:
-        base += "/hidden"
-    return f"{base}/tenants/{tenant_id}/mcp-scan/push-key?version={PLATFORM_API_VERSION}"
+    return f"{base}/tenants/{tenant_id}/agent-scan/push-key?version={PLATFORM_API_VERSION}"
 
 
 def _build_guard_enabled_url(base_url: str, tenant_id: str) -> str:
     base = base_url.rstrip("/")
-    if "/hidden" not in base:
-        base += "/hidden"
-    return f"{base}/tenants/{tenant_id}/agent-monitor/guard-enabled?version={HOOK_VERSION}"
+    return f"{base}/tenants/{tenant_id}/agent-scan/hooks-enabled?version={HOOK_VERSION}"
 
 
 def _is_localhost(url: str) -> bool:
@@ -41,10 +37,10 @@ def _is_localhost(url: str) -> bool:
 def mint_push_key(
     base_url: str,
     tenant_id: str,
-    snyk_token: str,
+    admin_token: str,
     description: str | None = None,
 ) -> str:
-    """Mint a new push key via the Snyk Platform API.
+    """Mint a new push key via a remote hook platform API.
 
     Returns the client_id (push key) string.
     Raises RuntimeError on failure.
@@ -55,8 +51,8 @@ def mint_push_key(
 
     req = Request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
-    if snyk_token and not _is_localhost(base_url):
-        req.add_header("Authorization", f"token {snyk_token}")
+    if admin_token and not _is_localhost(base_url):
+        req.add_header("Authorization", f"token {admin_token}")
 
     try:
         with urlopen(req, timeout=15) as resp:
@@ -73,19 +69,18 @@ def mint_push_key(
     return client_id
 
 
-def fetch_guard_enabled(base_url: str, tenant_id: str, snyk_token: str) -> bool:
-    """Query agent-monitor: whether Agent Guard (observe-preview) is enabled for the tenant.
+def fetch_guard_enabled(base_url: str, tenant_id: str, admin_token: str) -> bool:
+    """Query whether agent hooks are enabled for the tenant.
 
-    GET /hidden/tenants/{tenant_id}/guard-enabled — same base URL as push-key and hooks
-    (environment-specific, e.g. https://api.snyk.io).
+    Uses the same base URL as push-key and hook-event APIs.
 
     Returns True if ``enabled`` is true in the JSON body; False if explicitly disabled.
     Raises RuntimeError on HTTP errors or unexpected response shape.
     """
     url = _build_guard_enabled_url(base_url, tenant_id)
     req = Request(url, method="GET")
-    if snyk_token and not _is_localhost(base_url):
-        req.add_header("Authorization", f"token {snyk_token}")
+    if admin_token and not _is_localhost(base_url):
+        req.add_header("Authorization", f"token {admin_token}")
     try:
         with urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
@@ -109,10 +104,10 @@ def fetch_guard_enabled(base_url: str, tenant_id: str, snyk_token: str) -> bool:
 def revoke_push_key(
     base_url: str,
     tenant_id: str,
-    snyk_token: str,
+    admin_token: str,
     client_id: str,
 ) -> None:
-    """Revoke a push key via the Snyk Platform API.
+    """Revoke a push key via a remote hook platform API.
 
     Raises RuntimeError on failure.
     """
@@ -121,8 +116,8 @@ def revoke_push_key(
     req = Request(url, method="DELETE")
     req.add_header("Content-Type", "application/json")
     req.add_header("x-client-id", client_id)
-    if snyk_token and not _is_localhost(base_url):
-        req.add_header("Authorization", f"token {snyk_token}")
+    if admin_token and not _is_localhost(base_url):
+        req.add_header("Authorization", f"token {admin_token}")
 
     try:
         with urlopen(req, timeout=15) as resp:

@@ -518,7 +518,7 @@ class TestRedactData:
             re.compile(rf"-PushKey\s+'({uuid_re})'", re.IGNORECASE),
         ]
         push_key = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-        command = f"PUSH_KEY='{push_key}' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash /path/to/script.sh --client claude-code"
+        command = f"PUSH_KEY='{push_key}' REMOTE_HOOKS_BASE_URL='https://hooks.example.com' bash /path/to/script.sh --client claude-code"
         data = {
             "hook_event_name": "hooksConfigured",
             "session_id": "hooks-setup",
@@ -539,7 +539,7 @@ class TestRedactData:
         assert push_key not in str(data)
         assert "**REDACTED**" in data["modified"]["PreToolUse"]["expected_value"][0]["hooks"][0]["command"]
         assert (
-            "REMOTE_HOOKS_BASE_URL='https://api.snyk.io'"
+            "REMOTE_HOOKS_BASE_URL='https://hooks.example.com'"
             in data["modified"]["PreToolUse"]["expected_value"][0]["hooks"][0]["command"]
         )
         assert data["session_id"] == "hooks-setup"
@@ -1169,9 +1169,9 @@ class TestRedactPushKeys:
         assert "**REDACTED**" in result
 
     def test_surrounding_text_preserved(self):
-        text = f"REMOTE_URL='https://api.snyk.io' PUSH_KEY='{self.VALID_UUID}' bash script.sh --client claude-code"
+        text = f"REMOTE_URL='https://hooks.example.com' PUSH_KEY='{self.VALID_UUID}' bash script.sh --client claude-code"
         result = redact_push_keys(text)
-        assert "REMOTE_URL='https://api.snyk.io'" in result
+        assert "REMOTE_URL='https://hooks.example.com'" in result
         assert "bash script.sh --client claude-code" in result
         assert self.VALID_UUID not in result
 
@@ -1222,7 +1222,7 @@ class TestRedactPushKeysInData:
 
     def test_realistic_hooks_diff_with_malformed_uuid(self):
         malformed = "a1b2c3d4.e5f6.7890.abcd.ef1234567890"
-        command = f"PUSH_KEY='{malformed}' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash /path/to/script.sh"
+        command = f"PUSH_KEY='{malformed}' REMOTE_HOOKS_BASE_URL='https://hooks.example.com' bash /path/to/script.sh"
         data = {
             "hook_event_name": "hooksConfigured",
             "session_id": "hooks-setup",
@@ -1235,7 +1235,7 @@ class TestRedactPushKeysInData:
         redact_push_keys_in_data(data)
         assert malformed not in str(data)
         assert (
-            "REMOTE_HOOKS_BASE_URL='https://api.snyk.io'"
+            "REMOTE_HOOKS_BASE_URL='https://hooks.example.com'"
             in data["modified"]["PreToolUse"]["expected_value"][0]["hooks"][0]["command"]
         )
         assert data["session_id"] == "hooks-setup"

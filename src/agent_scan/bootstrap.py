@@ -39,9 +39,9 @@ _RETRY_STATUSES = {408, 429}
 # users configure via --control-server; the bootstrap endpoint is its
 # sibling on the same host. Changing one without the other will silently
 # disable startup correlation, so both live here as a single source of
-# truth — update together if Snyk renames either path.
-CANONICAL_PUSH_PATH_SUFFIX = "/mcp-scan/push"
-CLIENT_BOOTSTRAP_PATH_SUFFIX = "/mcp-scan/client-bootstrap"
+# truth — update together if the managed control-server path changes.
+CANONICAL_PUSH_PATH_SUFFIX = "/agent-scan/push"
+CLIENT_BOOTSTRAP_PATH_SUFFIX = "/agent-scan/client-bootstrap"
 
 
 def _client_bootstrap_url(control_server_url: str) -> str | None:
@@ -153,7 +153,7 @@ def _get_timezone() -> str | None:
 
 
 async def _build_request(
-    command: Literal["scan", "inspect", "evo", "guard"],
+    command: Literal["scan", "inspect", "guard"],
     subcommand: str | None,
     control_identifier: str | None,
     argv: list[str],
@@ -198,7 +198,7 @@ def _should_retry(status: int) -> bool:
 async def bootstrap_first_control_server(
     control_servers: list[ControlServer],
     *,
-    command: Literal["scan", "inspect", "evo", "guard"],
+    command: Literal["scan", "inspect", "guard"],
     subcommand: str | None,
     control_identifier: str | None,
     argv: list[str],
@@ -237,7 +237,7 @@ async def bootstrap_first_control_server(
 async def _bootstrap_first_control_server_impl(
     control_servers: list[ControlServer],
     *,
-    command: Literal["scan", "inspect", "evo", "guard"],
+    command: Literal["scan", "inspect", "guard"],
     subcommand: str | None,
     control_identifier: str | None,
     argv: list[str],

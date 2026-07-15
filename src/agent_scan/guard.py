@@ -1,4 +1,4 @@
-"""Agent Guard hook management for Claude Code, Cursor, and Codex."""
+"""Agent hook management for Claude Code, Cursor, and Codex."""
 
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ from agent_scan.pushkeys import (
     GuardEnabledAccessDeniedError,
     _is_localhost,
     fetch_guard_enabled,
-    mint_push_key,
     revoke_push_key,
 )
 from agent_scan.redact import redact_push_keys, redact_push_keys_in_data
@@ -31,10 +30,10 @@ IS_WINDOWS = sys.platform == "win32"
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_REMOTE_URL = "https://api.snyk.io"
+DEFAULT_REMOTE_URL = ""
 _DETECTION_RE = re.compile(
-    r"PUSH_KEY=.*snyk-agent-guard"
-    r"|snyk-agent-guard.*-PushKey\b"
+    r"PUSH_KEY=.*agent-guard"
+    r"|agent-guard.*-PushKey\b"
 )
 _PERMISSION_DENIED = "__permission_denied__"
 
@@ -136,41 +135,40 @@ def _get_machine_description(client: str) -> str:
     return f"agent-guard ({hostname}) {label}"
 
 
-def _ensure_guard_enabled_for_tenant(url: str, tenant_id: str, snyk_token: str) -> None:
-    """Exit with a clear message if agent-monitor reports Agent Guard is off for the tenant."""
+def _ensure_guard_enabled_for_tenant(url: str, tenant_id: str, admin_token: str) -> None:
+    """Exit with a clear message if the remote server reports hooks are disabled for the tenant."""
     if not tenant_id:
         return
-    if not _is_localhost(url) and not (snyk_token or "").strip():
+    if not _is_localhost(url) and not (admin_token or "").strip():
         rich.print(
-            "[bold red]Error:[/bold red] SNYK_TOKEN is required to verify that Agent Guard is enabled "
-            "for your tenant. Set SNYK_TOKEN and retry, or omit TENANT_ID / --tenant-id if you are only "
+            "[bold red]Error:[/bold red] an admin token is required to verify that agent hooks are enabled "
+            "for your tenant. Set an admin token and retry, or omit TENANT_ID / --tenant-id if you are only "
             "testing against a local server."
         )
         sys.exit(1)
-    rich.print("[dim]Checking whether Agent Guard is enabled for your tenant...[/dim]")
+    rich.print("[dim]Checking whether agent hooks are enabled for your tenant...[/dim]")
     try:
-        enabled = fetch_guard_enabled(url, tenant_id, snyk_token)
+        enabled = fetch_guard_enabled(url, tenant_id, admin_token)
     except GuardEnabledAccessDeniedError:
         rich.print()
         rich.print(
-            "[bold red]Access denied:[/bold red] your Snyk account is not eligible to use the "
+            "[bold red]Access denied:[/bold red] this admin token is not eligible to use the "
             f"tenant [bold]{tenant_id}[/bold]."
         )
         rich.print()
         sys.exit(1)
     except RuntimeError as e:
-        rich.print(f"[bold red]Error:[/bold red] Could not verify Agent Guard status for your tenant: {e}")
+        rich.print(f"[bold red]Error:[/bold red] Could not verify agent hook status for your tenant: {e}")
         rich.print(
-            "[yellow]Ensure --url points to the Snyk API for your environment (for example "
-            "[bold]https://api.snyk.io[/bold] for Snyk US 1), that "
-            "your token has access to this tenant, and that network access is allowed.[/yellow]"
+            "[yellow]Ensure --url points to your hook API, that the admin token has access to this tenant, "
+            "and that network access is allowed.[/yellow]"
         )
         sys.exit(1)
     if not enabled:
         rich.print()
-        rich.print("[bold red]Agent Guard is not enabled for this Snyk tenant.[/bold red]")
+        rich.print("[bold red]Agent hooks are not enabled for this tenant.[/bold red]")
         rich.print()
-        rich.print("Please reach out to your Snyk administrators if you believe this is a mistake.")
+        rich.print("Please reach out to your administrators if you believe this is a mistake.")
         rich.print()
         sys.exit(1)
 
@@ -178,7 +176,7 @@ def _ensure_guard_enabled_for_tenant(url: str, tenant_id: str, snyk_token: str) 
 def _run_install(args) -> None:
     client: str = args.client
     url: str = args.url
-    push_key = os.environ.get("PUSH_KEY", "")
+    push_key = (getattr(args, "push_key", None) or os.environ.get("PUSH_KEY", "") or "").strip()
     headless = bool(push_key)
     tenant_id: str = (getattr(args, "tenant_id", None) or "").strip()
     if not tenant_id:
@@ -187,49 +185,19 @@ def _run_install(args) -> None:
 
     label = _client_label(client)
     scope = "managed" if managed else "user"
-    snyk_token = ""
+    admin_token = ""
 
     if not headless:
-        # Interactive flow — mint a push key
-        rich.print(f"Installing [bold magenta]Agent Guard[/bold magenta] {scope} hooks for [bold]{label}[/bold]")
-        rich.print()
+        rich.print(f"Installing [bold magenta]agent hooks[/bold magenta] {scope} hooks for [bold]{label}[/bold]")
+        rich.print("[bold red]Error:[/bold red] A push key is required. Pass --push-key or set PUSH_KEY.")
+        sys.exit(1)
 
-        snyk_token = os.environ.get("SNYK_TOKEN", "")
-        if not snyk_token:
-            rich.print("Paste your Snyk API token ( from https://app.snyk.io/account ):")
-            snyk_token = input().strip()
-        if not snyk_token:
-            rich.print("[bold red]Error:[/bold red] SNYK_TOKEN is required to mint a push key.")
-            sys.exit(1)
-
-        if not tenant_id:
-            rich.print("Enter your Snyk Tenant ID ( from the URL at https://app.snyk.io ):")
-            tenant_id = input().strip()
-        if not tenant_id:
-            rich.print("[bold red]Error:[/bold red] Tenant ID is required to mint a push key.")
-            sys.exit(1)
-
-        _ensure_guard_enabled_for_tenant(url, tenant_id, snyk_token)
-
-        # Preflight: verify target directory is writable before minting
-        config_path = _config_path(client, getattr(args, "file", None), managed=managed)
-        _preflight_writable(config_path)
-
-        description = _get_machine_description(client)
-        rich.print(f"[dim]Minting push key for {description}...[/dim]")
-        try:
-            push_key = mint_push_key(url, tenant_id, snyk_token, description=description)
-        except RuntimeError as e:
-            rich.print(f"[bold red]Error:[/bold red] {e}")
-            if "403" in str(e):
-                rich.print(
-                    f"[yellow]Please ensure you have access to tenant [bold]{tenant_id}[/bold] and access to Evo Agent Guard.[/yellow]"
-                )
-            sys.exit(1)
-        rich.print(f"[green]\u2713[/green]  Push key minted  [yellow]{_mask_key(push_key)}[/yellow]")
+    if not url:
+        rich.print("[bold red]Error:[/bold red] A remote hook base URL is required. Pass --url.")
+        sys.exit(1)
 
     hook_client = _hook_client_name(client)
-    minted = not headless  # True if we minted the key in this run
+    minted = False
     config_path = _config_path(client, getattr(args, "file", None), managed=managed)
 
     try:
@@ -243,13 +211,13 @@ def _run_install(args) -> None:
             label,
             minted,
             tenant_id,
-            snyk_token,
+            admin_token,
         )
     except (SystemExit, KeyboardInterrupt):
         raise
     except BaseException:
         if minted:
-            _revoke_after_failure(url, tenant_id, snyk_token, push_key)
+            _revoke_after_failure(url, tenant_id, admin_token, push_key)
         raise
 
 
@@ -317,9 +285,9 @@ def _install_hooks(
     label: str,
     minted: bool,
     tenant_id: str,
-    snyk_token: str,
+    admin_token: str,
 ) -> None:
-    """Post-mint install steps.  Extracted so _run_install can revoke on failure."""
+    """Install hook scripts and client configuration after a push key is supplied."""
     existing_info = _detect_existing_install(client, config_path)
     old_push_key = existing_info.get("auth_value", "") if existing_info else ""
     push_key_changed = bool(old_push_key) and old_push_key != push_key
@@ -344,7 +312,7 @@ def _install_hooks(
         if not script_existed:
             dest_path.unlink(missing_ok=True)
         if minted:
-            _revoke_after_failure(url, tenant_id, snyk_token, push_key)
+            _revoke_after_failure(url, tenant_id, admin_token, push_key)
         rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
         raise SystemExit(1)
 
@@ -563,7 +531,7 @@ def _write_codex_managed_config(content: str, path: Path) -> bool:
 
 
 def _parse_codex_requirements_toml(text: str) -> tuple[list[str], str | None]:
-    """Extract Snyk Agent Guard events and the first matching command from requirements.toml.
+    """Extract Agent Guard events and the first matching command from requirements.toml.
 
     Returns (events, command). Only scans hook command lines containing the
     agent-guard detection marker.
@@ -649,7 +617,6 @@ def _run_uninstall(args) -> None:
     # Remove hook script
     _remove_hook_script(client, config_path)
 
-    # Try to revoke the push key
     if info and info.get("auth_value"):
         _try_revoke_push_key(info, label)
 
@@ -658,21 +625,10 @@ def _run_uninstall(args) -> None:
 
 def _try_revoke_push_key(info: dict, label: str) -> None:
     push_key = info.get("auth_value", "")
-    tenant_id = info.get("tenant_id", "")
-    url = info.get("url", DEFAULT_REMOTE_URL)
-    snyk_token = os.environ.get("SNYK_TOKEN", "")
-
-    if not tenant_id or not snyk_token:
-        rich.print(
-            f"[dim]   Push key {_mask_key(push_key)} was not revoked (set SNYK_TOKEN to revoke on uninstall).[/dim]"
-        )
-        return
-
-    try:
-        revoke_push_key(url, tenant_id, snyk_token, push_key)
-        rich.print(f"[green]\u2713[/green]  Push key {_mask_key(push_key)} revoked")
-    except RuntimeError as e:
-        rich.print(f"[yellow]Warning:[/yellow] Could not revoke push key: {e}")
+    rich.print(
+        f"[dim]   Push key {_mask_key(push_key)} was removed from local hooks. "
+        "Revoke it in your provisioning or hook server admin system if needed.[/dim]"
+    )
 
 
 def _uninstall_claude(path: Path) -> None:
@@ -788,17 +744,17 @@ def _run_status() -> None:
     _print_client_status("Codex", CODEX_MANAGED_HOOKS_PATH, codex_managed_info)
     rich.print()
 
-    rich.print("[dim]# interactive flow (user-level)[/dim]")
-    rich.print("[dim]snyk-agent-scan guard install <client>[/dim]")
+    rich.print("[dim]# user-level flow[/dim]")
+    rich.print("[dim]agent-scan guard install <client> --url <REMOTE_URL> --push-key <PUSH_KEY>[/dim]")
     rich.print()
     rich.print("[dim]# managed flow[/dim]")
-    rich.print("[dim]snyk-agent-scan guard install <client> --managed[/dim]")
+    rich.print("[dim]agent-scan guard install <client> --managed --url <REMOTE_URL> --push-key <PUSH_KEY>[/dim]")
     rich.print()
     rich.print("[dim]# headless flow (MDM)[/dim]")
-    rich.print("[dim]PUSH_KEY=<YOUR_PUSH_KEY> snyk-agent-scan guard install <client> [--managed][/dim]")
+    rich.print("[dim]PUSH_KEY=<YOUR_PUSH_KEY> agent-scan guard install <client> --url <REMOTE_URL> [--managed][/dim]")
     rich.print()
     rich.print(
-        "[dim]If hooks are already installed and up to date, install commands are no-ops. To uninstall use 'snyk-agent-scan guard uninstall <client>'[/dim]"
+        "[dim]If hooks are already installed and up to date, install commands are no-ops. To uninstall use 'agent-scan guard uninstall <client>'[/dim]"
     )
 
 
@@ -1122,7 +1078,7 @@ def _client_label(client: str) -> str:
 
 
 def _hook_client_name(client: str) -> str:
-    """Endpoint slug used on the agent-monitor side (and --client in the hook script)."""
+    """Endpoint slug used by the remote hook server and hook script."""
     return _HOOK_CLIENT_NAMES.get(client, client)
 
 
@@ -1154,11 +1110,11 @@ def _preflight_writable(config_path: Path) -> None:
         raise PermissionError(f"Directory not writable: {parent}")
 
 
-def _revoke_after_failure(url: str, tenant_id: str, snyk_token: str, push_key: str) -> None:
+def _revoke_after_failure(url: str, tenant_id: str, admin_token: str, push_key: str) -> None:
     """Best-effort revocation of a push key after a failed install."""
     rich.print("[dim]Revoking minted push key...[/dim]")
     try:
-        revoke_push_key(url, tenant_id, snyk_token, push_key)
+        revoke_push_key(url, tenant_id, admin_token, push_key)
         rich.print("[green]\u2713[/green]  Push key revoked")
     except RuntimeError as e:
         rich.print(f"[yellow]Warning:[/yellow] Could not revoke push key: {e}")
@@ -1211,7 +1167,7 @@ def _copy_hook_script(client: str, config_path: Path) -> tuple[Path, bool, bool]
     dest_dir = config_path.parent / "hooks"
 
     dest_dir.mkdir(parents=True, exist_ok=True)
-    script_name = "snyk-agent-guard.ps1" if IS_WINDOWS else "snyk-agent-guard.sh"
+    script_name = "agent-guard.ps1" if IS_WINDOWS else "agent-guard.sh"
     dest = dest_dir / script_name
     existed = dest.exists()
 
@@ -1232,7 +1188,7 @@ def _copy_hook_script(client: str, config_path: Path) -> tuple[Path, bool, bool]
 
 def _remove_hook_script(client: str, config_path: Path) -> None:
     dest_dir = config_path.parent / "hooks"
-    script_name = "snyk-agent-guard.ps1" if IS_WINDOWS else "snyk-agent-guard.sh"
+    script_name = "agent-guard.ps1" if IS_WINDOWS else "agent-guard.sh"
     dest = dest_dir / script_name
     if dest.exists():
         dest.unlink()

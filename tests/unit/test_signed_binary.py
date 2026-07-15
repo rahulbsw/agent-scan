@@ -29,7 +29,7 @@ def test_check_server_signature(command: str):
         ("docker", True),
         ("bash", True),
         ("cargo", True),
-        ("snyk-macos-arm64", False),
+        ("vendor-macos-arm64", False),
         ("github-mcp-server", False),
         ("terraform-mcp-server", False),
     ],

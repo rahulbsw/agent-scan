@@ -131,12 +131,12 @@ class RemoteServer(BaseModel):
     # (``streamable-http`` folds onto ``http`` below). ``ws`` -- a documented
     # Claude Code WebSocket transport -- is intentionally NOT accepted here yet:
     # the scanner can't connect to it, and emitting ``type: "ws"`` breaks the
-    # downstream consumers (invariant-mcp-scan-backend / invariant-platform),
+    # downstream consumers (managed backend),
     # which validate against ``{sse, http}`` only and would reject the payload.
     # Until ``ws`` is supported end-to-end across those repos, a ``ws`` server
     # fails validation (sinking its config file) rather than being emitted.
     # TODO(ADS-384): re-add ``"ws"`` once the backend + platform accept it.
-    # https://snyksec.atlassian.net/browse/ADS-384
+    # TODO(ADS-384): accept ws once downstream consumers support it.
     type: Literal["sse", "http"] | None = None
     headers: dict[str, str] = Field(default_factory=dict)
 
@@ -538,10 +538,10 @@ class ScanPathResultsCreate(BaseModel):
 
 
 # WARNING: These models must stay in sync with backend/models/base.py in
-# invariant-platform. There is NO automated enforcement -- if one side
+# managed backend. There is NO automated enforcement -- if one side
 # changes without the other, bootstrap will silently degrade to defaults
 # (the Pydantic validation on the client side will reject the response).
-# When modifying these models, search invariant-platform for the matching
+# When modifying these models, search managed backend for the matching
 # class names and update both sides in a coordinated PR.
 class HomeDirectoryEntry(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -555,7 +555,7 @@ class ClientInfo(BaseModel):
 
     name: str
     version: str
-    command: Literal["scan", "inspect", "evo", "guard"]
+    command: Literal["scan", "inspect", "guard"]
     subcommand: str | None = None
     control_identifier: str | None = None
     argv_flags: list[str] = Field(default_factory=list)

@@ -66,14 +66,14 @@ from agent_scan.pushkeys import GuardEnabledAccessDeniedError
 # ---------------------------------------------------------------------------
 
 AGENT_SCAN_CMD = (
-    "PUSH_KEY='pk-1234' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
-    "TENANT_ID='tid-1' bash '/home/u/.claude/hooks/snyk-agent-guard.sh' --client claude-code"
+    "PUSH_KEY='pk-1234' REMOTE_HOOKS_BASE_URL='https://hooks.example.com' "
+    "TENANT_ID='tid-1' bash '/home/u/.claude/hooks/agent-guard.sh' --client claude-code"
 )
 
 OTHER_CMD = "some-other-tool hook --client claude-code"
 
 AGENTGUARD_CMD = (
-    "PUSH_KEY='pk-old' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
+    "PUSH_KEY='pk-old' REMOTE_HOOKS_BASE_URL='https://hooks.example.com' "
     "'/usr/local/bin/agentguard' hook --client claude-code"
 )
 
@@ -121,23 +121,23 @@ def _setup_codex_managed_hooks(cmd: str, path: Path) -> None:
 
 class TestIsAgentScanCommand:
     def test_matches_bash_format(self):
-        assert _is_agent_scan_command("PUSH_KEY='x' bash snyk-agent-guard.sh --client c")
+        assert _is_agent_scan_command("PUSH_KEY='x' bash agent-guard.sh --client c")
 
     def test_matches_bash_full_command(self):
         assert _is_agent_scan_command(
-            "PUSH_KEY='pk-1234' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
-            "bash '/home/u/.claude/hooks/snyk-agent-guard.sh' --client claude-code"
+            "PUSH_KEY='pk-1234' REMOTE_HOOKS_BASE_URL='https://hooks.example.com' "
+            "bash '/home/u/.claude/hooks/agent-guard.sh' --client claude-code"
         )
 
     def test_matches_powershell_format(self):
         assert _is_agent_scan_command(
-            "powershell -File 'snyk-agent-guard.ps1' -Client claude-code -PushKey 'pk' -RemoteUrl 'url'"
+            "powershell -File 'agent-guard.ps1' -Client claude-code -PushKey 'pk' -RemoteUrl 'url'"
         )
 
-    def test_no_match_snyk_agent_guard_without_push_key(self):
-        assert not _is_agent_scan_command("bash /home/u/.claude/hooks/snyk-agent-guard.sh")
+    def test_no_match_agent_guard_without_push_key(self):
+        assert not _is_agent_scan_command("bash /home/u/.claude/hooks/agent-guard.sh")
 
-    def test_no_match_push_key_without_snyk_agent_guard(self):
+    def test_no_match_push_key_without_agent_guard(self):
         assert not _is_agent_scan_command("PUSH_KEY='pk' bash /some/other-tool.sh --client claude")
 
     def test_no_match_other_tool(self):
@@ -200,9 +200,9 @@ class TestExtractEnvFromCmd:
         assert _extract_env_from_cmd("bash x", "PUSH_KEY") == ""
 
     def test_multiple_keys(self):
-        cmd = "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash x"
+        cmd = "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://hooks.example.com' bash x"
         assert _extract_env_from_cmd(cmd, "PUSH_KEY") == "pk"
-        assert _extract_env_from_cmd(cmd, "REMOTE_HOOKS_BASE_URL") == "https://api.snyk.io"
+        assert _extract_env_from_cmd(cmd, "REMOTE_HOOKS_BASE_URL") == "https://hooks.example.com"
 
     def test_tenant_id(self):
         cmd = "PUSH_KEY='pk' TENANT_ID='tid-1' bash x"
@@ -212,34 +212,34 @@ class TestExtractEnvFromCmd:
 class TestBuildHookCommand:
     @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
     def test_without_tenant_bash(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "claude-code")
+        cmd = _build_hook_command("pk", "https://hooks.example.com", Path("/x/hook.sh"), "claude-code")
         assert "PUSH_KEY='pk'" in cmd
-        assert "REMOTE_HOOKS_BASE_URL='https://api.snyk.io'" in cmd
+        assert "REMOTE_HOOKS_BASE_URL='https://hooks.example.com'" in cmd
         assert "TENANT_ID" not in cmd
         assert "bash '/x/hook.sh'" in cmd
         assert "--client claude-code" in cmd
 
     @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
     def test_with_tenant_bash(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", tenant_id="tid")
+        cmd = _build_hook_command("pk", "https://hooks.example.com", Path("/x/hook.sh"), "cursor", tenant_id="tid")
         assert "TENANT_ID='tid'" in cmd
 
     @pytest.mark.skipif(sys.platform != "win32", reason="powershell command format")
     def test_without_tenant_powershell(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code")
+        cmd = _build_hook_command("pk", "https://hooks.example.com", Path("/x/hook.ps1"), "claude-code")
         assert "-PushKey 'pk'" in cmd
-        assert "-RemoteUrl 'https://api.snyk.io'" in cmd
+        assert "-RemoteUrl 'https://hooks.example.com'" in cmd
         assert "powershell -File" in cmd
         assert "-Client claude-code" in cmd
 
     @pytest.mark.skipif(sys.platform != "win32", reason="powershell command format")
     def test_without_tenant_powershell_no_tenant_id(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code")
+        cmd = _build_hook_command("pk", "https://hooks.example.com", Path("/x/hook.ps1"), "claude-code")
         assert "TENANT_ID" not in cmd
 
     def test_roundtrip_extract(self):
         cmd = _build_hook_command(
-            "my-key", "https://example.com", Path("/x/snyk-agent-guard.sh"), "claude-code", tenant_id="t-1"
+            "my-key", "https://example.com", Path("/x/agent-guard.sh"), "claude-code", tenant_id="t-1"
         )
         assert _extract_env_from_cmd(cmd, "PUSH_KEY") == "my-key"
         assert _extract_env_from_cmd(cmd, "REMOTE_HOOKS_BASE_URL") == "https://example.com"
@@ -251,13 +251,13 @@ class TestBuildHookCommand:
 class TestParseCommandInfo:
     def test_full_command(self):
         info = _parse_command_info(AGENT_SCAN_CMD, ["PreToolUse", "Stop"])
-        assert info["host"] == "api.snyk.io"
+        assert info["host"] == "hooks.example.com"
         assert info["auth_value"] == "pk-1234"
         assert info["tenant_id"] == "tid-1"
         assert info["events"] == ["PreToolUse", "Stop"]
 
     def test_no_tenant(self):
-        cmd = "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash snyk-agent-guard.sh --client c"
+        cmd = "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://hooks.example.com' bash agent-guard.sh --client c"
         info = _parse_command_info(cmd, ["Stop"])
         assert info["tenant_id"] == ""
 
@@ -392,7 +392,7 @@ class TestDetectClaude:
 
         info = _detect_claude_install(path)
         assert info is not None
-        assert info["host"] == "api.snyk.io"
+        assert info["host"] == "hooks.example.com"
         assert info["auth_value"] == "pk-1234"
         assert info["tenant_id"] == "tid-1"
         assert len(info["events"]) == len(CLAUDE_HOOK_EVENTS)
@@ -447,14 +447,14 @@ class TestDetectClaude:
 # ===================================================================
 
 CURSOR_AGENT_SCAN_CMD = (
-    "PUSH_KEY='pk-1234' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
-    "TENANT_ID='tid-1' bash '/home/u/.cursor/hooks/snyk-agent-guard.sh' --client cursor"
+    "PUSH_KEY='pk-1234' REMOTE_HOOKS_BASE_URL='https://hooks.example.com' "
+    "TENANT_ID='tid-1' bash '/home/u/.cursor/hooks/agent-guard.sh' --client cursor"
 )
 
 CURSOR_OTHER_CMD = "some-other-cursor-hook --flag"
 
 CURSOR_AGENTGUARD_CMD = (
-    "PUSH_KEY='pk-old' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' '/usr/local/bin/agentguard' hook --client cursor"
+    "PUSH_KEY='pk-old' REMOTE_HOOKS_BASE_URL='https://hooks.example.com' '/usr/local/bin/agentguard' hook --client cursor"
 )
 
 
@@ -579,7 +579,7 @@ class TestDetectCursor:
 
         info = _detect_cursor_install(path)
         assert info is not None
-        assert info["host"] == "api.snyk.io"
+        assert info["host"] == "hooks.example.com"
         assert info["auth_value"] == "pk-1234"
         assert info["tenant_id"] == "tid-1"
         assert len(info["events"]) == len(CURSOR_HOOK_EVENTS)
@@ -871,11 +871,11 @@ class TestPermissionDeniedStatus:
 
     def test_print_client_status_installed(self, tmp_path, capsys):
         info = {
-            "host": "api.snyk.io",
+            "host": "hooks.example.com",
             "auth_type": "pushkey",
             "auth_value": "pk-1234567890",
             "tenant_id": "tid-1",
-            "url": "https://api.snyk.io",
+            "url": "https://hooks.example.com",
             "events": ["PreToolUse"],
         }
         _print_client_status("Claude Code", tmp_path / "settings.json", info)
@@ -964,8 +964,8 @@ IS_WINDOWS = sys.platform == "win32"
 
 
 CODEX_AGENT_SCAN_CMD = (
-    "PUSH_KEY='pk-codex' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
-    "TENANT_ID='tid-1' bash '/home/u/.codex/hooks/snyk-agent-guard.sh' --client codex"
+    "PUSH_KEY='pk-codex' REMOTE_HOOKS_BASE_URL='https://hooks.example.com' "
+    "TENANT_ID='tid-1' bash '/home/u/.codex/hooks/agent-guard.sh' --client codex"
 )
 
 
@@ -1033,7 +1033,7 @@ class TestDetectCodex:
         assert info["auth_type"] == "pushkey"
         assert info["auth_value"] == "pk-codex"
         assert info["tenant_id"] == "tid-1"
-        assert info["host"] == "api.snyk.io"
+        assert info["host"] == "hooks.example.com"
         assert set(info["events"]) == set(CODEX_HOOK_EVENTS)
 
 
@@ -1077,7 +1077,7 @@ class TestCodexManagedRequirementsToml:
     def test_install_writes_toml(self, tmp_path):
         install, _, _, _ = self._import_managed_helpers()
         path = tmp_path / "requirements.toml"
-        script = tmp_path / "hooks" / "snyk-agent-guard.sh"
+        script = tmp_path / "hooks" / "agent-guard.sh"
         changed = install(CODEX_AGENT_SCAN_CMD, path, script)
         assert changed
         text = path.read_text()
@@ -1087,14 +1087,14 @@ class TestCodexManagedRequirementsToml:
     def test_install_idempotent(self, tmp_path):
         install, _, _, _ = self._import_managed_helpers()
         path = tmp_path / "requirements.toml"
-        script = tmp_path / "hooks" / "snyk-agent-guard.sh"
+        script = tmp_path / "hooks" / "agent-guard.sh"
         install(CODEX_AGENT_SCAN_CMD, path, script)
         assert install(CODEX_AGENT_SCAN_CMD, path, script) is False
 
     def test_detect_after_install(self, tmp_path):
         install, _, detect, _ = self._import_managed_helpers()
         path = tmp_path / "requirements.toml"
-        script = tmp_path / "hooks" / "snyk-agent-guard.sh"
+        script = tmp_path / "hooks" / "agent-guard.sh"
         install(CODEX_AGENT_SCAN_CMD, path, script)
 
         info = detect(path)
@@ -1106,7 +1106,7 @@ class TestCodexManagedRequirementsToml:
     def test_detect_dispatches_via_extension(self, tmp_path):
         install, _, _, _ = self._import_managed_helpers()
         path = tmp_path / "requirements.toml"
-        script = tmp_path / "hooks" / "snyk-agent-guard.sh"
+        script = tmp_path / "hooks" / "agent-guard.sh"
         install(CODEX_AGENT_SCAN_CMD, path, script)
 
         info = _detect_codex_install(path)
@@ -1116,7 +1116,7 @@ class TestCodexManagedRequirementsToml:
     def test_uninstall_removes_file(self, tmp_path):
         install, uninstall, _, _ = self._import_managed_helpers()
         path = tmp_path / "requirements.toml"
-        script = tmp_path / "hooks" / "snyk-agent-guard.sh"
+        script = tmp_path / "hooks" / "agent-guard.sh"
         install(CODEX_AGENT_SCAN_CMD, path, script)
         assert path.exists()
         uninstall(path)
@@ -1130,11 +1130,11 @@ class TestCodexManagedRequirementsToml:
         toml = (
             "[[hooks.PreToolUse.hooks]]\n"
             'type = "command"\n'
-            "command = \"PUSH_KEY='pk' bash 'C:\\\\Users\\\\me\\\\hooks\\\\snyk-agent-guard.sh' --client codex\"\n"
+            "command = \"PUSH_KEY='pk' bash 'C:\\\\Users\\\\me\\\\hooks\\\\agent-guard.sh' --client codex\"\n"
         )
         events, cmd = _parse_codex_requirements_toml(toml)
         assert "PreToolUse" in events
-        assert "C:\\Users\\me\\hooks\\snyk-agent-guard.sh" in cmd
+        assert "C:\\Users\\me\\hooks\\agent-guard.sh" in cmd
 
     def test_prepare_survives_unparseable_existing_toml(self, tmp_path):
         path = tmp_path / "requirements.toml"
@@ -1154,7 +1154,7 @@ class TestBashHookScript:
             pytest.skip("bash not available")
 
     def test_posts_base64_payload(self, hook_server):
-        script = _get_script_path("snyk-agent-guard.sh")
+        script = _get_script_path("agent-guard.sh")
         payload = '{"hook_event_name":"test","session_id":"s1"}'
         result = subprocess.run(
             ["bash", str(script), "--client", "claude-code"],
@@ -1172,14 +1172,14 @@ class TestBashHookScript:
 
         req = _HookHandler.last_request
         assert req is not None
-        assert "/hidden/agent-monitor/hooks/claude-code" in req["path"]
+        assert "/agent-scan/hooks/claude-code" in req["path"]
         assert req["headers"]["X-Client-Id"] == "test-pk-123"
         assert req["body"].startswith("base64:")
         decoded = base64.b64decode(req["body"].removeprefix("base64:"))
         assert json.loads(decoded) == json.loads(payload)
 
     def test_cursor_endpoint(self, hook_server):
-        script = _get_script_path("snyk-agent-guard.sh")
+        script = _get_script_path("agent-guard.sh")
         payload = '{"hook_event_name":"test","conversation_id":"c1"}'
         result = subprocess.run(
             ["bash", str(script), "--client", "cursor"],
@@ -1194,10 +1194,10 @@ class TestBashHookScript:
             },
         )
         assert result.returncode == 0, result.stderr
-        assert "/hidden/agent-monitor/hooks/cursor" in _HookHandler.last_request["path"]
+        assert "/agent-scan/hooks/cursor" in _HookHandler.last_request["path"]
 
     def test_codex_endpoint(self, hook_server):
-        script = _get_script_path("snyk-agent-guard.sh")
+        script = _get_script_path("agent-guard.sh")
         payload = '{"hook_event_name":"hooksConfigured","session_id":"s1"}'
         result = subprocess.run(
             ["bash", str(script), "--client", "codex"],
@@ -1212,10 +1212,10 @@ class TestBashHookScript:
             },
         )
         assert result.returncode == 0, result.stderr
-        assert "/hidden/agent-monitor/hooks/codex" in _HookHandler.last_request["path"]
+        assert "/agent-scan/hooks/codex" in _HookHandler.last_request["path"]
 
     def test_missing_push_key_fails(self, hook_server):
-        script = _get_script_path("snyk-agent-guard.sh")
+        script = _get_script_path("agent-guard.sh")
         result = subprocess.run(
             ["bash", str(script), "--client", "claude-code"],
             input="{}",
@@ -1231,7 +1231,7 @@ class TestBashHookScript:
         assert "PUSH_KEY" in result.stderr
 
     def test_missing_url_fails(self):
-        script = _get_script_path("snyk-agent-guard.sh")
+        script = _get_script_path("agent-guard.sh")
         result = subprocess.run(
             ["bash", str(script), "--client", "claude-code"],
             input="{}",
@@ -1261,7 +1261,7 @@ class TestPowerShellHookScript:
         return "powershell" if shutil.which("powershell") else "pwsh"
 
     def test_posts_base64_payload(self, hook_server):
-        script = _get_script_path("snyk-agent-guard.ps1")
+        script = _get_script_path("agent-guard.ps1")
         payload = '{"hook_event_name":"test","session_id":"s1"}'
         result = subprocess.run(
             [
@@ -1284,14 +1284,14 @@ class TestPowerShellHookScript:
 
         req = _HookHandler.last_request
         assert req is not None
-        assert "/hidden/agent-monitor/hooks/claude-code" in req["path"]
+        assert "/agent-scan/hooks/claude-code" in req["path"]
         assert req["headers"]["X-Client-Id"] == "test-pk-123"
         assert req["body"].startswith("base64:")
         decoded = base64.b64decode(req["body"].removeprefix("base64:"))
         assert json.loads(decoded) == json.loads(payload)
 
     def test_cursor_endpoint(self, hook_server):
-        script = _get_script_path("snyk-agent-guard.ps1")
+        script = _get_script_path("agent-guard.ps1")
         payload = '{"hook_event_name":"test","conversation_id":"c1"}'
         result = subprocess.run(
             [
@@ -1311,10 +1311,10 @@ class TestPowerShellHookScript:
             timeout=15,
         )
         assert result.returncode == 0, result.stderr
-        assert "/hidden/agent-monitor/hooks/cursor" in _HookHandler.last_request["path"]
+        assert "/agent-scan/hooks/cursor" in _HookHandler.last_request["path"]
 
     def test_missing_push_key_fails(self, hook_server):
-        script = _get_script_path("snyk-agent-guard.ps1")
+        script = _get_script_path("agent-guard.ps1")
         env = dict(__import__("os").environ)
         env.pop("PUSH_KEY", None)
         env.pop("PUSHKEY", None)
@@ -1353,7 +1353,7 @@ class TestCursorStylePowerShellInvocation:
         return "powershell" if shutil.which("powershell") else "pwsh"
 
     def test_cursor_invokes_command_string(self, hook_server):
-        script = _get_script_path("snyk-agent-guard.ps1")
+        script = _get_script_path("agent-guard.ps1")
         command = _build_hook_command_powershell(
             "test-pk-cursor",
             hook_server,
@@ -1372,7 +1372,7 @@ class TestCursorStylePowerShellInvocation:
 
         req = _HookHandler.last_request
         assert req is not None
-        assert "/hidden/agent-monitor/hooks/claude-code" in req["path"]
+        assert "/agent-scan/hooks/claude-code" in req["path"]
         assert req["headers"]["X-Client-Id"] == "test-pk-cursor"
         decoded = base64.b64decode(req["body"].removeprefix("base64:"))
         assert json.loads(decoded) == json.loads(payload)
@@ -1388,7 +1388,7 @@ class TestCursorStyleBashInvocation:
             pytest.skip("bash not available")
 
     def test_cursor_invokes_command_string(self, hook_server):
-        script = _get_script_path("snyk-agent-guard.sh")
+        script = _get_script_path("agent-guard.sh")
         command = _build_hook_command(
             "test-pk-cursor",
             hook_server,
@@ -1408,7 +1408,7 @@ class TestCursorStyleBashInvocation:
 
         req = _HookHandler.last_request
         assert req is not None
-        assert "/hidden/agent-monitor/hooks/cursor" in req["path"]
+        assert "/agent-scan/hooks/cursor" in req["path"]
         assert req["headers"]["X-Client-Id"] == "test-pk-cursor"
         decoded = base64.b64decode(req["body"].removeprefix("base64:"))
         assert json.loads(decoded) == json.loads(payload)
@@ -1420,25 +1420,25 @@ class TestCursorStyleBashInvocation:
 
 
 class TestEnsureGuardEnabledForTenant:
-    """Branch coverage for guard tenant verification (non-local API, Flipt / agent-monitor)."""
+    """Branch coverage for guard tenant verification against a remote hook API."""
 
     @patch("agent_scan.guard.fetch_guard_enabled")
     def test_empty_tenant_returns_without_fetch(self, mock_fetch, capsys):
-        _ensure_guard_enabled_for_tenant("https://api.snyk.io", "", "token")
+        _ensure_guard_enabled_for_tenant("https://hooks.example.com", "", "token")
         mock_fetch.assert_not_called()
 
     def test_missing_token_non_localhost_exits(self, capsys):
         with pytest.raises(SystemExit) as e:
-            _ensure_guard_enabled_for_tenant("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "")
+            _ensure_guard_enabled_for_tenant("https://hooks.example.com", "550e8400-e29b-41d4-a716-446655440000", "")
         assert e.value.args[0] == 1
         out = capsys.readouterr().out
-        assert "SNYK_TOKEN is required" in out
+        assert "admin token is required" in out
 
     def test_whitespace_token_treated_as_missing(self, capsys):
         with pytest.raises(SystemExit) as e:
-            _ensure_guard_enabled_for_tenant("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "   ")
+            _ensure_guard_enabled_for_tenant("https://hooks.example.com", "550e8400-e29b-41d4-a716-446655440000", "   ")
         assert e.value.args[0] == 1
-        assert "SNYK_TOKEN is required" in capsys.readouterr().out
+        assert "admin token is required" in capsys.readouterr().out
 
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
     def test_localhost_allows_empty_token(self, mock_fetch):
@@ -1449,7 +1449,7 @@ class TestEnsureGuardEnabledForTenant:
     def test_access_denied_exits(self, mock_fetch, capsys):
         mock_fetch.side_effect = GuardEnabledAccessDeniedError("forbidden")
         with pytest.raises(SystemExit) as e:
-            _ensure_guard_enabled_for_tenant("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "tok")
+            _ensure_guard_enabled_for_tenant("https://hooks.example.com", "550e8400-e29b-41d4-a716-446655440000", "tok")
         assert e.value.args[0] == 1
         out = capsys.readouterr().out
         assert "Access denied" in out
@@ -1459,62 +1459,63 @@ class TestEnsureGuardEnabledForTenant:
     def test_endpoint_error_exits(self, mock_fetch, capsys):
         mock_fetch.side_effect = RuntimeError("Guard enabled check failed: HTTP 502")
         with pytest.raises(SystemExit) as e:
-            _ensure_guard_enabled_for_tenant("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "tok")
+            _ensure_guard_enabled_for_tenant("https://hooks.example.com", "550e8400-e29b-41d4-a716-446655440000", "tok")
         assert e.value.args[0] == 1
         out = capsys.readouterr().out
-        assert "Could not verify Agent Guard status" in out
+        assert "Could not verify agent hook status" in out
         assert "HTTP 502" in out
         assert "Ensure --url" in out
 
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=False)
     def test_guard_disabled_tenant_exits(self, mock_fetch, capsys):
         with pytest.raises(SystemExit) as e:
-            _ensure_guard_enabled_for_tenant("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "tok")
+            _ensure_guard_enabled_for_tenant("https://hooks.example.com", "550e8400-e29b-41d4-a716-446655440000", "tok")
         assert e.value.args[0] == 1
         out = capsys.readouterr().out
-        assert "not enabled for this Snyk tenant" in out
-        assert "Please reach out to your Snyk administrators" in out
+        assert "not enabled for this tenant" in out
+        assert "Please reach out to your administrators" in out
 
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
     def test_guard_enabled_continues(self, mock_fetch):
-        _ensure_guard_enabled_for_tenant("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "tok")
-        mock_fetch.assert_called_once_with("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "tok")
+        _ensure_guard_enabled_for_tenant("https://hooks.example.com", "550e8400-e29b-41d4-a716-446655440000", "tok")
+        mock_fetch.assert_called_once_with("https://hooks.example.com", "550e8400-e29b-41d4-a716-446655440000", "tok")
 
 
 class TestRunInstallCallsEnsureGuardEnabled:
-    """_run_install invokes _ensure_guard_enabled_for_tenant only in the interactive (mint) path."""
+    """_run_install installs only with an already-provisioned push key."""
 
     @patch("agent_scan.guard._install_hooks")
-    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
-    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
-    def test_interactive_mint_path_calls_ensure_with_token(
-        self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch
-    ):
+    @patch("agent_scan.guard.fetch_guard_enabled")
+    def test_missing_push_key_exits_without_prompting_or_installing(self, mock_fetch, mock_install, tmp_path, monkeypatch):
         monkeypatch.delenv("PUSH_KEY", raising=False)
-        monkeypatch.setenv("SNYK_TOKEN", "snyk-from-env")
+        monkeypatch.delenv("AGENT_SCAN_ADMIN_TOKEN", raising=False)
+        monkeypatch.setattr("builtins.input", lambda: pytest.fail("guard install should not prompt for a token"))
         config = tmp_path / "settings.json"
         args = SimpleNamespace(
             client="claude",
-            url="https://api.snyk.io",
+            url="https://hooks.example.com",
             tenant_id="tid-interactive",
             file=str(config),
             managed=False,
         )
-        _run_install(args)
-        mock_fetch.assert_called_once_with("https://api.snyk.io", "tid-interactive", "snyk-from-env")
-        mock_mint.assert_called_once()
-        mock_install.assert_called_once()
+
+        with pytest.raises(SystemExit) as e:
+            _run_install(args)
+
+        assert e.value.args[0] == 1
+        mock_fetch.assert_not_called()
+        mock_install.assert_not_called()
 
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
     def test_headless_with_push_key_skips_ensure(self, mock_fetch, mock_install, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "existing-pk")
         monkeypatch.setenv("TENANT_ID", "tid-headless")
-        monkeypatch.setenv("SNYK_TOKEN", "headless-token")
+        monkeypatch.setenv("AGENT_SCAN_ADMIN_TOKEN", "admin-headless")
         config = tmp_path / "hooks.json"
         args = SimpleNamespace(
             client="cursor",
-            url="https://api.snyk.io",
+            url="https://hooks.example.com",
             tenant_id="",
             file=str(config),
             managed=False,
@@ -1524,18 +1525,14 @@ class TestRunInstallCallsEnsureGuardEnabled:
         mock_install.assert_called_once()
 
     @patch("agent_scan.guard._install_hooks")
-    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
-    def test_test_flag_true_does_not_change_install_hooks_call(
-        self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch
-    ):
+    def test_test_flag_true_does_not_change_install_hooks_call(self, mock_fetch, mock_install, tmp_path, monkeypatch):
         """--test flag is a no-op: _install_hooks receives the same args regardless of args.test."""
-        monkeypatch.delenv("PUSH_KEY", raising=False)
-        monkeypatch.setenv("SNYK_TOKEN", "snyk-from-env")
+        monkeypatch.setenv("PUSH_KEY", "existing-pk")
         config = tmp_path / "settings.json"
         args = SimpleNamespace(
             client="claude",
-            url="https://api.snyk.io",
+            url="https://hooks.example.com",
             tenant_id="tid-interactive",
             file=str(config),
             managed=False,
@@ -1543,20 +1540,21 @@ class TestRunInstallCallsEnsureGuardEnabled:
         )
         _run_install(args)
         mock_install.assert_called_once()
+        mock_fetch.assert_not_called()
         call_args = mock_install.call_args
         assert "test" not in (call_args.kwargs or {})
         assert len(call_args.args) == 10, "args.test must not be forwarded to _install_hooks"
 
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
-    def test_headless_installs_without_snyk_token(self, mock_fetch, mock_install, tmp_path, monkeypatch):
+    def test_headless_installs_without_admin_token(self, mock_fetch, mock_install, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "existing-pk")
         monkeypatch.setenv("TENANT_ID", "tid-hl")
-        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        monkeypatch.delenv("AGENT_SCAN_ADMIN_TOKEN", raising=False)
         config = tmp_path / "hooks.json"
         args = SimpleNamespace(
             client="cursor",
-            url="https://api.snyk.io",
+            url="https://hooks.example.com",
             tenant_id="tid-hl",
             file=str(config),
             managed=False,
@@ -1564,6 +1562,31 @@ class TestRunInstallCallsEnsureGuardEnabled:
         _run_install(args)
         mock_fetch.assert_not_called()
         mock_install.assert_called_once()
+
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.fetch_guard_enabled")
+    def test_direct_push_key_arg_installs_without_admin_token_or_prompt(
+        self, mock_fetch, mock_install, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.delenv("TENANT_ID", raising=False)
+        monkeypatch.delenv("AGENT_SCAN_ADMIN_TOKEN", raising=False)
+        monkeypatch.setattr("builtins.input", lambda: pytest.fail("guard install should not prompt for a token"))
+        config = tmp_path / "hooks.json"
+        args = SimpleNamespace(
+            client="cursor",
+            url="https://guard.example.com",
+            tenant_id="tid-direct",
+            file=str(config),
+            managed=False,
+            push_key="direct-push-key",
+        )
+
+        _run_install(args)
+
+        mock_fetch.assert_not_called()
+        mock_install.assert_called_once()
+        assert mock_install.call_args.args[2] == "direct-push-key"
 
 
 # ===================================================================
@@ -1647,13 +1670,13 @@ class TestInstallHooksOrchestration:
             client,
             hook_client,
             "pk-test",
-            "https://api.snyk.io",
+            "https://hooks.example.com",
             config,
             "user",
             "Claude Code",
             minted,
             "tid-1",
-            "snyk-tok",
+            "remote-tok",
         )
         return config
 
@@ -1750,7 +1773,7 @@ class TestInstallHooksOrchestration:
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
-            "https://api.snyk.io",
+            "https://hooks.example.com",
             "claude-code",
             ctx["dest"],
             first_install=True,
@@ -1765,7 +1788,7 @@ class TestInstallHooksOrchestration:
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
-            "https://api.snyk.io",
+            "https://hooks.example.com",
             "claude-code",
             ctx["dest"],
             first_install=True,
@@ -1779,7 +1802,7 @@ class TestInstallHooksOrchestration:
         self._call(tmp_path, minted=True, config_exists=True)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
-            "https://api.snyk.io",
+            "https://hooks.example.com",
             "claude-code",
             ctx["dest"],
             first_install=False,
@@ -1794,7 +1817,7 @@ class TestInstallHooksOrchestration:
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
-            "https://api.snyk.io",
+            "https://hooks.example.com",
             "claude-code",
             ctx["dest"],
             first_install=True,
@@ -1809,7 +1832,7 @@ class TestInstallHooksOrchestration:
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
-            "https://api.snyk.io",
+            "https://hooks.example.com",
             "claude-code",
             ctx["dest"],
             first_install=True,
@@ -1832,9 +1855,9 @@ class TestInstallHooksOrchestration:
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
         ctx["revoke"].assert_called_once_with(
-            "https://api.snyk.io",
+            "https://hooks.example.com",
             "tid-1",
-            "snyk-tok",
+            "remote-tok",
             "pk-test",
         )
 
@@ -1938,13 +1961,13 @@ class TestComputeHooksDiff:
         assert result == {"added": {}, "modified": {}, "removed": {}}
 
     def test_identical(self):
-        cmd = "PUSH_KEY='x' bash '/path/snyk-agent-guard.sh' --client claude-code"
+        cmd = "PUSH_KEY='x' bash '/path/agent-guard.sh' --client claude-code"
         hooks = {"PreToolUse": [{"hooks": [{"type": "command", "command": cmd}]}]}
         result = _compute_hooks_diff(hooks, hooks)
         assert result == {"added": {}, "modified": {}, "removed": {}}
 
     def test_key_only_in_new_is_removed(self):
-        cmd = "PUSH_KEY='x' bash '/path/snyk-agent-guard.sh' --client claude-code"
+        cmd = "PUSH_KEY='x' bash '/path/agent-guard.sh' --client claude-code"
         old = {}
         new = {"PreToolUse": [{"hooks": [{"type": "command", "command": cmd}]}]}
         result = _compute_hooks_diff(old, new)
@@ -1953,7 +1976,7 @@ class TestComputeHooksDiff:
         assert result["modified"] == {}
 
     def test_key_only_in_old_is_added(self):
-        cmd = "PUSH_KEY='x' bash '/path/snyk-agent-guard.sh' --client claude-code"
+        cmd = "PUSH_KEY='x' bash '/path/agent-guard.sh' --client claude-code"
         old = {"Stop": [{"hooks": [{"type": "command", "command": cmd}]}]}
         new = {}
         result = _compute_hooks_diff(old, new)
@@ -1963,10 +1986,10 @@ class TestComputeHooksDiff:
 
     def test_same_key_different_value_is_modified(self):
         old_val = [
-            {"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash '/old/snyk-agent-guard.sh' --client claude"}]}
+            {"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash '/old/agent-guard.sh' --client claude"}]}
         ]
         new_val = [
-            {"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash '/new/snyk-agent-guard.sh' --client claude"}]}
+            {"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash '/new/agent-guard.sh' --client claude"}]}
         ]
         result = _compute_hooks_diff({"PreToolUse": old_val}, {"PreToolUse": new_val})
         assert result["modified"] == {"PreToolUse": {"expected_value": new_val, "actual_value": old_val}}
@@ -1975,50 +1998,50 @@ class TestComputeHooksDiff:
 
     def test_multiple_removed(self):
         new = {
-            "PreToolUse": [{"hooks": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --a"}]}],
-            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --b"}]}],
+            "PreToolUse": [{"hooks": [{"command": "PUSH_KEY='x' bash agent-guard.sh --a"}]}],
+            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash agent-guard.sh --b"}]}],
         }
         result = _compute_hooks_diff({}, new)
         assert set(result["removed"]) == {"PreToolUse", "Stop"}
 
     def test_multiple_added(self):
         old = {
-            "PreToolUse": [{"hooks": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --a"}]}],
-            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --b"}]}],
+            "PreToolUse": [{"hooks": [{"command": "PUSH_KEY='x' bash agent-guard.sh --a"}]}],
+            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash agent-guard.sh --b"}]}],
         }
         result = _compute_hooks_diff(old, {})
         assert set(result["added"]) == {"PreToolUse", "Stop"}
 
     def test_added_removed_and_modified_combined(self):
-        old_val = [{"hooks": [{"command": "PUSH_KEY='x' bash '/old/snyk-agent-guard.sh'"}]}]
-        new_val = [{"hooks": [{"command": "PUSH_KEY='x' bash '/new/snyk-agent-guard.sh'"}]}]
+        old_val = [{"hooks": [{"command": "PUSH_KEY='x' bash '/old/agent-guard.sh'"}]}]
+        new_val = [{"hooks": [{"command": "PUSH_KEY='x' bash '/new/agent-guard.sh'"}]}]
         old = {
             "PreToolUse": old_val,
-            "ExtraEvent": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh'"}]}],
+            "ExtraEvent": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/agent-guard.sh'"}]}],
         }
         new = {
             "PreToolUse": new_val,
-            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/snyk-agent-guard.sh'"}]}],
+            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/agent-guard.sh'"}]}],
         }
         result = _compute_hooks_diff(old, new)
         assert result["added"] == {
-            "ExtraEvent": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh'"}]}]
+            "ExtraEvent": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/agent-guard.sh'"}]}]
         }
         assert result["removed"] == {
-            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/snyk-agent-guard.sh'"}]}]
+            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/agent-guard.sh'"}]}]
         }
         assert result["modified"] == {"PreToolUse": {"expected_value": new_val, "actual_value": old_val}}
 
     def test_unchanged_keys_excluded_from_all_categories(self):
-        cmd = "PUSH_KEY='x' bash '/path/snyk-agent-guard.sh'"
+        cmd = "PUSH_KEY='x' bash '/path/agent-guard.sh'"
         shared = [{"hooks": [{"command": cmd}]}]
         old = {
             "PreToolUse": shared,
-            "Extra": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh'"}]}],
+            "Extra": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/agent-guard.sh'"}]}],
         }
         new = {
             "PreToolUse": shared,
-            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/snyk-agent-guard.sh'"}]}],
+            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/agent-guard.sh'"}]}],
         }
         result = _compute_hooks_diff(old, new)
         assert "PreToolUse" not in result["added"]
@@ -2026,7 +2049,7 @@ class TestComputeHooksDiff:
         assert "PreToolUse" not in result["modified"]
 
     def test_old_empty_new_has_guard_hooks(self):
-        cmd = "PUSH_KEY='x' bash '/path/snyk-agent-guard.sh'"
+        cmd = "PUSH_KEY='x' bash '/path/agent-guard.sh'"
         new = {
             "A": [{"hooks": [{"command": cmd}]}],
             "B": [{"hooks": [{"command": cmd}]}],
@@ -2038,7 +2061,7 @@ class TestComputeHooksDiff:
         assert result["modified"] == {}
 
     def test_new_empty_old_has_guard_hooks(self):
-        cmd = "PUSH_KEY='x' bash '/path/snyk-agent-guard.sh'"
+        cmd = "PUSH_KEY='x' bash '/path/agent-guard.sh'"
         old = {
             "A": [{"hooks": [{"command": cmd}]}],
             "B": [{"hooks": [{"command": cmd}]}],
@@ -2049,8 +2072,8 @@ class TestComputeHooksDiff:
         assert result["modified"] == {}
 
     def test_nested_value_difference_is_modified(self):
-        old_val = [{"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash snyk-agent-guard.sh", "timeout": 10}]}]
-        new_val = [{"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash snyk-agent-guard.sh", "timeout": 30}]}]
+        old_val = [{"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash agent-guard.sh", "timeout": 10}]}]
+        new_val = [{"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash agent-guard.sh", "timeout": 30}]}]
         result = _compute_hooks_diff({"PreToolUse": old_val}, {"PreToolUse": new_val})
         assert "PreToolUse" in result["modified"]
         assert result["modified"]["PreToolUse"]["expected_value"] == new_val
@@ -2064,7 +2087,7 @@ class TestComputeHooksDiff:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "PUSH_KEY='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/path/to/snyk-agent-guard.sh' --client claude",
+                            "command": "PUSH_KEY='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' REMOTE_HOOKS_BASE_URL='https://hooks.example.com' bash '/path/to/agent-guard.sh' --client claude",
                         }
                     ]
                 }
@@ -2076,7 +2099,7 @@ class TestComputeHooksDiff:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "PUSH_KEY='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/path/to/snyk-agent-guard.sh' --client claude",
+                            "command": "PUSH_KEY='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' REMOTE_HOOKS_BASE_URL='https://hooks.example.com' bash '/path/to/agent-guard.sh' --client claude",
                         }
                     ]
                 }
@@ -2090,14 +2113,14 @@ class TestComputeHooksDiff:
         old = {
             "PreToolUse": [
                 {
-                    "command": "powershell -File 'snyk-agent-guard.ps1' -Client claude -PushKey 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' -RemoteUrl 'https://api.snyk.io'"
+                    "command": "powershell -File 'agent-guard.ps1' -Client claude -PushKey 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' -RemoteUrl 'https://hooks.example.com'"
                 }
             ]
         }
         new = {
             "PreToolUse": [
                 {
-                    "command": "powershell -File 'snyk-agent-guard.ps1' -Client claude -PushKey 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' -RemoteUrl 'https://api.snyk.io'"
+                    "command": "powershell -File 'agent-guard.ps1' -Client claude -PushKey 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' -RemoteUrl 'https://hooks.example.com'"
                 }
             ]
         }
@@ -2112,7 +2135,7 @@ class TestComputeHooksDiff:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "PUSH_KEY='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' REMOTE_HOOKS_BASE_URL='https://old.example.com' bash '/path/to/snyk-agent-guard.sh' --client claude",
+                            "command": "PUSH_KEY='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' REMOTE_HOOKS_BASE_URL='https://old.example.com' bash '/path/to/agent-guard.sh' --client claude",
                         }
                     ]
                 }
@@ -2124,7 +2147,7 @@ class TestComputeHooksDiff:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "PUSH_KEY='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' REMOTE_HOOKS_BASE_URL='https://new.example.com' bash '/path/to/snyk-agent-guard.sh' --client claude",
+                            "command": "PUSH_KEY='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' REMOTE_HOOKS_BASE_URL='https://new.example.com' bash '/path/to/agent-guard.sh' --client claude",
                         }
                     ]
                 }
@@ -2136,14 +2159,14 @@ class TestComputeHooksDiff:
         assert result["modified"]["PreToolUse"]["actual_value"] == old["PreToolUse"]
 
     def test_diff_is_deep_copied_from_sources(self):
-        extra_cmd = "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh'"
-        new_cmd = "PUSH_KEY='x' bash '/new/snyk-agent-guard.sh'"
+        extra_cmd = "PUSH_KEY='x' bash '/extra/agent-guard.sh'"
+        new_cmd = "PUSH_KEY='x' bash '/new/agent-guard.sh'"
         old = {"Extra": [{"hooks": [{"command": extra_cmd}]}]}
         new = {
             "Stop": [{"hooks": [{"command": new_cmd}]}],
-            "PreToolUse": [{"hooks": [{"command": "PUSH_KEY='x' bash '/different/snyk-agent-guard.sh'"}]}],
+            "PreToolUse": [{"hooks": [{"command": "PUSH_KEY='x' bash '/different/agent-guard.sh'"}]}],
         }
-        old["PreToolUse"] = [{"hooks": [{"command": "PUSH_KEY='x' bash '/original/snyk-agent-guard.sh'"}]}]
+        old["PreToolUse"] = [{"hooks": [{"command": "PUSH_KEY='x' bash '/original/agent-guard.sh'"}]}]
         result = _compute_hooks_diff(old, new)
 
         result["added"]["Extra"][0]["hooks"][0]["command"] = "MUTATED"
@@ -2153,10 +2176,10 @@ class TestComputeHooksDiff:
         assert new["Stop"][0]["hooks"][0]["command"] == new_cmd
 
         result["modified"]["PreToolUse"]["expected_value"][0]["hooks"][0]["command"] = "MUTATED"
-        assert new["PreToolUse"][0]["hooks"][0]["command"] == "PUSH_KEY='x' bash '/different/snyk-agent-guard.sh'"
+        assert new["PreToolUse"][0]["hooks"][0]["command"] == "PUSH_KEY='x' bash '/different/agent-guard.sh'"
 
         result["modified"]["PreToolUse"]["actual_value"][0]["hooks"][0]["command"] = "MUTATED"
-        assert old["PreToolUse"][0]["hooks"][0]["command"] == "PUSH_KEY='x' bash '/original/snyk-agent-guard.sh'"
+        assert old["PreToolUse"][0]["hooks"][0]["command"] == "PUSH_KEY='x' bash '/original/agent-guard.sh'"
 
     def test_customer_hooks_only_are_ignored(self):
         """Events with only customer (non-guard) hooks produce no diff."""
@@ -2174,8 +2197,8 @@ class TestComputeHooksDiff:
 
     def test_mixed_hooks_only_guard_diffed(self):
         """When events have both guard and customer hooks, only guard hooks are compared."""
-        guard_old = {"hooks": [{"command": "PUSH_KEY='x' bash '/old/snyk-agent-guard.sh'"}]}
-        guard_new = {"hooks": [{"command": "PUSH_KEY='x' bash '/new/snyk-agent-guard.sh'"}]}
+        guard_old = {"hooks": [{"command": "PUSH_KEY='x' bash '/old/agent-guard.sh'"}]}
+        guard_new = {"hooks": [{"command": "PUSH_KEY='x' bash '/new/agent-guard.sh'"}]}
         customer = {"hooks": [{"command": "customer-tool"}]}
         old = {"PreToolUse": [customer, guard_old]}
         new = {"PreToolUse": [customer, guard_new]}
@@ -2189,7 +2212,7 @@ class TestComputeHooksDiff:
 
     def test_customer_hook_changes_do_not_mask_guard_identity(self):
         """Changing customer hooks while guard hooks stay the same produces no diff."""
-        guard = {"hooks": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh"}]}
+        guard = {"hooks": [{"command": "PUSH_KEY='x' bash agent-guard.sh"}]}
         old = {"PreToolUse": [{"hooks": [{"command": "old-customer"}]}, guard]}
         new = {"PreToolUse": [{"hooks": [{"command": "new-customer"}]}, guard]}
         result = _compute_hooks_diff(old, new)
@@ -2197,8 +2220,8 @@ class TestComputeHooksDiff:
 
     def test_cursor_format_guard_hooks_diffed(self):
         """Cursor-format entries (flat dict with 'command') are correctly extracted."""
-        old = {"preToolUse": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --old"}]}
-        new = {"preToolUse": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --new"}]}
+        old = {"preToolUse": [{"command": "PUSH_KEY='x' bash agent-guard.sh --old"}]}
+        new = {"preToolUse": [{"command": "PUSH_KEY='x' bash agent-guard.sh --new"}]}
         result = _compute_hooks_diff(old, new)
         assert "preToolUse" in result["modified"]
 
