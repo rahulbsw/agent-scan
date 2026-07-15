@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/unit/test_guard.py::TestRunInstallSkipsUninstalledClients -v)",
+      "Bash(python3 -m pytest tests/unit/test_guard.py::TestRunInstallSkipsUninstalledClients -v)",
+      "Bash(uv run *)",
+      "Bash(ls -la .venv/bin/python 2>/dev/null || which python3 2>/dev/null; ls pyproject.toml Makefile 2>/dev/null)",
+      "Read(//Users/evgenykoshelev/.local/share/uv/python/cpython-3.13.12-macos-aarch64-none/bin/**)",
+      "Bash(.venv/bin/python -m pytest tests/unit/test_guard.py::TestRunInstallSkipsUninstalledClients -v)"
+    ]
+  }
+}
