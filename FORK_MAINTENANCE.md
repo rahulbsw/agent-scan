@@ -97,4 +97,7 @@ git push fork fork-v0.5.14.1
 ```
 
 To rebuild assets for an existing tag, run the `Fork Release` workflow manually
-with the same tag. The workflow overwrites existing release assets for that tag.
+from the `main` branch with an existing source tag. The manual input accepts
+either `fork-v0.5.14.1` or `v0.5.14.1`; upstream-style `v*` inputs are
+published as fork-owned `fork-v*` releases. The workflow overwrites existing
+release assets for the fork release tag.
