@@ -457,9 +457,7 @@ CURSOR_AGENT_SCAN_CMD = (
 
 CURSOR_OTHER_CMD = "some-other-cursor-hook --flag"
 
-CURSOR_AGENTGUARD_CMD = (
-    "PUSH_KEY='pk-old' REMOTE_HOOKS_BASE_URL='https://hooks.example.com' '/usr/local/bin/agentguard' hook --client cursor"
-)
+CURSOR_AGENTGUARD_CMD = "PUSH_KEY='pk-old' REMOTE_HOOKS_BASE_URL='https://hooks.example.com' '/usr/local/bin/agentguard' hook --client cursor"
 
 
 # ===================================================================
@@ -1490,7 +1488,9 @@ class TestRunInstallCallsEnsureGuardEnabled:
 
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.fetch_guard_enabled")
-    def test_missing_push_key_exits_without_prompting_or_installing(self, mock_fetch, mock_install, tmp_path, monkeypatch):
+    def test_missing_push_key_exits_without_prompting_or_installing(
+        self, mock_fetch, mock_install, tmp_path, monkeypatch
+    ):
         monkeypatch.delenv("PUSH_KEY", raising=False)
         monkeypatch.delenv("AGENT_SCAN_ADMIN_TOKEN", raising=False)
         monkeypatch.setattr("builtins.input", lambda: pytest.fail("guard install should not prompt for a token"))
@@ -2122,9 +2122,7 @@ class TestComputeHooksDiff:
         assert result["added"] == {
             "ExtraEvent": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/agent-guard.sh'"}]}]
         }
-        assert result["removed"] == {
-            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/agent-guard.sh'"}]}]
-        }
+        assert result["removed"] == {"Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/agent-guard.sh'"}]}]}
         assert result["modified"] == {"PreToolUse": {"expected_value": new_val, "actual_value": old_val}}
 
     def test_unchanged_keys_excluded_from_all_categories(self):
@@ -2619,9 +2617,7 @@ class TestRunInstallAll:
 
     @patch("agent_scan.guard._revoke_after_failure")
     @patch("agent_scan.guard._install_hooks")
-    def test_install_all_partial_failure_does_not_revoke(
-        self, mock_install, mock_revoke, tmp_path, monkeypatch
-    ):
+    def test_install_all_partial_failure_does_not_revoke(self, mock_install, mock_revoke, tmp_path, monkeypatch):
         """First client succeeds, second raises; a provided push key is never revoked."""
         monkeypatch.setenv("PUSH_KEY", "provided-pk")
 

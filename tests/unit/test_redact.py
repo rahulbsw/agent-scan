@@ -1169,7 +1169,9 @@ class TestRedactPushKeys:
         assert "**REDACTED**" in result
 
     def test_surrounding_text_preserved(self):
-        text = f"REMOTE_URL='https://hooks.example.com' PUSH_KEY='{self.VALID_UUID}' bash script.sh --client claude-code"
+        text = (
+            f"REMOTE_URL='https://hooks.example.com' PUSH_KEY='{self.VALID_UUID}' bash script.sh --client claude-code"
+        )
         result = redact_push_keys(text)
         assert "REMOTE_URL='https://hooks.example.com'" in result
         assert "bash script.sh --client claude-code" in result

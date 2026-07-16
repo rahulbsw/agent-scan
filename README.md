@@ -323,9 +323,42 @@ We welcome suggestions, bug reports, or feature requests as GitHub issues.
 To run Agent Scan from source, follow these steps:
 
 ```bash
-uv run pip install -e .
-uv run -m src.agent_scan.cli
+uv sync --all-extras
+uv run agent-scan --help
+uv run agent-scan scan --no-skills
 ```
+
+To run the test suite and local checks:
+
+```bash
+make test
+make pre-commit
+```
+
+To build local distributable artifacts:
+
+```bash
+make build      # wheel and source distribution in dist/
+make binary     # standalone binary in dist/
+make shiv       # zipapp at dist/agent-scan.pyz
+```
+
+Run the standalone binary directly:
+
+```bash
+./dist/agent-scan --help
+./dist/agent-scan scan --no-skills
+```
+
+On Windows, the binary path is `dist\agent-scan.exe`.
+
+## Fork Releases
+
+This fork publishes fork-owned GitHub Releases from tags named
+`fork-v<upstream-version>.<fork-patch>`, for example `fork-v0.5.14.1`.
+Release assets include standalone binaries for Linux x64, Linux arm64, macOS
+arm64, macOS x64, and Windows x64, plus Python package artifacts and checksum
+files. These releases do not require a Snyk account token.
 
 ## Including Agent Scan results in your own project / registry
 

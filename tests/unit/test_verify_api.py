@@ -675,7 +675,9 @@ class TestAnalyzeMachineAuthPrecedence:
         Explicit push-key args beat ambient env state. The analysis URL is
         not rewritten and Authorization is not set.
         """
-        posted_url, posted_headers = await self._run(push_key="push-abc", env={"AGENT_SCAN_AUTH_TOKEN": "remote-tok-123"})
+        posted_url, posted_headers = await self._run(
+            push_key="push-abc", env={"AGENT_SCAN_AUTH_TOKEN": "remote-tok-123"}
+        )
 
         assert posted_headers.get("X-Push-Key") == "push-abc"
         assert "Authorization" not in posted_headers

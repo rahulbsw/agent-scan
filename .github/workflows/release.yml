@@ -1,0 +1,111 @@
+name: Fork Release
+
+on:
+  push:
+    tags:
+      - "fork-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing fork release tag, for example fork-v0.5.14.1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  build-binaries:
+    name: binary (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+            ext: ""
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+            ext: ""
+          - os: macos-latest
+            target: macos-arm64
+            ext: ""
+          - os: macos-15-intel
+            target: macos-x64
+            ext: ""
+          - os: windows-latest
+            target: windows-x64
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: astral-sh/setup-uv@v6
+      - name: Build standalone binary
+        run: make binary
+      - name: Stage release asset
+        shell: bash
+        env:
+          BINARY_PATH: dist/agent-scan${{ matrix.ext }}
+          ASSET_NAME: agent-scan-${{ env.RELEASE_TAG }}-${{ matrix.target }}${{ matrix.ext }}
+        run: |
+          mkdir -p release-assets
+          cp "$BINARY_PATH" "release-assets/$ASSET_NAME"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-scan-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  build-python-package:
+    name: python package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: astral-sh/setup-uv@v6
+      - name: Build wheel and source distribution
+        run: make build
+      - name: Stage release assets
+        run: |
+          mkdir -p release-assets
+          cp dist/*.whl dist/*.tar.gz release-assets/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-scan-python-package
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish-release:
+    name: publish release
+    runs-on: ubuntu-latest
+    needs:
+      - build-binaries
+      - build-python-package
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum * > sha256sums.txt
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$RELEASE_TAG" in
+            fork-v*) ;;
+            *) echo "Release tag must start with fork-v"; exit 1 ;;
+          esac
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* --title "Agent Scan $RELEASE_TAG" --generate-notes
+          fi

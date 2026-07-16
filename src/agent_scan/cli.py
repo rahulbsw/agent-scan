@@ -245,6 +245,7 @@ def add_common_arguments(parser):
         help="Comma-separated list of issue codes to ignore (e.g. W001,W015)",
     )
 
+
 def add_server_arguments(parser):
     """Add arguments related to MCP server connections."""
     server_group = parser.add_argument_group("MCP Server Options")

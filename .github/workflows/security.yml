@@ -15,9 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync --all-extras
+      - name: Export locked dependencies
+        run: uv export --quiet --locked --all-extras --no-emit-project --no-hashes --output-file requirements-audit.txt
       - name: pip-audit
-        run: uv run --with pip-audit pip-audit --strict
+        run: uv run --with pip-audit pip-audit --strict --no-deps --disable-pip --requirement requirements-audit.txt
 
   secret-scan:
     runs-on: ubuntu-latest

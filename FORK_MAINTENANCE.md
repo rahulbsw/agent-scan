@@ -86,3 +86,15 @@ git push fork fork-v0.5.14.1
 ```
 
 Format: `fork-v<upstream-version>.<fork-patch>`.
+
+Pushing a `fork-v*` tag runs the fork release workflow and publishes GitHub
+Release assets for Linux x64, Linux arm64, macOS arm64, macOS x64, and Windows
+x64, plus the Python wheel/source distribution and `sha256sums.txt`.
+
+```bash
+git tag fork-v0.5.14.1
+git push fork fork-v0.5.14.1
+```
+
+To rebuild assets for an existing tag, run the `Fork Release` workflow manually
+with the same tag. The workflow overwrites existing release assets for that tag.

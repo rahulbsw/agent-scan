@@ -1,4 +1,3 @@
-
 import pytest
 
 import agent_scan.pipelines as pipelines
