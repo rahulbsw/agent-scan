@@ -10,10 +10,10 @@ Agent Scan operates in two main modes which can be used jointly or separately:
 
 ## Quick Start
 
-To run a full scan of your machine (auto-discovers agents, MCP servers, skills), run:
+To run a full scan of your machine (auto-discovers agents, MCP servers, and skills), run:
 
 ```bash
-uvx agent-scan@latest --skills
+uvx agent-scan@latest
 ```
 
 This will scan for security vulnerabilities in servers, skills, tools, prompts, and resources. It will automatically discover a variety of agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf.
@@ -21,98 +21,53 @@ This will scan for security vulnerabilities in servers, skills, tools, prompts, 
 You can also scan particular configuration files or skills:
 
 ```bash
-# scan mcp configurations
+# scan an MCP configuration
 uvx agent-scan@latest ~/.vscode/mcp.json
 # scan a single agent skill
-uvx agent-scan@latest  --skills ~/path/to/my/SKILL.md
+uvx agent-scan@latest ~/path/to/my/SKILL.md
 # scan all claude skills
-uvx agent-scan@latest  --skills ~/.claude/skills
+uvx agent-scan@latest ~/.claude/skills
+# MCP only (skip skills)
+uvx agent-scan@latest --no-skills
 ```
 
 ## How It Works
 
 ![Scanning overview](assets/scan.svg)
 
-Agent Scan searches through your local agent's configuration files to find agents, skills, and MCP servers. For MCP, it connects to servers and retrieves tool descriptions. Omit `--skills` to skip skill analysis.
+Agent Scan searches through your local agent's configuration files to find agents, skills, and MCP servers. For MCP, it connects to servers and retrieves tool descriptions. Skills are scanned by default; use `--no-skills` to skip skill analysis.
 
-It then validates components with local checks by default. Remote analysis is optional and explicit through `--analysis-mode remote`, `--analysis-provider`, `--analysis-url`, and `--verification-H`.
+It then validates components with local checks by default. Remote analysis is optional and explicit; when enabled, scanned component metadata is sent to the configured remote analysis endpoint.
 
 Agent Scan does not store or log any usage data, i.e. the contents and results of your MCP tool calls.
 
 ## CLI Parameters
 
-```
-agent-scan - Security scanner for agents, MCP servers, and skills
-```
+For the complete, up-to-date list of commands, flags, options, environment variables, and exit codes, see **[CLI reference](cli-reference.md)**.
 
-### Common Options
+Quick summary:
 
-These options are available for all commands:
-
-```
---storage-file FILE    Path to store scan results and scanner state (default: ~/.agent-scan)
---analysis-url URL     Remote analysis endpoint, used only for explicit remote analysis
---analysis-mode MODE   Choose auto, local, or remote analysis (default: auto)
---analysis-provider    Analysis provider for remote analysis selection
---verification-H       Additional header for the remote analysis endpoint
---verbose              Enable detailed logging output
---print-errors         Show error details and tracebacks
---json                 Output results in JSON format instead of rich text
-```
-
-### Commands
-
-#### scan (default)
-
-Scan MCP configurations for security vulnerabilities in tools, prompts, and resources.
-
-```
-agent-scan scan [CONFIG_FILE...]
-```
-
-Options:
-
-```
---checks-per-server NUM           Number of checks to perform on each server (default: 1)
---server-timeout SECONDS          Seconds to wait before timing out server connections (default: 10)
---suppress-mcpserver-io BOOL      Suppress stdout/stderr from MCP servers (default: True)
---skills                          Autodetects and analyzes skills
---skills PATH_TO_SKILL_MD_FILE    Analyzes the specific skill
---skills PATHS_TO_DIRECTORY       Recursively detects and analyzes all skills in the directory
-```
-
-#### inspect
-
-Print descriptions of tools, prompts, and resources without verification.
-
-```
-agent-scan inspect [CONFIG_FILE...]
-```
-
-Options:
-
-```
---server-timeout SECONDS      Seconds to wait before timing out server connections (default: 10)
---suppress-mcpserver-io BOOL  Suppress stdout/stderr from MCP servers (default: True)
-```
-
-#### help
-
-Display detailed help information and examples.
-
-```bash
-agent-scan help
-```
+- **Default command:** `scan` (omit the subcommand to scan well-known agent configs)
+- **`inspect`:** discovery and MCP handshake only — no security analysis
+- **Skills:** included by default; use `--no-skills` for MCP-only (`--skills` is deprecated — see [CLI reference](cli-reference.md))
+- **`--ci`:** non-zero exit on findings (requires `--dangerously-run-mcp-servers` in CI)
+- **`--json`:** machine-readable output — see [JSON output](json-output.md)
 
 ### Examples
 
 ```bash
-# Scan all known MCP configs
+# Scan all known MCP configs and agent skills
 agent-scan
 
 # Scan a specific config file
 agent-scan ~/custom/config.json
 
+# MCP only
+agent-scan --no-skills
+
 # Just inspect tools without verification
 agent-scan inspect
+
+# CI mode
+agent-scan --ci --dangerously-run-mcp-servers
 ```

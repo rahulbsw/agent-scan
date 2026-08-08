@@ -42,6 +42,44 @@ Agent Scan helps you keep an inventory of all your installed agent components (h
 >
 > By default, Agent Scan requires explicit user consent (y/n) before starting each stdio MCP server during interactive runs. This gives you control over what gets executed on your system.
 
+## Quick Start
+
+Choose one of two ways to run Agent Scan:
+
+1. **Run the Python package with `uvx`** using the instructions below.
+2. **Download a standalone binary** for your platform from [GitHub Releases](https://github.com/rahulbsw/agent-scan/releases). Releases also include the SBOM, checksums, and source code archives.
+
+No account or API token is required for the default local scan.
+
+### Run with `uvx`
+
+Have [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on your system, then run a full scan of your machine (auto-discovers agents, MCP servers, and skills):
+
+```bash
+uvx agent-scan@latest
+```
+
+This will scan for security vulnerabilities in MCP servers, tools, prompts, and resources. It will automatically discover a variety of agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf.
+
+You can also scan particular MCP configuration files or skills:
+
+```bash
+# scan a specific mcp configuration
+uvx agent-scan@latest ~/.vscode/mcp.json
+# scan a single agent skill
+uvx agent-scan@latest ~/path/to/my/SKILL.md
+# scan all claude skills
+uvx agent-scan@latest ~/.claude/skills
+```
+
+### Run with a standalone binary
+
+Download the binary for your operating system and architecture from the [latest GitHub Release](https://github.com/rahulbsw/agent-scan/releases/latest). The release page also provides an SBOM (`sbom-<version>.json`), checksum files, and GitHub-generated source code archives.
+
+### Example Run
+
+[![Agent Scan security vulnerabilities demo](demo.svg)](https://asciinema.org/a/716858)
+
 ## Highlights
 
 - Auto-discover MCP configurations, agent tools, skills
@@ -107,40 +145,6 @@ Legend: **✓** detected · **✗** the agent supports this but Agent Scan does 
 † OpenClaw has no opened-project enumeration: its project/workspace skills are found only at the fixed `~/.openclaw/workspace/skills`
 
 ‡ Amp stores project/workspace skills at `.agents/skills` (and the `.claude/skills` compatibility path); only the user-scope `~/.config/agents/skills` is detected today, so project-scope skills are supported but not yet scanned.
-
-## Quick Start
-
-To get started, have [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on your system. No account or API token is required for the default local scan.
-
-### Scanning
-
-To run a full scan of your machine (auto-discovers agents, MCP servers, skills), run:
-
-```bash
-uvx agent-scan@latest
-```
-
-
-This will scan for security vulnerabilities in MCP servers, tools, prompts, and resources. It will automatically discover a variety of agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf.
-
-```bash
-uvx agent-scan@latest
-```
-
-You can also scan particular MCP configuration files or skills:
-
-```bash
-# scan a specific mcp configuration
-uvx agent-scan@latest ~/.vscode/mcp.json
-# scan a single agent skill
-uvx agent-scan@latest ~/path/to/my/SKILL.md
-# scan all claude skills
-uvx agent-scan@latest ~/.claude/skills
-```
-
-#### Example Run
-
-[![Agent Scan security vulnerabilities demo](demo.svg)](https://asciinema.org/a/716858)
 
 ## Scanner Capabilities
 
@@ -366,7 +370,9 @@ If you want to include Agent Scan results in your own project or registry, run w
 
 ## Documentation
 
-- [Scanning](docs/scanning.md) — How scanning works, CLI parameters, and usage examples.
+- [CLI reference](docs/cli-reference.md) — All commands, flags, options, and environment variables.
+- [Scanning](docs/scanning.md) — How scanning works and usage examples.
+- [JSON output](docs/json-output.md) — JSON schema and programmatic parsing.
 - [Issue Codes](docs/issue-codes.md) — Reference for all security issues detected by Agent Scan.
 
 ## Further Reading

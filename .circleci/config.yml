@@ -87,10 +87,13 @@ jobs:
           command: ~/.local/bin/uv sync --all-extras
       - run:
           name: Python dependency audit
-          command: ~/.local/bin/uv run --with pip-audit pip-audit --strict
+          command: ~/.local/bin/uv export --quiet --locked --all-extras --no-emit-project --no-hashes --output-file requirements-audit.txt
+      - run:
+          name: Run dependency audit
+          command: ~/.local/bin/uv run --with pip-audit pip-audit --strict --no-deps --disable-pip --requirement requirements-audit.txt
       - run:
           name: Secret scan
-          command: ~/.local/bin/uv run detect-secrets scan --all-files --exclude-files '^tests/skills/'
+          command: ~/.local/bin/uv run detect-secrets scan --all-files --exclude-files '^(tests/skills/|\.venv/|\.mypy_cache/|\.pytest_cache/|\.ruff_cache/|htmlcov/|build/|dist/)'
       - notify_slack_on_failure
 
 workflows:

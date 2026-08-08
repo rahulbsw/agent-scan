@@ -2737,37 +2737,35 @@ class TestRunInstallSkipsUninstalledClients:
         return paths
 
     @patch("agent_scan.guard._install_hooks")
-    def test_single_client_not_installed_exits(self, mock_install, tmp_path, monkeypatch, capsys):
+    def test_single_client_not_installed_returns_gracefully(self, mock_install, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("PUSH_KEY", "provided-pk")
         with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
-            with pytest.raises(SystemExit):
-                _run_install(
-                    SimpleNamespace(
-                        client="claude",
-                        url="https://hooks.example.com",
-                        tenant_id="tid-1",
-                        file=None,
-                        managed=False,
-                    )
+            _run_install(
+                SimpleNamespace(
+                    client="claude",
+                    url="https://hooks.example.com",
+                    tenant_id="tid-1",
+                    file=None,
+                    managed=False,
                 )
+            )
         mock_install.assert_not_called()
         out = capsys.readouterr().out
         assert "not installed" in out.lower()
 
     @patch("agent_scan.guard._install_hooks")
-    def test_all_clients_none_installed_exits(self, mock_install, tmp_path, monkeypatch, capsys):
+    def test_all_clients_none_installed_returns_gracefully(self, mock_install, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("PUSH_KEY", "provided-pk")
         with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
-            with pytest.raises(SystemExit):
-                _run_install(
-                    SimpleNamespace(
-                        client="all",
-                        url="https://hooks.example.com",
-                        tenant_id="tid-1",
-                        file=None,
-                        managed=False,
-                    )
+            _run_install(
+                SimpleNamespace(
+                    client="all",
+                    url="https://hooks.example.com",
+                    tenant_id="tid-1",
+                    file=None,
+                    managed=False,
                 )
+            )
         mock_install.assert_not_called()
         out = capsys.readouterr().out
         assert "No installed agents found" in out
@@ -2796,17 +2794,18 @@ class TestRunInstallSkipsUninstalledClients:
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
         monkeypatch.setenv("TENANT_ID", "tid-hl")
         with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
-            with pytest.raises(SystemExit):
-                _run_install(
-                    SimpleNamespace(
-                        client="cursor",
-                        url="https://hooks.example.com",
-                        tenant_id="",
-                        file=None,
-                        managed=False,
-                    )
+            _run_install(
+                SimpleNamespace(
+                    client="cursor",
+                    url="https://hooks.example.com",
+                    tenant_id="",
+                    file=None,
+                    managed=False,
                 )
+            )
         mock_install.assert_not_called()
+        out = capsys.readouterr().out
+        assert "not installed" in out.lower()
 
     @patch("agent_scan.guard._install_hooks")
     def test_all_clients_all_installed_installs_all(self, mock_install, tmp_path, monkeypatch):
