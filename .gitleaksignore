@@ -1,0 +1,16 @@
+# Known historical false positives in upstream test fixtures.
+#
+# These fingerprints came from the scheduled Security workflow run
+# https://github.com/rahulbsw/agent-scan/actions/runs/31297804088.
+# Keep these scoped to exact commit/file/rule/line findings so new leaks still fail CI.
+74ad3eaa018521d3aec5ae6599e13462000dbfa6:tests/unit/test_redact_prefilter_equivalence.py:slack-bot-token:23
+33f76688cda1c6d6bbf20d817878f0d962e232a1:tests/unit/test_redact_prefilter_equivalence.py:slack-bot-token:23
+5f5000d9a449ceb850eefc52272abaad08dc0056:tests/unit/test_redact.py:generic-api-key:787
+5f5000d9a449ceb850eefc52272abaad08dc0056:tests/unit/test_redact.py:generic-api-key:842
+f4d1a7be2651f1afdc489523663388e210f72971:tests/unit/test_redact.py:generic-api-key:458
+f4d1a7be2651f1afdc489523663388e210f72971:tests/unit/test_redact.py:generic-api-key:513
+e320031684ba5dd9b6e0178b3cfdd7feb51af3a9:tests/unit/test_redact.py:generic-api-key:440
+e320031684ba5dd9b6e0178b3cfdd7feb51af3a9:tests/unit/test_redact.py:generic-api-key:495
+da4306c3cb67208d4f00e95518a0b72b9fe6c13a:tests/unit/test_bootstrap_payload.py:generic-api-key:175
+05c46385e4676117155a600ed65b3fe77fd720ea:tests/unit/test_redact.py:generic-api-key:16
+a692f7c4591b2eb6ba7dc51215997d08ed127f1a:tests/unit/test_guard.py:generic-api-key:1210
