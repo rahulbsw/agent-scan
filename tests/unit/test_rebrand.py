@@ -18,7 +18,7 @@ def test_project_metadata_uses_open_agent_scan_identity():
         project = tomllib.load(f)["project"]
 
     assert project["name"] == "open-agent-scan"
-    assert project["version"] == "0.1.1"
+    assert project["version"] == "0.1.2"
     assert "Open Agent Scan" in project["description"] or "Community-led" in project["description"]
 
 
@@ -42,6 +42,17 @@ def test_release_workflow_publishes_platform_archives():
     assert ".zip" in workflow
     assert "tar -czf" in workflow
     assert "zipfile.ZipFile" in workflow
+
+
+def test_binary_build_collects_requests_charset_dependency():
+    makefile = (REPO_ROOT / "Makefile").read_text()
+    with (REPO_ROOT / "pyproject.toml").open("rb") as f:
+        project = tomllib.load(f)["project"]
+
+    assert any(dependency.startswith("chardet") for dependency in project["dependencies"])
+    assert "--hidden-import chardet" in makefile
+    assert "--hidden-import charset_normalizer" in makefile
+    assert "--collect-all charset_normalizer" in makefile
 
 
 def test_legacy_alias_warns_to_stderr(monkeypatch):

@@ -56,7 +56,7 @@ checksums, SBOMs, and build attestations.
 On macOS, extract the archive and run the CLI from Terminal:
 
 ```bash
-tar -xzf open-agent-scan-v0.1.1-macos-arm64.tar.gz
+tar -xzf open-agent-scan-v0.1.2-macos-arm64.tar.gz
 xattr -d com.apple.quarantine open-agent-scan 2>/dev/null || true
 ./open-agent-scan --help
 ```
