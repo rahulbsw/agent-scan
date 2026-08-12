@@ -1,7 +1,7 @@
 [project]
-name = "agent-scan"
-version = "0.5.17"
-description = "Agent supply chain security scanner."
+name = "open-agent-scan"
+version = "0.1.0"
+description = "Community-led local-first security scanner for AI agents, MCP servers, and agent skills."
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
@@ -43,6 +43,7 @@ override-dependencies = [
 ]
 
 [project.scripts]
+open-agent-scan = "agent_scan.run:run"
 agent-scan = "agent_scan.run:run"
 
 [build-system]
@@ -88,6 +89,7 @@ addopts = [
 # Assuming Python 3.10 as the target
 target-version = "py310"
 line-length = 120
+extend-exclude = ["tests/skills"]
 
 [tool.ruff.lint]
 select = [

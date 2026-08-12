@@ -1,1 +1,1 @@
-"""End-to-end tests package for agent-scan."""
+"""End-to-end tests package for Open Agent Scan."""

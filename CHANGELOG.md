@@ -1,3 +1,9 @@
+# Open Agent Scan
+
+- `0.1.0` first independent Open Agent Scan release. Renamed the package and primary CLI to `open-agent-scan`, kept `agent-scan` as a temporary compatibility alias, added community governance and attribution documents, added local rule metadata, added suspicious MCP startup command and cross-server influence checks, and renamed release assets to `open-agent-scan-*`.
+
+# Upstream agent-scan History
+
 - `0.1.4.0` initial public release
 - `0.1.4.1` `inspect` command, reworked output
 - `0.1.4.2` added SSE support

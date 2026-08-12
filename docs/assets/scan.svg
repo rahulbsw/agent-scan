@@ -126,13 +126,13 @@
            rx="30" />
       </g>
       <g
-         id="agent-scan-scanner"
-         aria-label="Agent Scan Scanner">
+         id="open-agent-scan-scanner"
+         aria-label="Open Agent Scan Scanner">
         <text
            style="font-size:24.4051px;font-family:NeueMontreal-Regular, 'Neue Montreal', 'Helvetica Neue', Helvetica, Arial, sans-serif;fill:#ffffff"
            text-anchor="middle"
            x="505"
-           y="188">Agent Scan</text>
+           y="188">Open Agent Scan</text>
         <text
            style="font-size:24.4051px;font-family:NeueMontreal-Regular, 'Neue Montreal', 'Helvetica Neue', Helvetica, Arial, sans-serif;fill:#ffffff"
            text-anchor="middle"
@@ -183,11 +183,11 @@
              rx="7" />
         </g>
         <text
-           id="agent-scan-text"
+           id="open-agent-scan-text"
            style="font-size:24px;font-family:AndaleMono, 'Andale Mono', 'Courier New', monospace;fill:#303030"
            x="22"
            y="40"
-           aria-label="&gt; agent-scan">&gt; agent-scan</text>
+           aria-label="&gt; open-agent-scan">&gt; open-agent-scan</text>
       </g>
       <g
          id="Group-4-Copy"

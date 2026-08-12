@@ -26,7 +26,7 @@ $ErrorActionPreference = "Stop"
 # Hook API version.
 $VERSION = "2025-11-11"
 
-# Agent-scan CLI version (replaced at install time).
+# Open Agent Scan CLI version (replaced at install time).
 $AGENT_SCAN_VERSION = "__AGENT_SCAN_VERSION__"
 
 # ---------------------------------------------------------------------------
@@ -58,7 +58,7 @@ switch ($Client) {
     }
 }
 
-$userAgent = "agent-scan/agent-guard.ps1 Agent Scan v$AGENT_SCAN_VERSION"
+$userAgent = "open-agent-scan/agent-guard.ps1 Open Agent Scan v$AGENT_SCAN_VERSION"
 $url = "${RemoteUrl}${endpoint}?version=$VERSION"
 
 # Read payload from stdin as UTF-8 (strips BOM automatically)

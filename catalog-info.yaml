@@ -1,8 +1,8 @@
 apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
-  name: agent-scan
+  name: open-agent-scan
 spec:
   type: external-tooling
-  lifecycle: "-"
-  owner: emerging-tech-strategy_llm
+  lifecycle: experimental
+  owner: open-agent-scan-maintainers

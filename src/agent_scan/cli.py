@@ -98,12 +98,21 @@ def get_invoking_name():
                 break
         cmd = " ".join(cmd)
     except Exception:
-        cmd = "agent-scan"
+        cmd = "open-agent-scan"
     return cmd
 
 
 def str2bool(v: str) -> bool:
     return v.lower() in ("true", "1", "t", "y", "yes")
+
+
+def parse_analysis_provider(value: str) -> Literal["local", "remote"]:
+    normalized = value.strip().lower()
+    if normalized == "local":
+        return "local"
+    if normalized in {"remote", "snyk"}:
+        return "remote"
+    raise argparse.ArgumentTypeError("expected 'local' or 'remote'")
 
 
 def parse_control_servers(argv) -> list[ControlServer]:
@@ -157,7 +166,7 @@ def add_common_arguments(parser):
     parser.add_argument(
         "--storage-file",
         type=str,
-        default="~/.agent-scan",
+        default="~/.open-agent-scan",
         help="Path to store scan results and scanner state",
         metavar="FILE",
     )
@@ -176,9 +185,12 @@ def add_common_arguments(parser):
     )
     parser.add_argument(
         "--analysis-provider",
-        choices=["local", "snyk"],
+        type=parse_analysis_provider,
         default="local",
-        help="Analysis provider to use when --analysis-mode is remote or auto selects remote.",
+        help=(
+            "Provider selection for analysis. Use 'local' for deterministic local checks "
+            "or 'remote' for an explicitly configured analysis service."
+        ),
     )
     parser.add_argument(
         "--verification-H",
@@ -426,7 +438,7 @@ def enforce_consent_requirements(args) -> None:
     if ci_mode and not dangerously_run_mcp_servers:
         rich.print(
             "[bold red]Running with --ci requires --dangerously-run-mcp-servers.[/bold red]\n"
-            "Agent Scan starts subprocesses for every stdio MCP server it "
+            "Open Agent Scan starts subprocesses for every stdio MCP server it "
             "scans, so CI runs must confirm trust explicitly.",
             file=sys.stderr,
         )
@@ -439,7 +451,7 @@ def main():
     program_name = get_invoking_name()
     parser = argparse.ArgumentParser(
         prog=program_name,
-        description="Agent Scan: Security scanner for Model Context Protocol servers, agents, skills and tools",
+        description="Open Agent Scan: Security scanner for Model Context Protocol servers, agents, skills and tools",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
@@ -605,7 +617,7 @@ def main():
 
     # Display version banner
     if not (hasattr(args, "json") and args.json):
-        rich.print(f"[bold blue]Agent Scan v{version_info}[/bold blue]\n")
+        rich.print(f"[bold blue]Open Agent Scan v{version_info}[/bold blue]\n")
 
     # Set up logging if verbose flag is enabled
     do_log = hasattr(args, "verbose") and args.verbose

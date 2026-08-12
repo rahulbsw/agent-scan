@@ -1,0 +1,52 @@
+name: Rule proposal
+description: Propose a new scanner rule or a material rule change.
+title: "[Rule]: "
+labels: ["rule-proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for deterministic scanner rules. Report vulnerabilities in Open Agent Scan itself through GitHub Security Advisories instead.
+  - type: textarea
+    id: threat
+    attributes:
+      label: Threat model
+      description: What attack or risky behavior should the rule detect?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Detection evidence
+      description: What exact local evidence can be detected without network or LLM calls?
+    validations:
+      required: true
+  - type: input
+    id: references
+    attributes:
+      label: References
+      description: OWASP, MCP, NIST, OpenSSF, paper, advisory, or reproducible research link.
+    validations:
+      required: true
+  - type: dropdown
+    id: confidence
+    attributes:
+      label: Expected confidence
+      options:
+        - high
+        - medium
+        - low
+    validations:
+      required: true
+  - type: textarea
+    id: false_positives
+    attributes:
+      label: False-positive considerations
+      description: What legitimate cases might match?
+    validations:
+      required: true
+  - type: textarea
+    id: fixtures
+    attributes:
+      label: Suggested fixtures
+      description: Positive and negative test cases, using synthetic data only.

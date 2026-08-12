@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent_scan.cli import MissingIdentifierError, parse_control_servers
+from agent_scan.cli import MissingIdentifierError, parse_analysis_provider, parse_control_servers
 from agent_scan.models import ControlServer, Issue, RemoteServer, ScanError, ScanPathResult, ServerScanResult
 
 
@@ -91,7 +91,7 @@ class TestControlServerParsing:
                     "--control-identifier",
                     "id2",
                     "--storage-file",
-                    "~/.agent-scan",
+                    "~/.open-agent-scan",
                 ],
                 [
                     ControlServer(url="https://server1.com", headers={}, identifier="user1"),
@@ -209,6 +209,19 @@ class TestCLIArgumentParsing:
         assert control_servers[0].identifier == "user1@example.com"
         assert control_servers[1].url == "https://server2.com"
         assert control_servers[1].identifier == "serial-123"
+
+    def test_analysis_provider_accepts_service_neutral_values(self):
+        assert parse_analysis_provider("local") == "local"
+        assert parse_analysis_provider("remote") == "remote"
+
+    def test_analysis_provider_accepts_legacy_snyk_alias(self):
+        assert parse_analysis_provider("snyk") == "remote"
+
+    def test_analysis_provider_rejects_unknown_value(self):
+        import argparse
+
+        with pytest.raises(argparse.ArgumentTypeError):
+            parse_analysis_provider("example")
 
 
 class TestSkillsFlag:

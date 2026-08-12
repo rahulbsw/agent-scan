@@ -48,13 +48,13 @@ async def _async_analysis_enabled(
             ) as response:
                 if response.status != 200:
                     logger.warning(
-                        "Agent Scan config request returned %s; using synchronous analysis.", response.status
+                        "Open Agent Scan config request returned %s; using synchronous analysis.", response.status
                     )
                     return False
                 data = await response.json()
                 return bool(data.get("async_analysis_enabled", False))
     except (TimeoutError, aiohttp.ClientError) as e:
-        logger.warning("Agent Scan config request failed (%s); using synchronous analysis.", e)
+        logger.warning("Open Agent Scan config request failed (%s); using synchronous analysis.", e)
         return False
 
 
@@ -178,9 +178,10 @@ def setup_aiohttp_debug_logging(verbose: bool) -> list[aiohttp.TraceConfig]:
 
 
 # Environment variables that may point to an additional CA certificate (or bundle)
-# to trust. The Snyk CLI runs agent-scan behind a local authenticating reverse proxy
-# and exports these variables pointing at the proxy's self-signed certificate. Loading
-# them lets proxied TLS calls succeed without requiring --skip-ssl-verify.
+# to trust. Some managed CLI integrations run Open Agent Scan behind a local
+# authenticating reverse proxy and export these variables pointing at the proxy's
+# self-signed certificate. Loading them lets proxied TLS calls succeed without
+# requiring --skip-ssl-verify.
 _CA_CERT_ENV_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS")
 
 
@@ -188,7 +189,7 @@ def load_extra_ca_certs(ssl_context: ssl.SSLContext) -> None:
     """Trust additional CA certificates referenced by environment variables.
 
     Certificates are added on top of the existing (certifi) trust store rather than
-    replacing it, so both public endpoints and the Snyk CLI's proxy are trusted.
+    replacing it, so both public endpoints and managed CLI proxies are trusted.
     Missing or invalid files are logged and skipped rather than raising.
     """
     loaded: set[str] = set()
@@ -217,7 +218,7 @@ def setup_tcp_connector(skip_ssl_verify: bool = False) -> aiohttp.TCPConnector:
     When skip_ssl_verify is True, disable SSL verification and hostname checking.
     Otherwise, use a secure default SSL context with certifi CA and TLSv1.2+, extended
     with any additional CA certificates referenced by the environment (see
-    load_extra_ca_certs) so calls proxied through the Snyk CLI are trusted.
+    load_extra_ca_certs) so calls proxied through managed CLI integrations are trusted.
     """
     if skip_ssl_verify:
         # Disable SSL verification at the connector level
@@ -313,7 +314,7 @@ async def analyze_machine(
             await _submit_async_analysis(async_url, payload, headers, identifier, trace_configs, skip_ssl_verify)
             return scan_paths
     elif os.getenv("SNYK_CLI_USE", "false").lower() == "true":
-        # Snyk CLI mode with authentication through the proxy
+        # Legacy managed CLI proxy mode.
         # Update the analysis_url to use the use the api gateway authenticated endpoint
         analysis_url = analysis_url.replace(
             "/hidden/mcp-scan/analysis-machine", "/hidden/mcp-scan/cli/analysis-machine"

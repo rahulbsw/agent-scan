@@ -1,6 +1,6 @@
 # Issue Code Reference
 
-This is the reference for all issues that can be detected via `agent-scan`.
+This is the reference for all issues that can be detected via `open-agent-scan`.
 
 ---
 
@@ -31,6 +31,14 @@ This is a [tool shadowing attack](https://invariantlabs.ai/blog/mcp-security-not
 The tool description contains words commonly associated with prompt injection attempts, such as "important", "crucial", "critical", "vital", "urgent", "ignore", "disregard", "override", or "bypass". These words are often used in tool poisoning attacks to draw the agent's attention and override its normal decision-making process.
 
 While the presence of these words alone does not confirm malicious intent, it is a signal worth investigating, especially when combined with unusual tool descriptions.
+
+<a id="W023"></a>
+
+### ![W023 | medium](https://img.shields.io/badge/W023-medium-yellow) ![MCP](https://img.shields.io/badge/MCP-blue) Cross-server influence instruction
+
+A component explicitly references another inspected MCP server by name in a way that appears to call, invoke, or influence that other server.
+
+Cross-server instructions can be legitimate in orchestrator setups, but they also match tool-poisoning and tool-shadowing patterns where one server tries to alter how the agent uses another server's tools.
 
 ---
 
@@ -90,6 +98,14 @@ The MCP server grants access to tools that can modify or delete local files, alt
 
 Even local-only modifications carry risk of permanent data loss or project corruption within a user's workspace. If the agent misinterprets instructions or hallucinates, it can delete uncommitted work, overwrite configuration files, or corrupt local repositories, requiring manual recovery or resulting in lost productivity.
 
+<a id="W022"></a>
+
+### ![W022 | high](https://img.shields.io/badge/W022-high-orange) ![MCP](https://img.shields.io/badge/MCP-blue) Suspicious MCP startup command
+
+The MCP server is configured with a startup command that matches high-risk local execution patterns, such as downloading content and piping it into an interpreter, decoding embedded payloads, running remote scripts through a shell, or launching unpinned package-runner dependencies through tools such as `npx` or `uvx`.
+
+MCP stdio servers run as local subprocesses with the user's privileges. Treat installer-style startup commands as supply-chain risk unless the command, package source, version pinning, and expected permissions are understood.
+
 ---
 
 ## Compromised Skills
@@ -108,7 +124,7 @@ Detected a prompt injection in the skill instructions. The skill contains hidden
 
 Detected a suspicious URL in the skill instructions that could lead the agent to download and execute malicious scripts or binaries. This includes links to executables from untrusted sources, typosquatting of official packages, URL shorteners that obscure the destination, and personal file hosting services.
 
-Such links pose a significant risk as they indicate that Agent Scan cannot verify the full behavior of a skill (analysis is limited to the skill's own content, not externally referenced dependencies).
+Such links pose a significant risk as they indicate that Open Agent Scan cannot verify the full behavior of a skill (analysis is limited to the skill's own content, not externally referenced dependencies).
 
 <a id="E006"></a>
 

@@ -5,7 +5,7 @@ The canary executor executor (canary executor ``canary.run_canary``) is a *gener
 primitives: it calls ``scope.commands(ctx)`` and runs each :class:`~canary_test_supported_agents.base.SeedCommand` as
 a subprocess (reading ``argv`` / ``run_in_project`` / ``timeout`` / ``non_fatal``), and it calls
 ``scope.files()`` and copies each :class:`~canary_test_supported_agents.base.FixtureFile` into the project (reading
-``src`` / ``dest``). This test pins that contract from the agent-scan side — every concrete
+``src`` / ``dest``). This test pins that contract from the Open Agent Scan side — every concrete
 :class:`~canary_test_supported_agents.base.Scope` subclass must be exercised by a real canary and must emit commands
 the executor can run (non-empty string ``argv``, sane flags, positive ``timeout``) and fixtures the executor
 can copy (non-empty *relative* ``src``/``dest``, no ``..`` escape). A new Scope subclass that returns

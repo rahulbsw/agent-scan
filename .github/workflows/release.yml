@@ -1,18 +1,21 @@
-name: Fork Release
+name: Release
 
 on:
   push:
     tags:
-      - "fork-v*"
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing fork release tag, for example fork-v0.5.14.1"
+        description: "Existing release tag, for example v0.1.0"
         required: true
         type: string
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 jobs:
   prepare-release:
@@ -34,20 +37,12 @@ jobs:
           raw_tag="${raw_tag#refs/heads/}"
 
           case "$raw_tag" in
-            fork=v*)
-              checkout_ref="${raw_tag#fork=}"
-              release_tag="fork-${checkout_ref}"
-              ;;
-            fork-v*)
+            v*)
               checkout_ref="$raw_tag"
               release_tag="$raw_tag"
               ;;
-            v*)
-              checkout_ref="$raw_tag"
-              release_tag="fork-${raw_tag}"
-              ;;
             *)
-              echo "::error::Release tag must be fork-v<version> or v<version>. Got: $raw_tag"
+              echo "::error::Release tag must be v<version>. Got: $raw_tag"
               exit 1
               ;;
           esac
@@ -68,7 +63,7 @@ jobs:
           set -euo pipefail
 
           if ! git ls-remote --exit-code origin "refs/tags/$CHECKOUT_REF" >/dev/null; then
-            echo "::error::Release source tag '$CHECKOUT_REF' does not exist in this repository."
+            echo "::error::Release tag '$CHECKOUT_REF' does not exist in this repository."
             exit 1
           fi
 
@@ -107,14 +102,19 @@ jobs:
       - name: Stage release asset
         shell: bash
         env:
-          BINARY_PATH: dist/agent-scan${{ matrix.ext }}
-          ASSET_NAME: agent-scan-${{ needs.prepare-release.outputs.release_tag }}-${{ matrix.target }}${{ matrix.ext }}
+          BINARY_PATH: dist/open-agent-scan${{ matrix.ext }}
+          ASSET_NAME: open-agent-scan-${{ needs.prepare-release.outputs.release_tag }}-${{ matrix.target }}${{ matrix.ext }}
         run: |
+          set -euo pipefail
           mkdir -p release-assets
           cp "$BINARY_PATH" "release-assets/$ASSET_NAME"
+      - name: Attest binary provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: "release-assets/*"
       - uses: actions/upload-artifact@v4
         with:
-          name: agent-scan-${{ matrix.target }}
+          name: open-agent-scan-${{ matrix.target }}
           path: release-assets/*
           if-no-files-found: error
 
@@ -133,11 +133,16 @@ jobs:
         run: make build
       - name: Stage release assets
         run: |
+          set -euo pipefail
           mkdir -p release-assets
           cp dist/*.whl dist/*.tar.gz release-assets/
+      - name: Attest package provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: "release-assets/*"
       - uses: actions/upload-artifact@v4
         with:
-          name: agent-scan-python-package
+          name: open-agent-scan-python-package
           path: release-assets/*
           if-no-files-found: error
 
@@ -152,13 +157,50 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare-release.outputs.checkout_ref }}
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: release-assets
+          format: spdx-json
+          output-file: release-assets/sbom-${{ needs.prepare-release.outputs.release_tag }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
       - name: Generate checksums
         working-directory: release-assets
         run: sha256sum * > sha256sums.txt
+      - name: Attest release SBOM
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            release-assets/open-agent-scan-*
+            release-assets/open_agent_scan-*
+          sbom-path: release-assets/sbom-${{ needs.prepare-release.outputs.release_tag }}.spdx.json
+      - name: Write release notes
+        env:
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          upstream_base="$(git describe --tags --match 'v*' --exclude "$RELEASE_TAG" --abbrev=0 2>/dev/null || true)"
+          if [ -z "$upstream_base" ]; then
+            upstream_base="see retained git history and FORK_MAINTENANCE.md"
+          fi
+
+          {
+            echo "Open Agent Scan $RELEASE_TAG"
+            echo
+            echo "Open Agent Scan is an independent downstream derivative of snyk/agent-scan."
+            echo "It is not affiliated with, sponsored by, or endorsed by Snyk or Invariant Labs."
+            echo
+            echo "Upstream base version: $upstream_base"
+            echo
+            echo "Release assets are named open-agent-scan-* and include checksums, an SPDX SBOM, and GitHub artifact attestations."
+          } > release-notes.md
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -167,14 +209,15 @@ jobs:
           set -euo pipefail
 
           case "$RELEASE_TAG" in
-            fork-v*) ;;
-            *) echo "Release tag must start with fork-v"; exit 1 ;;
+            v*) ;;
+            *) echo "Release tag must start with v"; exit 1 ;;
           esac
 
           target_sha="$(git rev-parse HEAD)"
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --title "Open Agent Scan $RELEASE_TAG" --notes-file release-notes.md
             gh release upload "$RELEASE_TAG" release-assets/* --clobber
           else
-            gh release create "$RELEASE_TAG" release-assets/* --title "Agent Scan $RELEASE_TAG" --target "$target_sha" --generate-notes
+            gh release create "$RELEASE_TAG" release-assets/* --title "Open Agent Scan $RELEASE_TAG" --target "$target_sha" --notes-file release-notes.md
           fi

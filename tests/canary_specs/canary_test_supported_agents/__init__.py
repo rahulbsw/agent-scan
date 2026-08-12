@@ -7,7 +7,7 @@ runner-agnostic; an external executor (the canary executor canary) imports :data
 runs the commands against the real binary in an isolated home.
 
 These specs are test support, not part of the shipped ``agent_scan`` package: they live under
-``tests/canary_specs/canary_test_supported_agents`` (not in the wheel). agent-scan's own tests import
+``tests/canary_specs/canary_test_supported_agents`` (not in the wheel). Open Agent Scan's own tests import
 them via ``pythonpath = ["tests/canary_specs"]``; the canary executor executor clones this repo and imports
 them from the source tree with ``PYTHONPATH=<clone>/tests/canary_specs``. Because the canary still lives
 in the same repo as the discoverers, it cannot drift from them — ``tests/unit/test_canary_covers_scopes.py``

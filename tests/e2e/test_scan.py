@@ -29,7 +29,7 @@ class TestFullScanFlow:
     )
     def test_basic(self, agent_scan_cmd, sample_config_file):
         """Test a basic complete scan workflow from CLI to results. This does not mean that the results are correct or the servers can be run."""
-        # Run agent-scan with JSON output mode
+        # Run Open Agent Scan with JSON output mode
         result = subprocess.run(
             [*agent_scan_cmd, "scan", "--json", "--dangerously-run-mcp-servers", sample_config_file],
             capture_output=True,
@@ -242,7 +242,7 @@ class TestFullScanFlow:
         # Consent UI is rendered on stderr; verify the prompt was actually shown
         # and the server was recorded as declined.
         stderr_text = result.stderr.decode("utf-8", errors="replace")
-        assert "Allow Agent Scan to start 'Math'?" in stderr_text, (
+        assert "Allow Open Agent Scan to start 'Math'?" in stderr_text, (
             f"Expected per-server consent prompt for 'Math'. stderr={stderr_text!r}"
         )
         assert "Declined: 'Math' will not be started." in stderr_text, (
@@ -286,7 +286,7 @@ class TestFullScanFlow:
             f"inspect with allowed consent should exit 0, got {result.returncode}. stderr={result.stderr!r}"
         )
         stderr_text = result.stderr.decode("utf-8", errors="replace")
-        assert "Allow Agent Scan to start 'Math'?" in stderr_text, (
+        assert "Allow Open Agent Scan to start 'Math'?" in stderr_text, (
             f"Expected per-server consent prompt for 'Math'. stderr={stderr_text!r}"
         )
         assert "Allowed: 'Math' will be started." in stderr_text, (
@@ -319,7 +319,7 @@ class TestFullScanFlow:
         # Consent UI is rendered on stderr; verify the prompt was actually shown
         # and the server was recorded as declined.
         stderr_text = result.stderr.decode("utf-8", errors="replace")
-        assert "Allow Agent Scan to start 'Math'?" in stderr_text, (
+        assert "Allow Open Agent Scan to start 'Math'?" in stderr_text, (
             f"Expected per-server consent prompt for 'Math'. stderr={stderr_text!r}"
         )
         assert "Declined: 'Math' will not be started." in stderr_text, (

@@ -774,16 +774,18 @@ def _run_status() -> None:
     rich.print()
 
     rich.print("[dim]# user-level flow[/dim]")
-    rich.print("[dim]agent-scan guard install <client> --url <REMOTE_URL> --push-key <PUSH_KEY>[/dim]")
+    rich.print("[dim]open-agent-scan guard install <client> --url <REMOTE_URL> --push-key <PUSH_KEY>[/dim]")
     rich.print()
     rich.print("[dim]# managed flow[/dim]")
-    rich.print("[dim]agent-scan guard install <client> --managed --url <REMOTE_URL> --push-key <PUSH_KEY>[/dim]")
+    rich.print("[dim]open-agent-scan guard install <client> --managed --url <REMOTE_URL> --push-key <PUSH_KEY>[/dim]")
     rich.print()
     rich.print("[dim]# headless flow (MDM)[/dim]")
-    rich.print("[dim]PUSH_KEY=<YOUR_PUSH_KEY> agent-scan guard install <client> --url <REMOTE_URL> [--managed][/dim]")
+    rich.print(
+        "[dim]PUSH_KEY=<YOUR_PUSH_KEY> open-agent-scan guard install <client> --url <REMOTE_URL> [--managed][/dim]"
+    )
     rich.print()
     rich.print(
-        "[dim]If hooks are already installed and up to date, install commands are no-ops. To uninstall use 'agent-scan guard uninstall <client>'[/dim]"
+        "[dim]If hooks are already installed and up to date, install commands are no-ops. To uninstall use 'open-agent-scan guard uninstall <client>'[/dim]"
     )
 
 
@@ -984,7 +986,7 @@ def _normalize_push_keys(value: object) -> object:
 
 
 def _extract_guard_hooks(entries: list) -> list:
-    """Extract only guard (agent-scan) hooks from a list of hook entries/groups."""
+    """Extract only Open Agent Scan guard hooks from a list of hook entries/groups."""
     result = []
     for item in entries:
         if isinstance(item, dict) and "hooks" in item:
@@ -998,7 +1000,7 @@ def _extract_guard_hooks(entries: list) -> list:
 def _compute_hooks_diff(old_hooks: dict, new_hooks: dict) -> dict:
     """Compare existing hooks (old) against expected hooks (new).
 
-    Only guard (agent-scan) hooks are compared; customer hooks are ignored.
+    Only Open Agent Scan guard hooks are compared; customer hooks are ignored.
 
     The diff reflects what someone changed in the existing config relative to
     what we expect:
