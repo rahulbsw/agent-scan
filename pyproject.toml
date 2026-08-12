@@ -1,6 +1,6 @@
 [project]
 name = "open-agent-scan"
-version = "0.1.0"
+version = "0.1.1"
 description = "Community-led local-first security scanner for AI agents, MCP servers, and agent skills."
 readme = "README.md"
 license = {text = "Apache-2.0"}

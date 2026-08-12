@@ -256,6 +256,23 @@ open-agent-scan guard uninstall all
 
 ---
 
+## Release Archives
+
+GitHub Releases publish standalone CLI binaries as archives:
+
+- macOS/Linux: `open-agent-scan-<version>-<platform>.tar.gz`
+- Windows: `open-agent-scan-<version>-windows-x64.zip`
+
+For macOS, extract and run from Terminal:
+
+```bash
+tar -xzf open-agent-scan-v0.1.1-macos-arm64.tar.gz
+xattr -d com.apple.quarantine open-agent-scan 2>/dev/null || true
+./open-agent-scan --help
+```
+
+---
+
 ## Related Documentation
 
 - [Scanning overview](scanning.md)

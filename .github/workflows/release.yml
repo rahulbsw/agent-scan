@@ -80,18 +80,23 @@ jobs:
           - os: ubuntu-latest
             target: linux-x64
             ext: ""
+            archive_ext: ".tar.gz"
           - os: ubuntu-24.04-arm
             target: linux-arm64
             ext: ""
+            archive_ext: ".tar.gz"
           - os: macos-latest
             target: macos-arm64
             ext: ""
+            archive_ext: ".tar.gz"
           - os: macos-15-intel
             target: macos-x64
             ext: ""
+            archive_ext: ".tar.gz"
           - os: windows-latest
             target: windows-x64
             ext: ".exe"
+            archive_ext: ".zip"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -103,11 +108,31 @@ jobs:
         shell: bash
         env:
           BINARY_PATH: dist/open-agent-scan${{ matrix.ext }}
-          ASSET_NAME: open-agent-scan-${{ needs.prepare-release.outputs.release_tag }}-${{ matrix.target }}${{ matrix.ext }}
+          BINARY_NAME: open-agent-scan${{ matrix.ext }}
+          ASSET_NAME: open-agent-scan-${{ needs.prepare-release.outputs.release_tag }}-${{ matrix.target }}${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          cp "$BINARY_PATH" "release-assets/$ASSET_NAME"
+
+          case "$ASSET_NAME" in
+            *.zip)
+              python - <<'PY'
+          import os
+          import zipfile
+
+          archive_path = os.path.join("release-assets", os.environ["ASSET_NAME"])
+          with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+              archive.write(os.environ["BINARY_PATH"], os.environ["BINARY_NAME"])
+          PY
+              ;;
+            *.tar.gz)
+              tar -czf "release-assets/$ASSET_NAME" -C dist "$BINARY_NAME"
+              ;;
+            *)
+              echo "::error::Unsupported release asset archive type: $ASSET_NAME"
+              exit 1
+              ;;
+          esac
       - name: Attest binary provenance
         uses: actions/attest@v4
         with:
@@ -199,7 +224,15 @@ jobs:
             echo
             echo "Upstream base version: $upstream_base"
             echo
-            echo "Release assets are named open-agent-scan-* and include checksums, an SPDX SBOM, and GitHub artifact attestations."
+            echo "Standalone CLI binaries are packaged as .tar.gz archives on macOS/Linux and .zip on Windows."
+            echo "Extract the archive, then run open-agent-scan from a terminal."
+            echo
+            echo "macOS example:"
+            echo '  tar -xzf open-agent-scan-'"$RELEASE_TAG"'-macos-arm64.tar.gz'
+            echo '  xattr -d com.apple.quarantine open-agent-scan 2>/dev/null || true'
+            echo '  ./open-agent-scan --help'
+            echo
+            echo "Release assets include checksums, an SPDX SBOM, and GitHub artifact attestations."
           } > release-notes.md
       - name: Publish GitHub release
         env:
