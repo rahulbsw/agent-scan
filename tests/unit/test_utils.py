@@ -240,7 +240,7 @@ class TestGetReadableHomeDirectoriesPosix:
         result = get_readable_home_directories(all_users=False)
 
         assert len(result) == 1
-        home_path, username = result[0]
+        home_path, _username = result[0]
         assert home_path == os.path.expanduser("~") or str(home_path) == os.path.expanduser("~")
 
     def test_all_users_linux_enumerates_above_uid_threshold(self, monkeypatch, tmp_path):

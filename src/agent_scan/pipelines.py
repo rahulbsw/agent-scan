@@ -46,7 +46,7 @@ class AnalyzeArgs(BaseModel):
     max_retries: int = 3
     skip_ssl_verify: bool = False
     analysis_mode: Literal["auto", "local", "remote"] = "auto"
-    analysis_provider: Literal["local", "snyk"] = "local"
+    analysis_provider: Literal["local", "remote"] = "local"
 
 
 class PushArgs(BaseModel):

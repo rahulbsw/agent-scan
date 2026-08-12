@@ -49,7 +49,7 @@ async def test_explicit_remote_analysis_mode_calls_remote_verifier(monkeypatch):
         AnalyzeArgs(
             analysis_url="https://example.invalid/analysis",
             analysis_mode="remote",
-            analysis_provider="snyk",
+            analysis_provider="remote",
         ),
         PushArgs(control_servers=[]),
     )
@@ -77,7 +77,7 @@ async def test_auto_analysis_mode_with_push_key_uses_remote_verifier(monkeypatch
         AnalyzeArgs(
             analysis_url="https://example.invalid/analysis",
             analysis_mode="auto",
-            analysis_provider="snyk",
+            analysis_provider="remote",
         ),
         PushArgs(
             control_servers=[

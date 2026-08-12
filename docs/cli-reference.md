@@ -1,8 +1,8 @@
-# Agent Scan CLI Reference
+# Open Agent Scan CLI Reference
 
-Complete reference for the forked `agent-scan` command-line interface.
+Complete reference for the `open-agent-scan` command-line interface.
 
-Agent Scan runs local analysis by default. Remote analysis and hook uploads are explicit opt-ins configured with URLs, headers, and pre-provisioned push keys.
+Open Agent Scan runs local analysis by default. Remote analysis and hook uploads are explicit opt-ins configured with URLs, headers, and pre-provisioned push keys.
 
 Unless noted, flags apply to the standalone CLI. When no subcommand is given, `scan` is assumed.
 
@@ -24,8 +24,8 @@ Unless noted, flags apply to the standalone CLI. When no subcommand is given, `s
 Most scan-like commands accept optional config paths:
 
 ```bash
-agent-scan [scan] [CONFIG_FILE ...]
-agent-scan inspect [CONFIG_FILE ...]
+open-agent-scan [scan] [CONFIG_FILE ...]
+open-agent-scan inspect [CONFIG_FILE ...]
 ```
 
 | Argument | Applies to | Description |
@@ -51,7 +51,7 @@ These flags are shared by `scan` and `inspect`.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--storage-file FILE` | string | `~/.agent-scan` | Path for local scan state and cached results. |
+| `--storage-file FILE` | string | `~/.open-agent-scan` | Path for local scan state and cached results. |
 | `--no-skills` | boolean | off | Scan MCP servers only. Skills are included by default on every scan and inspect invocation. |
 | `--skills` | boolean | on | Deprecated compatibility flag. Prefer omitting it; use `--no-skills` to opt out. |
 | `--scan-all-users` | boolean | `false` | Scan all readable user home directories on the machine, not just the current user. |
@@ -62,7 +62,7 @@ These flags are shared by `scan` and `inspect`.
 | --- | --- | --- | --- |
 | `--analysis-mode MODE` | `auto`, `local`, `remote` | `auto` | Choose local analysis, remote analysis, or auto. In this fork, `auto` is local unless a push key or remote provider is configured. |
 | `--analysis-url URL` | string | empty | Remote analysis endpoint. Used only with `--analysis-mode remote` or an explicit remote provider. |
-| `--analysis-provider PROVIDER` | string | `local` | Analysis provider selection used with remote analysis. |
+| `--analysis-provider PROVIDER` | `local`, `remote` | `local` | Provider selection used with analysis mode. The legacy `snyk` value is accepted as an alias for `remote` for one migration window. |
 | `--verification-H HEADER` | repeatable | - | Extra HTTP header for the remote analysis request. Format: `Name: value`. |
 | `--skip-ssl-verify` | boolean | `false` | Disable TLS certificate verification for remote analysis and upload HTTP calls. |
 | `--mcp-oauth-tokens-path PATH` | string | - | JSON file containing MCP OAuth tokens used when connecting to OAuth-protected remote MCP servers. |
@@ -82,7 +82,7 @@ These flags are shared by `scan` and `inspect`.
 Options after a `--control-server` apply only to that server until the next `--control-server`:
 
 ```bash
-agent-scan scan \
+open-agent-scan scan \
   --control-server https://server1.example/push \
   --control-server-H "Authorization: Bearer token1" \
   --control-identifier user@example.com \
@@ -91,7 +91,7 @@ agent-scan scan \
   --control-identifier serial-123
 ```
 
-When a control-server header contains a push key, Agent Scan treats the run as unattended. Stdio MCP behavior changes as follows:
+When a control-server header contains a push key, Open Agent Scan treats the run as unattended. Stdio MCP behavior changes as follows:
 
 | `--dangerously-run-mcp-servers` | Consent prompts | Stdio MCP subprocesses |
 | --- | --- | --- |
@@ -172,14 +172,14 @@ Handshake and consent matrix for stdio MCP servers:
 Manage Agent Guard hooks for Claude Code, Cursor, and Codex.
 
 ```bash
-agent-scan guard [install|uninstall] [OPTIONS]
-agent-scan guard
+open-agent-scan guard [install|uninstall] [OPTIONS]
+open-agent-scan guard
 ```
 
 ### Guard Install
 
 ```bash
-agent-scan guard install {claude,cursor,codex,all} [OPTIONS]
+open-agent-scan guard install {claude,cursor,codex,all} [OPTIONS]
 ```
 
 | Flag | Type | Default | Description |
@@ -194,7 +194,7 @@ agent-scan guard install {claude,cursor,codex,all} [OPTIONS]
 ### Guard Uninstall
 
 ```bash
-agent-scan guard uninstall {claude,cursor,codex,all} [OPTIONS]
+open-agent-scan guard uninstall {claude,cursor,codex,all} [OPTIONS]
 ```
 
 | Flag | Type | Default | Description |
@@ -216,42 +216,42 @@ Guard environment variables:
 
 ```bash
 # Full machine scan
-uvx agent-scan@latest
+uvx open-agent-scan@latest
 
 # MCP only, no skills
-uvx agent-scan@latest --no-skills
+uvx open-agent-scan@latest --no-skills
 
 # Specific config or skill directory
-uvx agent-scan@latest ~/.cursor/mcp.json
-uvx agent-scan@latest ~/.claude/skills
+uvx open-agent-scan@latest ~/.cursor/mcp.json
+uvx open-agent-scan@latest ~/.claude/skills
 
 # Inspect without analysis
-uvx agent-scan@latest inspect
+uvx open-agent-scan@latest inspect
 
 # JSON output
-uvx agent-scan@latest --json ./my-skill
+uvx open-agent-scan@latest --json ./my-skill
 
 # CI pipeline
-uvx agent-scan@latest --ci --dangerously-run-mcp-servers --json
+uvx open-agent-scan@latest --ci --dangerously-run-mcp-servers --json
 
 # CI with ignored warnings
-uvx agent-scan@latest --ci --dangerously-run-mcp-servers \
+uvx open-agent-scan@latest --ci --dangerously-run-mcp-servers \
   --ignore-issues-codes W001,W015
 
 # Explicit remote analysis
-uvx agent-scan@latest scan \
+uvx open-agent-scan@latest scan \
   --analysis-mode remote \
   --analysis-url "https://analysis.example/scan" \
   --verification-H "Authorization: Bearer token"
 
 # Managed hook install
-PUSH_KEY=... agent-scan guard install all --url "https://hooks.example"
+PUSH_KEY=... open-agent-scan guard install all --url "https://hooks.example"
 
 # MDM managed hook install
-PUSH_KEY=... agent-scan guard install cursor --managed --url "https://hooks.example"
+PUSH_KEY=... open-agent-scan guard install cursor --managed --url "https://hooks.example"
 
 # Uninstall hooks
-agent-scan guard uninstall all
+open-agent-scan guard uninstall all
 ```
 
 ---

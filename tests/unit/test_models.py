@@ -134,10 +134,10 @@ class TestStdioServerRebalance:
             ),
             # UVX-based MCP servers
             (
-                "uvx agent-scan@latest --json",
+                "uvx open-agent-scan@latest --json",
                 ["--control-server=something"],
                 "uvx",
-                ["agent-scan@latest", "--json", "--control-server=something"],
+                ["open-agent-scan@latest", "--json", "--control-server=something"],
             ),
             (
                 "uvx mcp-server-fetch",

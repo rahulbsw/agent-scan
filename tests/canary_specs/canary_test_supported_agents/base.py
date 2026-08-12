@@ -168,7 +168,7 @@ class FixtureScope(Scope):
     fixtures) into the project, then ``inspect`` must detect ``expected_items``. This is the canary's one
     deliberate fixture exception: a :class:`Gap` exists precisely because there is no binary to drive, so a
     fixture is the only way to give the scope end-to-end coverage (it can't catch format drift, only
-    regressions in agent-scan's own discovery/normalization)."""
+    regressions in Open Agent Scan's own discovery/normalization)."""
 
     sources: tuple[FixtureFile, ...]
     expected_items: tuple[ExpectedItem, ...]

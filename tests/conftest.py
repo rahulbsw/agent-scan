@@ -1,4 +1,4 @@
-"""Global pytest fixtures for agent-scan tests."""
+"""Global pytest fixtures for Open Agent Scan tests."""
 
 import subprocess
 import sys
@@ -51,8 +51,8 @@ def _ensure_unicode_console():
 
 
 def _get_binary_path() -> Path:
-    """Path to the PyInstaller-built agent-scan binary."""
-    return REPO_ROOT / "dist" / ("agent-scan.exe" if sys.platform == "win32" else "agent-scan")
+    """Path to the PyInstaller-built open-agent-scan binary."""
+    return REPO_ROOT / "dist" / ("open-agent-scan.exe" if sys.platform == "win32" else "open-agent-scan")
 
 
 def _build_binary() -> None:
@@ -67,7 +67,7 @@ def _build_binary() -> None:
                 "pyinstaller",
                 "--onefile",
                 "--name",
-                "agent-scan",
+                "open-agent-scan",
                 "--add-data",
                 "src/agent_scan/hooks:agent_scan/hooks",
                 "--collect-all",
@@ -85,7 +85,7 @@ def _build_binary() -> None:
 
 @pytest.fixture
 def agent_scan_cmd(request):
-    """CLI invocation: either 'uv run -m src.agent_scan.run' or the built binary. Use with @pytest.mark.parametrize('agent_scan_cmd', ['uv', 'binary'], indirect=True). Build runs only when 'binary' is requested."""
+    """CLI invocation: source module or built binary."""
     if request.param == "uv":
         return ["uv", "run", "-m", "src.agent_scan.run"]
     if request.param == "binary":

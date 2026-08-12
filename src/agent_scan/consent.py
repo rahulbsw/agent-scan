@@ -82,9 +82,9 @@ def collect_consent(
         return set()
 
     _stderr_console.print(
-        "[bold]Agent Scan will launch stdio MCP servers as subprocesses to "
+        "[bold]Open Agent Scan will launch stdio MCP servers as subprocesses to "
         "inspect their tools.[/bold]\n"
-        "Review each command below and confirm whether Agent Scan may start it.\n"
+        "Review each command below and confirm whether Open Agent Scan may start it.\n"
         "Tip: pass --dangerously-run-mcp-servers to skip these prompts, or "
         "set --suppress-mcpserver-io=true to hide server stderr output.\n"
     )
@@ -101,7 +101,7 @@ def collect_consent(
             if env_str:
                 _stderr_console.print(f"      env    : {escape(env_str)}")
             # [Y/N] — explicit case + default is deny on empty Enter.
-            prompt = f"      Allow Agent Scan to start '{server_name}'? [y/N]: "
+            prompt = f"      Allow Open Agent Scan to start '{server_name}'? [y/N]: "
             allowed = _read_yes_no(prompt)
             if not allowed:
                 declined.add((config_path, server_name))
@@ -126,7 +126,7 @@ def collect_consent(
     if declined:
         _stderr_console.print(
             "Note: declined servers will not be started on this machine. "
-            "Agent Scan may still show analysis results for them if the configured analyzer recognizes the "
+            "Open Agent Scan may still show analysis results for them if the configured analyzer recognizes the "
             "server from prior scans — these results are not based on your "
             "own machine's behavior.\n"
         )

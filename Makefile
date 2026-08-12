@@ -43,6 +43,7 @@ clean:
 	rm -rf ./npm/dist
 	rm -rf ./ame.spec
 	rm -rf ./agent-scan.spec
+	rm -rf ./open-agent-scan.spec
 
 ARCH ?=
 
@@ -52,10 +53,10 @@ ifeq ($(ARCH),x86_64)
 	curl -LsSf https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-apple-darwin.tar.gz | tar -xz -C /tmp
 	UV_PYTHON_PREFERENCE=managed arch -x86_64 /tmp/uv-x86_64-apple-darwin/uv python install 3.13
 	UV_PROJECT_ENVIRONMENT=.venv-x86_64 UV_PYTHON_PREFERENCE=managed arch -x86_64 /tmp/uv-x86_64-apple-darwin/uv sync --extra dev
-	if [ -n "${APPLE_SIGNING_IDENTITY}" ]; then UV_PROJECT_ENVIRONMENT=.venv-x86_64 UV_PYTHON_PREFERENCE=managed arch -x86_64 /tmp/uv-x86_64-apple-darwin/uv run pyinstaller --onefile --name agent-scan --add-data 'src/agent_scan/hooks:agent_scan/hooks' --collect-all detect_secrets src/agent_scan/run.py --codesign-identity "${APPLE_SIGNING_IDENTITY}"; else UV_PROJECT_ENVIRONMENT=.venv-x86_64 UV_PYTHON_PREFERENCE=managed arch -x86_64 /tmp/uv-x86_64-apple-darwin/uv run pyinstaller --onefile --name agent-scan --add-data 'src/agent_scan/hooks:agent_scan/hooks' --collect-all detect_secrets src/agent_scan/run.py; fi
+	if [ -n "${APPLE_SIGNING_IDENTITY}" ]; then UV_PROJECT_ENVIRONMENT=.venv-x86_64 UV_PYTHON_PREFERENCE=managed arch -x86_64 /tmp/uv-x86_64-apple-darwin/uv run pyinstaller --onefile --name open-agent-scan --add-data 'src/agent_scan/hooks:agent_scan/hooks' --collect-all detect_secrets src/agent_scan/run.py --codesign-identity "${APPLE_SIGNING_IDENTITY}"; else UV_PROJECT_ENVIRONMENT=.venv-x86_64 UV_PYTHON_PREFERENCE=managed arch -x86_64 /tmp/uv-x86_64-apple-darwin/uv run pyinstaller --onefile --name open-agent-scan --add-data 'src/agent_scan/hooks:agent_scan/hooks' --collect-all detect_secrets src/agent_scan/run.py; fi
 else
 	uv sync --extra dev
-	if [ -n "${APPLE_SIGNING_IDENTITY}" ]; then uv run pyinstaller --onefile --name agent-scan --add-data 'src/agent_scan/hooks:agent_scan/hooks' --collect-all detect_secrets src/agent_scan/run.py --codesign-identity "${APPLE_SIGNING_IDENTITY}"; else uv run pyinstaller --onefile --name agent-scan --add-data 'src/agent_scan/hooks:agent_scan/hooks' --collect-all detect_secrets src/agent_scan/run.py; fi
+	if [ -n "${APPLE_SIGNING_IDENTITY}" ]; then uv run pyinstaller --onefile --name open-agent-scan --add-data 'src/agent_scan/hooks:agent_scan/hooks' --collect-all detect_secrets src/agent_scan/run.py --codesign-identity "${APPLE_SIGNING_IDENTITY}"; else uv run pyinstaller --onefile --name open-agent-scan --add-data 'src/agent_scan/hooks:agent_scan/hooks' --collect-all detect_secrets src/agent_scan/run.py; fi
 endif
 
 build: clean
@@ -64,10 +65,10 @@ build: clean
 shiv: build
 	uv sync --extra dev
 	mkdir -p dist
-	uv run shiv -c agent-scan -o dist/agent-scan.pyz --python "/usr/bin/env python3" dist/*.whl
+	uv run shiv -c open-agent-scan -o dist/open-agent-scan.pyz --python "/usr/bin/env python3" dist/*.whl
 
 publish-pypi: build
-	uv publish --token ${AGENT_SCAN_PYPI_TOKEN}
+	uv publish --token ${OPEN_AGENT_SCAN_PYPI_TOKEN}
 
 publish: publish-pypi
 

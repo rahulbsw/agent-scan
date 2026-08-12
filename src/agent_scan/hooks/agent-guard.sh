@@ -17,7 +17,7 @@ set -euo pipefail
 # Hook API version.
 VERSION="2025-11-11"
 
-# Agent-scan CLI version (replaced at install time).
+# Open Agent Scan CLI version (replaced at install time).
 AGENT_SCAN_VERSION="__AGENT_SCAN_VERSION__"
 
 # ---------------------------------------------------------------------------
@@ -94,15 +94,15 @@ hook_main() {
   case "$client" in
     claude-code)
       endpoint="/agent-scan/hooks/claude-code"
-      user_agent="agent-scan/agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
+      user_agent="open-agent-scan/agent-guard.sh Open Agent Scan v${AGENT_SCAN_VERSION}"
       ;;
     cursor)
       endpoint="/agent-scan/hooks/cursor"
-      user_agent="agent-scan/agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
+      user_agent="open-agent-scan/agent-guard.sh Open Agent Scan v${AGENT_SCAN_VERSION}"
       ;;
     codex)
       endpoint="/agent-scan/hooks/codex"
-      user_agent="agent-scan/agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
+      user_agent="open-agent-scan/agent-guard.sh Open Agent Scan v${AGENT_SCAN_VERSION}"
       ;;
     *) die "Unknown client: ${client}. Expected claude-code, cursor, or codex." ;;
   esac

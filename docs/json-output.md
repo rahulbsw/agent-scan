@@ -1,13 +1,13 @@
-# JSON output reference for `agent-scan`
+# JSON output reference for `open-agent-scan`
 
-The `agent-scan` CLI can emit structured JSON for programmatic consumption — useful in CI/CD pipelines, catalog validation, and custom auditing tools.
+The `open-agent-scan` CLI can emit structured JSON for programmatic consumption — useful in CI/CD pipelines, catalog validation, and custom auditing tools.
 
 Enable JSON mode with `--json`:
 
 ```bash
-uvx agent-scan@latest --json
-uvx agent-scan@latest --json ~/.claude/skills
-uvx agent-scan@latest inspect --json ~/.vscode/mcp.json
+uvx open-agent-scan@latest --json
+uvx open-agent-scan@latest --json ~/.claude/skills
+uvx open-agent-scan@latest inspect --json ~/.vscode/mcp.json
 ```
 
 **Output behavior**
@@ -54,7 +54,15 @@ The root object is a map from **scan path** (absolute path string) to a `ScanPat
         "code": "E004",
         "message": "Description of the finding",
         "reference": [0, null],
-        "extra_data": null
+        "extra_data": {
+          "severity": "high",
+          "confidence": "high",
+          "rule_title": "Rule title",
+          "category": "supply-chain",
+          "evidence": {},
+          "source_references": ["OWASP LLM03:2025 Supply Chain"],
+          "false_positive_rationale": "When this can be legitimate"
+        }
       }
     ],
     "labels": []
@@ -90,7 +98,7 @@ The root object is a map from **scan path** (absolute path string) to a `ScanPat
 | `code` | string | Finding code (e.g. `E001`, `W015`). See [Issue codes](issue-codes.md). |
 | `message` | string | Human-readable description. |
 | `reference` | array \| null | Index pair into the result: `[server_index, entity_index]`. **`server_index`** selects an entry in `servers[]` (an MCP server *or* a skill). **`entity_index`** selects an item within that entry's catalog — an MCP **tool** (or prompt/resource) for servers, or a **file** within a skill bundle; `null` as the second element means the issue applies to the whole server/skill, not one entity. |
-| `extra_data` | object \| null | Optional structured context from analysis. |
+| `extra_data` | object \| null | Optional structured context from analysis. Local rules include severity, confidence, category, evidence, source references, and false-positive rationale when available. |
 
 ### Error objects (`ScanError`)
 
@@ -171,7 +179,7 @@ These codes are legacy internal hints. If you want JSON parsing to mirror the de
 Use `--ci` for a native non-zero exit when findings or runtime failures remain:
 
 ```bash
-uvx agent-scan@latest \
+uvx open-agent-scan@latest \
   --ci \
   --dangerously-run-mcp-servers \
   --json \
@@ -195,7 +203,7 @@ See [CLI reference — CI mode](cli-reference.md#ci-mode).
 ### Any critical findings or failures?
 
 ```bash
-uvx agent-scan@latest --json ./my-skill | jq '
+uvx open-agent-scan@latest --json ./my-skill | jq '
   [ .[] ] | map(
     select(
       (.error != null and .error.is_failure) or
@@ -215,7 +223,7 @@ Returns `true` when hard failures or `E*` findings exist.
 Match the default text output by excluding `W003`–`W006`:
 
 ```bash
-uvx agent-scan@latest --json ./my-skill | jq '
+uvx open-agent-scan@latest --json ./my-skill | jq '
   .[] | (.issues // [])[] |
   select(
     .code as $c | ["W003", "W004", "W005", "W006"] | index($c) | not
@@ -228,7 +236,7 @@ uvx agent-scan@latest --json ./my-skill | jq '
 Fail on any remaining issue (excluding internal warnings) or any `is_failure` error:
 
 ```bash
-uvx agent-scan@latest --json ./my-skill | jq '
+uvx open-agent-scan@latest --json ./my-skill | jq '
   [ .[] ] | map(
     select(
       (.error != null and .error.is_failure) or
@@ -250,7 +258,7 @@ If the result is `true`, the target **failed** the check.
 When you cannot use `--ci`, derive an exit code from issue codes:
 
 ```bash
-uvx agent-scan@latest --json . | jq -e '
+uvx open-agent-scan@latest --json . | jq -e '
   [
     .[] | (.issues // [])[].code
   ] | map(select(. as $c | ["W003","W004","W005","W006"] | index($c) | not)) | length == 0
@@ -271,7 +279,7 @@ const IGNORE_CODES = new Set(["W003", "W004", "W005", "W006"]);
 
 function checkAgentScan(targetPath) {
   const scanOutput = execSync(
-    `uvx agent-scan@latest --json ${JSON.stringify(targetPath)}`,
+    `uvx open-agent-scan@latest --json ${JSON.stringify(targetPath)}`,
     { encoding: "utf8" }
   );
   const scanResult = JSON.parse(scanOutput);
