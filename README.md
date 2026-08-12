@@ -48,9 +48,18 @@ The legacy `agent-scan` command remains as a temporary compatibility alias and
 prints a deprecation notice to stderr. New docs and automation should use
 `open-agent-scan`.
 
-Standalone binaries are published from GitHub Releases as
-`open-agent-scan-<version>-<platform>` assets, with checksums, SBOMs, and build
-attestations.
+Standalone binaries are published from GitHub Releases as platform archives:
+`open-agent-scan-<version>-<platform>.tar.gz` for macOS/Linux and
+`open-agent-scan-<version>-windows-x64.zip` for Windows. Releases include
+checksums, SBOMs, and build attestations.
+
+On macOS, extract the archive and run the CLI from Terminal:
+
+```bash
+tar -xzf open-agent-scan-v0.1.1-macos-arm64.tar.gz
+xattr -d com.apple.quarantine open-agent-scan 2>/dev/null || true
+./open-agent-scan --help
+```
 
 ## Security Warning
 

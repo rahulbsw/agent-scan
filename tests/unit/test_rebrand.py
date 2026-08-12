@@ -18,7 +18,7 @@ def test_project_metadata_uses_open_agent_scan_identity():
         project = tomllib.load(f)["project"]
 
     assert project["name"] == "open-agent-scan"
-    assert project["version"] == "0.1.0"
+    assert project["version"] == "0.1.1"
     assert "Open Agent Scan" in project["description"] or "Community-led" in project["description"]
 
 
@@ -28,6 +28,20 @@ def test_console_scripts_include_primary_command_and_legacy_alias():
 
     assert scripts["open-agent-scan"] == "agent_scan.run:run"
     assert scripts["agent-scan"] == "agent_scan.run:run"
+
+
+def test_release_workflow_publishes_platform_archives():
+    workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text()
+
+    assert "archive_ext" in workflow
+    assert (
+        "open-agent-scan-${{ needs.prepare-release.outputs.release_tag }}-${{ matrix.target }}${{ matrix.archive_ext }}"
+        in workflow
+    )
+    assert ".tar.gz" in workflow
+    assert ".zip" in workflow
+    assert "tar -czf" in workflow
+    assert "zipfile.ZipFile" in workflow
 
 
 def test_legacy_alias_warns_to_stderr(monkeypatch):
