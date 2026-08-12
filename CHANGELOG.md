@@ -1,5 +1,6 @@
 # Open Agent Scan
 
+- `0.1.2` include an explicit `requests` charset detector in standalone binaries to avoid visible dependency warnings on startup.
 - `0.1.1` package standalone release binaries as platform archives (`.tar.gz` for macOS/Linux, `.zip` for Windows) and add release-page install guidance.
 - `0.1.0` first independent Open Agent Scan release. Renamed the package and primary CLI to `open-agent-scan`, kept `agent-scan` as a temporary compatibility alias, added community governance and attribution documents, added local rule metadata, added suspicious MCP startup command and cross-server influence checks, and renamed release assets to `open-agent-scan-*`.
 
