@@ -1,13 +1,13 @@
 import pytest
 
 import agent_scan.pipelines as pipelines
-from agent_scan.models import ControlServer, ScanPathResult
+from agent_scan.models import ControlServer, InspectedPath, ScanResponse
 from agent_scan.pipelines import AnalyzeArgs, InspectArgs, PushArgs, inspect_analyze_push_pipeline
 
 
 @pytest.mark.asyncio
 async def test_auto_analysis_mode_without_remote_auth_uses_local_analysis(monkeypatch):
-    scan_result = ScanPathResult(path="/tmp/mcp.json", client="test", servers=[], issues=[], labels=[])
+    scan_result = InspectedPath(path="/tmp/mcp.json", client="test", servers=[])
 
     async def fake_inspect_pipeline(*args, **kwargs):
         return [scan_result], ["local-user"]
@@ -27,12 +27,15 @@ async def test_auto_analysis_mode_without_remote_auth_uses_local_analysis(monkey
         PushArgs(control_servers=[]),
     )
 
-    assert results == [scan_result]
+    assert results == ScanResponse.model_validate(
+        {"scan_path_responses": [{"path": "/tmp/mcp.json", "client": "test", "server_risks": []}]}
+    )
 
 
 @pytest.mark.asyncio
 async def test_explicit_remote_analysis_mode_calls_remote_verifier(monkeypatch):
-    scan_result = ScanPathResult(path="/tmp/mcp.json", client="test", servers=[], issues=[], labels=[])
+    scan_result = InspectedPath(path="/tmp/mcp.json", client="test", servers=[])
+    remote_response = ScanResponse(scan_path_responses=[])
     calls = []
 
     async def fake_inspect_pipeline(*args, **kwargs):
@@ -40,7 +43,7 @@ async def test_explicit_remote_analysis_mode_calls_remote_verifier(monkeypatch):
 
     async def fake_remote_analysis(scan_paths, **kwargs):
         calls.append(kwargs)
-        return scan_paths
+        return remote_response
 
     monkeypatch.setattr(pipelines, "inspect_pipeline", fake_inspect_pipeline)
     monkeypatch.setattr(pipelines, "analyze_machine", fake_remote_analysis)
@@ -54,13 +57,14 @@ async def test_explicit_remote_analysis_mode_calls_remote_verifier(monkeypatch):
         PushArgs(control_servers=[]),
     )
 
-    assert results == [scan_result]
+    assert results == remote_response
     assert len(calls) == 1
 
 
 @pytest.mark.asyncio
 async def test_auto_analysis_mode_with_push_key_uses_remote_verifier(monkeypatch):
-    scan_result = ScanPathResult(path="/tmp/mcp.json", client="test", servers=[], issues=[], labels=[])
+    scan_result = InspectedPath(path="/tmp/mcp.json", client="test", servers=[])
+    remote_response = ScanResponse(scan_path_responses=[])
     calls = []
 
     async def fake_inspect_pipeline(*args, **kwargs):
@@ -68,7 +72,7 @@ async def test_auto_analysis_mode_with_push_key_uses_remote_verifier(monkeypatch
 
     async def fake_remote_analysis(scan_paths, **kwargs):
         calls.append(kwargs)
-        return scan_paths
+        return remote_response
 
     monkeypatch.setattr(pipelines, "inspect_pipeline", fake_inspect_pipeline)
     monkeypatch.setattr(pipelines, "analyze_machine", fake_remote_analysis)
@@ -82,9 +86,10 @@ async def test_auto_analysis_mode_with_push_key_uses_remote_verifier(monkeypatch
         PushArgs(
             control_servers=[
                 ControlServer(url="https://example.invalid/push", headers={"x-client-id": "push-key"}, identifier="id")
-            ]
+            ],
+            push_key="push-key",
         ),
     )
 
-    assert results == [scan_result]
+    assert results == remote_response
     assert len(calls) == 1

@@ -28,7 +28,8 @@ from agent_scan.agents.base import (
     McpConfigsResult,
     McpScanResult,
     SkillsDirsResult,
-    _walk_under_depth,
+    StdioServerResolution,
+    _walk_manifest_candidates,
 )
 from agent_scan.models import (
     ClaudeConfigFile,
@@ -208,8 +209,11 @@ class CodexDiscoverer(AgentDiscoverer):
         precedence = self._plugin_manifest_dirs
         by_root: dict[Path, Path] = {}
         for base in self._plugin_base_dirs():
-            for manifest_path in _walk_under_depth(
-                base, self._plugin_manifest_filename, _MAX_PLUGIN_RGLOB_DEPTH, want_file=True
+            for manifest_path in _walk_manifest_candidates(
+                base,
+                self._plugin_manifest_filename,
+                self._plugin_manifest_dirs,
+                _MAX_PLUGIN_RGLOB_DEPTH,
             ):
                 dir_name = manifest_path.parent.name
                 if dir_name not in precedence:
@@ -220,7 +224,7 @@ class CodexDiscoverer(AgentDiscoverer):
                     by_root[plugin_root] = manifest_path
         result: list[tuple[Path, dict]] = []
         for plugin_root, manifest_path in by_root.items():
-            data = self._load_json_file(manifest_path)
+            data = self._load_json_file(manifest_path, log_parse_errors=False)
             if isinstance(data, dict):
                 result.append((plugin_root, data))
         return result
@@ -289,12 +293,26 @@ class CodexDiscoverer(AgentDiscoverer):
         data = self._load_json_file(path)
         if data is None or isinstance(data, CouldNotParseMCPConfig):
             return data
+        plugin_root = self._plugin_root_for_config(path)
         if isinstance(data, dict) and isinstance(data.get("mcp_servers"), dict):
             servers = data["mcp_servers"]
             if not servers:
                 return None
-            return self._validate_servers(servers, source=f"mcp_servers in {path.as_posix()}")
-        return self._parse_mcp_file(path, formats=(ClaudeConfigFile, PluginMCPConfigFile), skip_unrecognized=True)
+            return self._validate_servers(
+                servers,
+                source=f"mcp_servers in {path.as_posix()}",
+                stdio_resolutions=self._relative_stdio_resolutions(servers, path, plugin_root),
+            )
+        if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict):
+            raw_servers = data["mcpServers"]
+        else:
+            raw_servers = data if isinstance(data, dict) else {}
+        return self._parse_mcp_file(
+            path,
+            formats=(ClaudeConfigFile, PluginMCPConfigFile),
+            skip_unrecognized=True,
+            stdio_resolutions=self._relative_stdio_resolutions(raw_servers, path, plugin_root),
+        )
 
     def _discover_project_mcp_servers(self) -> McpConfigsResult:
         """Parse ``<project>/.codex/config.toml`` servers for every registered project
@@ -302,7 +320,7 @@ class CodexDiscoverer(AgentDiscoverer):
         absolute path, so an ancestor equal to ``codex_home`` dedups in the merge.
         """
         result: McpConfigsResult = {}
-        for path in self._project_paths_with_ancestors():
+        for path in self._discovery_paths_with_ancestors():
             config_path = path / ".codex" / self._config_filename
             result.update(self._mcp_servers_from_data(self._load_toml_file(config_path), config_path))
         return result
@@ -319,8 +337,104 @@ class CodexDiscoverer(AgentDiscoverer):
         servers = data.get("mcp_servers")
         if not isinstance(servers, dict) or not servers:
             return {}
-        entries = self._validate_servers(servers, source=f"mcp_servers in {config_path.as_posix()}")
+        entries = self._validate_servers(
+            servers,
+            source=f"mcp_servers in {config_path.as_posix()}",
+            stdio_resolutions=self._relative_stdio_resolutions(servers, config_path),
+        )
         return {config_path.as_posix(): entries}
+
+    def _plugin_root_for_config(self, config_path: Path) -> Path | None:
+        """Return the deepest installed plugin root containing ``config_path``."""
+        roots = [
+            root
+            for root, _manifest in self._plugin_manifests()
+            if config_path == root or config_path.is_relative_to(root)
+        ]
+        if not roots:
+            return None
+        return max(roots, key=lambda root: len(root.parts))
+
+    def _relative_stdio_resolutions(
+        self,
+        servers: dict,
+        config_path: Path,
+        plugin_root: Path | None = None,
+    ) -> dict[str, StdioServerResolution]:
+        """Resolve relative Codex stdio commands for signing and local startup.
+
+        Codex plugin ``cwd`` values are rooted at the installed plugin. Managed
+        user-level servers commonly live under ``<codex_home>/<server-name>``;
+        ordinary configs may keep a relative executable beside their config root.
+        A path is used only when exactly one candidate exists and remains inside
+        its source root. Enabled-state behavior is untouched.
+        """
+        resolved: dict[str, StdioServerResolution] = {}
+        for name, raw in servers.items():
+            if not isinstance(name, str) or not isinstance(raw, dict):
+                continue
+            command = raw.get("command")
+            cwd = raw.get("cwd")
+            if (
+                not isinstance(command, str)
+                or not command
+                or Path(command).is_absolute()
+                or ("/" not in command and "\\" not in command)
+                or not isinstance(cwd, str)
+                or not cwd
+            ):
+                continue
+            args = raw.get("args", [])
+            if args is None:
+                args = []
+            if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+                continue
+
+            candidates = self._relative_stdio_candidates(name, command, cwd, config_path, plugin_root)
+            if len(candidates) == 1:
+                runtime_command, runtime_cwd = candidates[0]
+                resolved[name] = StdioServerResolution(
+                    configured_command=command,
+                    configured_args=tuple(args),
+                    runtime_command=str(runtime_command),
+                    runtime_cwd=str(runtime_cwd),
+                )
+        return resolved
+
+    def _relative_stdio_candidates(
+        self,
+        name: str,
+        command: str,
+        cwd: str,
+        config_path: Path,
+        plugin_root: Path | None,
+    ) -> list[tuple[Path, Path]]:
+        """Return unique ``(executable, cwd)`` pairs for one Codex command."""
+        cwd_path = Path(cwd)
+        if cwd_path.is_absolute():
+            roots = [cwd_path]
+        elif plugin_root is not None:
+            roots = [plugin_root]
+        else:
+            config_root = config_path.parent
+            if config_root == self._codex_home():
+                roots = [config_root / name, config_root]
+            elif config_root.name == ".codex":
+                roots = [config_root.parent, config_root]
+            else:
+                roots = [config_root / name, config_root]
+
+        candidates: set[tuple[Path, Path]] = set()
+        for raw_root in roots:
+            try:
+                root = raw_root.resolve()
+                working_directory = root if cwd_path.is_absolute() else (root / cwd_path).resolve()
+                candidate = (working_directory / command).resolve()
+                if candidate.is_relative_to(root) and candidate.is_file():
+                    candidates.add((candidate, working_directory))
+            except (OSError, RuntimeError, ValueError):
+                continue
+        return sorted(candidates)
 
     # --- private: project enumeration ---
 
@@ -366,7 +480,7 @@ class CodexDiscoverer(AgentDiscoverer):
     def _discover_project_skills(self) -> SkillsDirsResult:
         """Scan ``<project>/.agents/skills`` for every registered project and ancestor."""
         result: SkillsDirsResult = {}
-        for path in self._project_paths_with_ancestors():
+        for path in self._discovery_paths_with_ancestors():
             skills_dir = path / ".agents" / "skills"
             entries = self._scan_skills_dir(skills_dir)
             if entries is not None:
