@@ -9,6 +9,7 @@ This module provides functions to redact sensitive data like:
 - File paths in tracebacks
 """
 
+import functools
 import logging
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -17,7 +18,9 @@ from detect_secrets.plugins.high_entropy_strings import HighEntropyStringsPlugin
 from detect_secrets.plugins.keyword import KeywordDetector
 from detect_secrets.settings import default_settings, get_plugins, transient_settings
 
-from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, ServerSignature, StdioServer
+from agent_scan.models.errors import ScanError
+from agent_scan.models.inspect import InspectedPath, InspectedServer
+from agent_scan.models.mcp import RemoteServer, StdioServer
 
 logger = logging.getLogger(__name__)
 
@@ -94,13 +97,6 @@ def redact_push_keys_in_data(data: dict) -> dict:
 
 _EXCLUDED_PLUGINS = frozenset({"IPPublicDetector"})
 
-# Matches the synthetic binary-file marker that ``skill_client`` emits for a
-# binary resource (its ``BINARY_FILE_DESCRIPTION_PREFIX`` followed by a sha256
-# hex digest). Compiled lazily on first use: the prefix lives in
-# ``skill_client``, which imports ``redact_signature`` from this module, so
-# importing it at module scope here would create a circular import.
-_BINARY_FILE_DESCRIPTION_RE: re.Pattern[str] | None = None
-
 
 def _build_detect_secrets_config() -> dict:
     """
@@ -120,11 +116,56 @@ def _build_detect_secrets_config() -> dict:
 
 _DETECT_SECRETS_CONFIG: dict = _build_detect_secrets_config()
 
+# Lazily-built, process-wide cache of the plugin list for _DETECT_SECRETS_CONFIG.
+# Plugin instances are self-contained after construction (their regexes/config are
+# bound at init -- see _detect_secret's docstring on reusing an already-built
+# ``plugins`` list outside its constructing context), so building them once and
+# reusing across every redact_text() call is safe. This avoids re-entering
+# transient_settings per call: its cache_bust() (on both enter and exit, ~1.3ms
+# each) would otherwise run once per redact_text() call, which redact_error_text
+# makes twice per failing server (traceback + server_output) -- real overhead
+# when a scan has many failing servers.
+_CACHED_PLUGINS: list | None = None
+
+
+def _get_cached_plugins() -> list:
+    global _CACHED_PLUGINS
+    if _CACHED_PLUGINS is None:
+        with transient_settings(_DETECT_SECRETS_CONFIG):
+            _CACHED_PLUGINS = list(get_plugins())
+    return _CACHED_PLUGINS
+
+
+def _partition_plugins(plugins: list) -> tuple[list, list]:
+    """Split *plugins* into ``(format_detectors, entropy_detectors)``.
+
+    The two families need different handling in the scan loops, so we sort them
+    once here. ``entropy_detectors`` are the ``HighEntropyStringsPlugin``
+    subclasses; ``format_detectors`` are the rest (AWS, GitHub, etc.). Doing this
+    split once means the hot loops can just iterate the family they need, instead
+    of calling ``isinstance`` on every plugin for every token which is slow and
+    adds up over a large scan.
+    """
+    entropy = [p for p in plugins if isinstance(p, HighEntropyStringsPlugin)]
+    formats = [p for p in plugins if not isinstance(p, HighEntropyStringsPlugin)]
+    return formats, entropy
+
+
+# Process-wide cache of the partitioned plugin lists (see _get_cached_plugins).
+_CACHED_PLUGINS_SPLIT: tuple[list, list] | None = None
+
+
+def _get_cached_plugins_split() -> tuple[list, list]:
+    global _CACHED_PLUGINS_SPLIT
+    if _CACHED_PLUGINS_SPLIT is None:
+        _CACHED_PLUGINS_SPLIT = _partition_plugins(_get_cached_plugins())
+    return _CACHED_PLUGINS_SPLIT
+
 
 def _redaction_marker(plugin_name: str) -> str:
     """Format the redaction marker for a triggering detect-secrets plugin.
 
-    Uses the same ``**...**`` delimiter shape as the legacy ``REDACTED`` constant
+    Uses the same ``**...**`` delimiter shape as the ``REDACTED`` constant
     so both marker styles render and grep consistently.
     """
     return f"**REDACTED_SECRET_{plugin_name.upper()}**"
@@ -207,23 +248,24 @@ def _could_be_secret(value: str) -> bool:
     )
 
 
-def _detect_secret_in_plugins(value: str, plugins: list) -> str | None:
-    """Two-pass scan of ``value`` against an already-built ``plugins`` list.
+def _detect_secret_in_plugins(value: str, format_plugins: list, entropy_plugins: list) -> str | None:
+    """Two-pass scan of ``value`` against pre-partitioned plugin lists.
 
     Each plugin family gets the input format it expects:
 
-    1. Named-format detectors (``AWSKeyDetector``, ``GitHubTokenDetector``,
-       etc.) match self-contained format patterns and work on the raw
-       value directly.
-    2. ``HighEntropyStringsPlugin`` subclasses default to scanning quoted
-       string literals (``(['"])(token)(\\1)``); they receive the value
-       wrapped as ``"<value>"``, ``'<value>'``, or ``"<escaped>"`` so
-       their regex tokenizes the whole value, then the entropy ``limit``
-       filter is applied.
+    1. ``format_plugins`` -- named-format detectors (``AWSKeyDetector``,
+       ``GitHubTokenDetector``, etc.) match self-contained format patterns and
+       work on the raw value directly.
+    2. ``entropy_plugins`` -- ``HighEntropyStringsPlugin`` subclasses default to
+       scanning quoted string literals (``(['"])(token)(\\1)``); they receive the
+       value wrapped as ``"<value>"``, ``'<value>'``, or ``"<escaped>"`` so their
+       regex tokenizes the whole value, then the entropy ``limit`` filter applies.
 
-    The caller is responsible for holding an active
-    ``transient_settings(_DETECT_SECRETS_CONFIG)`` context that ``plugins``
-    was built under.
+    Callers pass the split from :func:`_partition_plugins` (usually the cached
+    :func:`_get_cached_plugins_split`) so the per-value hot loop does zero
+    ``isinstance`` work. The caller is responsible for holding an active
+    ``transient_settings(_DETECT_SECRETS_CONFIG)`` context the plugins were built
+    under.
     """
     # Cheap pre-filter: skip the full plugin battery for values that provably
     # match nothing (see :func:`_could_be_secret`). Conservative -- never
@@ -231,16 +273,12 @@ def _detect_secret_in_plugins(value: str, plugins: list) -> str | None:
     if not _could_be_secret(value):
         return None
     # Pass 1: format-based named detectors on the bare value.
-    for plugin in plugins:
-        if isinstance(plugin, HighEntropyStringsPlugin):
-            continue
+    for plugin in format_plugins:
         if plugin.analyze_line(filename="adhoc", line=value, line_number=1):
             return type(plugin).__name__
     # Pass 2: entropy plugins on the quote-wrapped value.
     wrapped = _wrap_for_entropy(value)
-    for plugin in plugins:
-        if not isinstance(plugin, HighEntropyStringsPlugin):
-            continue
+    for plugin in entropy_plugins:
         if plugin.analyze_line(filename="adhoc", line=wrapped, line_number=1):
             return type(plugin).__name__
     return None
@@ -265,9 +303,21 @@ def _detect_secret(value: str, plugins: list | None = None) -> str | None:
     if not value:
         return None
     if plugins is not None:
-        return _detect_secret_in_plugins(value, plugins)
+        return _detect_secret_in_plugins(value, *_partition_plugins(plugins))
     with transient_settings(_DETECT_SECRETS_CONFIG):
-        return _detect_secret_in_plugins(value, list(get_plugins()))
+        return _detect_secret_in_plugins(value, *_partition_plugins(list(get_plugins())))
+
+
+@functools.lru_cache(maxsize=200_000)
+def _detect_secret_cached(value: str) -> str | None:
+    """Cache _detect_secret_in_plugins results by token value.
+
+    Skill text repeats the same tokens (prose words, punctuation, keywords)
+    thousands of times per run. Detection depends only on the token and the
+    fixed plugin set (_get_cached_plugins), so the result is the same
+    every time caching by value skips the repeated work without changing output.
+    """
+    return _detect_secret_in_plugins(value, *_get_cached_plugins_split())
 
 
 def _detect_keyword(prev_normalized: str, curr_raw: str) -> str | None:
@@ -322,9 +372,11 @@ _SENSITIVE_HEADER_NAMES = frozenset(
 def redact_args(args: list[str]) -> list[str]:
     """Redact secret-bearing values in CLI argument tokens.
 
-    Detection runs in four passes against a tokenized view of ``args``
-    (each ``--flag=value`` arg yields two tokens; everything else
-    yields one):
+    Positional environment assignments are parsed first so their name and
+    separator are never treated as secret material. Their value is processed
+    by the same syntax-preserving assignment path used for free text. All
+    other arguments enter five detection passes against a tokenized view
+    (each ``--flag=value`` arg yields two tokens; everything else yields one):
 
     1. Format detectors (AWSKeyDetector, GitHubTokenDetector, ...) on
        the bare token value.
@@ -365,6 +417,10 @@ def redact_args(args: list[str]) -> list[str]:
     token should never appear verbatim in upload payloads, even if it
     masquerades as a CLI flag.
     """
+    out = list(args)
+    assignment_entropy_plugins: list | None = None
+    assignments: dict[int, re.Match] = {}
+
     # Tokenize args into a flat token list with positional metadata.
     # Each token is a tuple (arg_idx, slot, raw, normalized) where
     # slot 0 is the "whole arg" or the flag half of --flag=value,
@@ -376,7 +432,19 @@ def redact_args(args: list[str]) -> list[str]:
             tokens.append((i, 0, flag, flag.lstrip("-").replace("-", "_")))
             tokens.append((i, 1, value, value.lstrip("-").replace("-", "_")))
         else:
-            tokens.append((i, 0, arg, arg.lstrip("-").replace("-", "_")))
+            assignment = _ENV_ASSIGNMENT_RE.fullmatch(arg)
+            if assignment is not None:
+                if assignment_entropy_plugins is None:
+                    _, assignment_entropy_plugins = _get_cached_plugins_split()
+                out[i] = _redact_assignment(assignment, assignment_entropy_plugins)
+                assignments[i] = assignment
+                _, value, _ = _split_assignment_value(assignment.group("value"))
+                # The value core participates in the ordinary token passes so
+                # a preceding flag can still provide keyword/sensitive-name
+                # context. Reassembly below restores the assignment syntax.
+                tokens.append((i, 0, value, value.lstrip("-").replace("-", "_")))
+            else:
+                tokens.append((i, 0, arg, arg.lstrip("-").replace("-", "_")))
 
     marks: list[str | None] = [None] * len(tokens)
 
@@ -441,12 +509,15 @@ def redact_args(args: list[str]) -> list[str]:
                 marks[t_idx] = "SensitiveHeaderName"
 
     # Reassemble.
-    out = list(args)
     # Iterate each token once; for slot-1 tokens we look up the sibling
     # flag (slot 0 of the same arg_idx) directly from args[arg_idx].
     for t_idx, (arg_idx, slot, _raw, _normalized) in enumerate(tokens):
         mark = marks[t_idx]
         if mark is None:
+            continue
+        if arg_idx in assignments:
+            assert assignment_entropy_plugins is not None
+            out[arg_idx] = _redact_assignment(assignments[arg_idx], assignment_entropy_plugins, triggering_plugin=mark)
             continue
         if slot == 0:
             # If the original arg had "=" in it, slot 0 is the flag name;
@@ -471,6 +542,19 @@ def redact_args(args: list[str]) -> list[str]:
 # excludes ``= + / - _`` (legitimate secret characters); ``.`` is only removed as
 # an edge character (``str.strip`` touches the ends only), never internally.
 _TOKEN_EDGE_CHARS = "`'\"()[]{}<>.,;:!?"
+
+# Shell-style environment assignments may use horizontal whitespace around
+# ``=`` and may quote a value containing spaces. Named groups retain the exact
+# separator and value spelling so redaction can replace only the value content.
+# The left boundary excludes URL/query/path punctuation, avoiding matches such
+# as the ``token=...`` portion of a URL. ``(?![=])`` excludes comparison-like
+# ``NAME==value`` text.
+_ENV_ASSIGNMENT_RE = re.compile(
+    r"(?<![A-Za-z0-9_?&./:-])"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?P<separator>[ \t]*=[ \t]*)(?![=])"
+    r'(?P<value>"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[^\s]*)'
+)
 
 
 def _unwrapped_token_core(token: str) -> str | None:
@@ -499,7 +583,91 @@ def _unwrapped_token_core(token: str) -> str | None:
 _TOKEN_SPLIT_DELIMS = re.compile(r"[/:.,;@?&#|\\]")
 
 
-def _redact_secrets_in_line(line: str, plugins: list) -> str:
+def _split_assignment_value(value: str) -> tuple[str, str, str]:
+    """Return an assignment value's leading wrapper, core, and trailing wrapper."""
+    if len(value) >= 2 and value[0] in {'"', "'"} and value[-1] == value[0]:
+        return value[0], value[1:-1], value[-1]
+
+    core = value.strip(_TOKEN_EDGE_CHARS)
+    if not core:
+        return value, "", ""
+    core_start = value.find(core)
+    core_end = core_start + len(core)
+    return value[:core_start], core, value[core_end:]
+
+
+def _redact_assignment(
+    assignment: re.Match,
+    entropy_plugins: list,
+    triggering_plugin: str | None = None,
+) -> str:
+    """Redact only the value content of a parsed environment assignment."""
+    name = assignment.group("name")
+    separator = assignment.group("separator")
+    value = assignment.group("value")
+    leading, core, trailing = _split_assignment_value(value)
+
+    plugin_name = triggering_plugin or _detect_secret_cached(core)
+    if plugin_name is None:
+        plugin_name = _detect_keyword(name, core)
+
+    if plugin_name is not None:
+        redacted_core = _redaction_marker(plugin_name)
+    else:
+        redacted_core = _redact_non_assignment_text(core, entropy_plugins)
+
+    return f"{name}{separator}{leading}{redacted_core}{trailing}"
+
+
+def _redact_non_assignment_text(text: str, entropy_plugins: list) -> str:
+    """Redact secrets in text known not to contain an environment assignment."""
+    if not text:
+        return text
+
+    replacements: dict[str, str] = {}
+
+    # Pass 1: high-entropy detectors on the raw text (catches quoted literals).
+    for plugin in entropy_plugins:
+        for secret in plugin.analyze_line(filename="adhoc", line=text, line_number=1) or []:
+            value = getattr(secret, "secret_value", None)
+            if value:
+                replacements.setdefault(value, _redaction_marker(type(plugin).__name__))
+
+    # Pass 2: whole-token detection for format/entropy-shaped tokens. The raw
+    # token is tried first; only when it is not flagged is its edge-stripped
+    # core consulted as a fallback.
+    for token in text.split():
+        core = _unwrapped_token_core(token)
+        candidates = [token] if core is None else [token, core]
+        handled = False
+        for candidate in candidates:
+            if candidate in replacements:
+                handled = True
+                break
+            plugin_name = _detect_secret_cached(candidate)
+            if plugin_name is not None:
+                replacements[candidate] = _redaction_marker(plugin_name)
+                handled = True
+                break
+        if handled:
+            continue
+        # A secret separated from surrounding text by a structural delimiter
+        # can escape whole-token detection. Re-scan each segment and replace
+        # only the segment so the surrounding structure stays intact.
+        for segment in _TOKEN_SPLIT_DELIMS.split(token):
+            if not segment or segment in replacements:
+                continue
+            plugin_name = _detect_secret_cached(segment)
+            if plugin_name is not None:
+                replacements[segment] = _redaction_marker(plugin_name)
+
+    redacted = text
+    for value in sorted(replacements, key=len, reverse=True):
+        redacted = redacted.replace(value, replacements[value])
+    return redacted
+
+
+def _redact_secrets_in_line(line: str, entropy_plugins: list) -> str:
     """Redact secret-bearing substrings within a single line of free text.
 
     Reuses the detect-secrets plugin set in two complementary passes that each
@@ -512,10 +680,12 @@ def _redact_secrets_in_line(line: str, plugins: list) -> str:
        the quoted forms common in skill code snippets (``key = "value"``).
     2. Whitespace-token scan with :func:`_detect_secret`, which runs format
        detectors on the bare token and entropy detectors on a quote-wrapped
-       copy. A whole secret-shaped token (AWS key, GitHub token, bare
-       high-entropy string) is therefore replaced wholesale -- no partial
-       prefix can leak. The raw token is tried first; when it is not flagged,
-       an edge-stripped *core* (see :func:`_unwrapped_token_core`) is tried as a
+       copy. Shell-style ``NAME=value`` assignments are split first: only the
+       value is entropy-scanned, while the name supplies keyword context. A
+       whole non-assignment secret-shaped token (AWS key, GitHub token, bare
+       high-entropy string) is replaced wholesale -- no partial prefix can
+       leak. The raw token is tried first; when it is not flagged, an
+       edge-stripped *core* (see :func:`_unwrapped_token_core`) is tried as a
        fallback, so a secret wrapped in markdown/punctuation (a backtick code
        span, or a trailing ``"`` from a longer quoted string) is still
        detected. Only the matched candidate substring is replaced, so the
@@ -525,56 +695,18 @@ def _redact_secrets_in_line(line: str, plugins: list) -> str:
        secret embedded as a URL path/query segment or a dotted/colon-joined
        value is recovered without disturbing the surrounding structure.
 
-    Replacements are applied longest-first so a secret that is a substring of
-    another does not corrupt the marker inserted for the longer one.
+    Environment assignments are parsed before these passes. Only their value
+    content is scanned; whitespace, quotes, and wrapping punctuation are kept
+    byte-for-byte. Non-assignment spans retain the general detection behavior.
     """
-    replacements: dict[str, str] = {}
-
-    # Pass 1: high-entropy detectors on the raw line (catches quoted literals).
-    for plugin in plugins:
-        if not isinstance(plugin, HighEntropyStringsPlugin):
-            continue
-        for secret in plugin.analyze_line(filename="adhoc", line=line, line_number=1) or []:
-            value = getattr(secret, "secret_value", None)
-            if value:
-                replacements.setdefault(value, _redaction_marker(type(plugin).__name__))
-
-    # Pass 2: whole-token detection for format/entropy-shaped tokens. Reuse the
-    # caller's already-built ``plugins`` (under its single transient_settings
-    # context) so we don't re-enter that context per token. The raw token is
-    # tried first (preserving prior behaviour); only when it is not flagged is
-    # the edge-stripped core consulted as a fallback.
-    for token in line.split():
-        core = _unwrapped_token_core(token)
-        candidates = [token] if core is None else [token, core]
-        handled = False
-        for candidate in candidates:
-            if candidate in replacements:
-                handled = True
-                break
-            plugin_name = _detect_secret(candidate, plugins)
-            if plugin_name is not None:
-                replacements[candidate] = _redaction_marker(plugin_name)
-                handled = True
-                break
-        if handled:
-            continue
-        # Fallback: a secret separated from surrounding text by a structural
-        # delimiter (a URL path/query segment, a dotted or colon-joined value)
-        # rides along inside one whitespace token and escapes the whole-token
-        # scan above. Split on those delimiters and flag each secret-shaped
-        # segment; only the matched segment is replaced, so the structure stays.
-        for segment in _TOKEN_SPLIT_DELIMS.split(token):
-            if not segment or segment in replacements:
-                continue
-            plugin_name = _detect_secret(segment, plugins)
-            if plugin_name is not None:
-                replacements[segment] = _redaction_marker(plugin_name)
-
-    redacted = line
-    for value in sorted(replacements, key=len, reverse=True):
-        redacted = redacted.replace(value, replacements[value])
-    return redacted
+    parts: list[str] = []
+    cursor = 0
+    for assignment in _ENV_ASSIGNMENT_RE.finditer(line):
+        parts.append(_redact_non_assignment_text(line[cursor : assignment.start()], entropy_plugins))
+        parts.append(_redact_assignment(assignment, entropy_plugins))
+        cursor = assignment.end()
+    parts.append(_redact_non_assignment_text(line[cursor:], entropy_plugins))
+    return "".join(parts)
 
 
 def redact_text(text: str | None) -> str | None:
@@ -586,117 +718,59 @@ def redact_text(text: str | None) -> str | None:
 
     Absolute paths are intentionally left intact: skill content is documentation
     and code that legitimately references real paths, and stripping them would
-    remove context the downstream analysis relies on. (Path redaction still
-    applies to tracebacks and server output via :func:`redact_server` /
-    :func:`redact_scan_result`, where paths are noise rather than user content.)
+    remove context the downstream analysis relies on. Error paths are sanitized
+    separately at the API boundary, where they are noise rather than user content.
 
-    Detection runs line by line so the plugin set is built once and reused;
-    secret values are spliced out in place (see :func:`_redact_secrets_in_line`).
-    Returns ``None`` for ``None`` input and the input unchanged when it is empty.
+    Detection runs line by line against the process-wide cached plugin set (see
+    :func:`_get_cached_plugins`); secret values are spliced out in place (see
+    :func:`_redact_secrets_in_line`). Returns ``None`` for ``None`` input and the
+    input unchanged when it is empty.
     """
     if not text:
         return text
-    with transient_settings(_DETECT_SECRETS_CONFIG):
-        plugins = list(get_plugins())
-        return "\n".join(_redact_secrets_in_line(line, plugins) for line in text.split("\n"))
+    _, entropy_plugins = _get_cached_plugins_split()
+    return "\n".join(_redact_secrets_in_line(line, entropy_plugins) for line in text.split("\n"))
 
 
-def _is_synthetic_binary_description(text: str) -> bool:
-    """True if ``text`` is the synthetic binary-file marker emitted for a binary
-    skill resource (see ``skill_client.BINARY_FILE_DESCRIPTION_PREFIX``).
+def redact_error_text(text: str | None) -> str | None:
+    """Redact a traceback or captured server output string.
 
-    Such a description is self-generated (a fixed prefix + sha256 digest) and
-    contains no user content, so it is left untouched by redaction.
-
-    The prefix is imported lazily and the compiled pattern cached, so the
-    per-entity redaction path stays off the import and ``skill_client`` (which
-    imports :func:`redact_signature` from this module) can own the constant
-    without a circular import.
+    These fields are diagnostic noise, not user content, so both absolute
+    paths and secret-shaped values are stripped: a traceback can embed a
+    local filesystem layout, and captured protocol traffic / stderr
+    (``server_output``) can echo back a header, token, or other secret a
+    misbehaving server included in its response. Paths are stripped first
+    so the subsequent detect-secrets pass runs over already-shortened text.
     """
-    global _BINARY_FILE_DESCRIPTION_RE
-    if _BINARY_FILE_DESCRIPTION_RE is None:
-        from agent_scan.skill_client import BINARY_FILE_DESCRIPTION_PREFIX
-
-        _BINARY_FILE_DESCRIPTION_RE = re.compile(rf"^{re.escape(BINARY_FILE_DESCRIPTION_PREFIX)}[0-9a-f]{{64}}$")
-    return bool(_BINARY_FILE_DESCRIPTION_RE.match(text))
+    return redact_text(redact_absolute_paths(text))
 
 
-def redact_signature(signature: ServerSignature) -> ServerSignature:
-    """Redact secrets from a (skill) ``ServerSignature`` in place.
-
-    Skill signatures embed raw file contents in their prompt / resource / tool
-    ``description`` fields, and the skill's frontmatter description in
-    ``metadata.instructions``. Any of these can carry secrets, so every
-    free-text field is run through :func:`redact_text` before the signature
-    leaves the machine. The one exception is a resource whose description is the
-    synthetic binary-file marker (see :func:`_is_synthetic_binary_description`),
-    which is left intact so the file's hash digest survives.
-
-    This is the single redaction point for skill content: nothing downstream
-    redacts the signature (``redact_scan_result`` / ``redact_server`` only touch
-    the server config and errors, never ``.signature``), so it must be sanitized
-    here. It runs once when the skill is read (in ``skill_client.inspect_skill``).
-    """
-    if signature.metadata is not None and signature.metadata.instructions:
-        signature.metadata.instructions = redact_text(signature.metadata.instructions)
-    for entity in signature.entities:
-        if entity.description and not _is_synthetic_binary_description(entity.description):
-            entity.description = redact_text(entity.description)
-    return signature
-
-
-def redact_server(server_scan_result: ServerScanResult) -> ServerScanResult:
-    """
-    Redact sensitive information from a server scan result.
-
-    For StdioServer:
-    - Redacts all environment variable values
-    - Redacts command line argument values (flag values)
-
-    For RemoteServer:
-    - Redacts all HTTP header values
-    - Redacts all URL query parameter values
-
-    Args:
-        server_scan_result: The server scan result to redact
-
-    Returns:
-        The same server scan result with sensitive data redacted
-    """
-    if isinstance(server_scan_result.server, StdioServer):
+def redact_server_config(server: StdioServer | RemoteServer) -> StdioServer | RemoteServer:
+    """Redact sensitive values from an MCP server configuration in place."""
+    if isinstance(server, StdioServer):
         # Redact all environment variables
-        if server_scan_result.server.env:
-            server_scan_result.server.env = dict.fromkeys(server_scan_result.server.env, REDACTED)
+        if server.env:
+            server.env = dict.fromkeys(server.env, REDACTED)
         # Redact argument values via detect-secrets (plugin-named markers).
-        if server_scan_result.server.args:
-            server_scan_result.server.args = redact_args(server_scan_result.server.args)
+        if server.args:
+            server.args = redact_args(server.args)
 
-    elif isinstance(server_scan_result.server, RemoteServer):
+    elif isinstance(server, RemoteServer):
         # Redact all headers
-        if server_scan_result.server.headers:
-            server_scan_result.server.headers = dict.fromkeys(server_scan_result.server.headers, REDACTED)
+        if server.headers:
+            server.headers = dict.fromkeys(server.headers, REDACTED)
         # Redact all query parameter values in the URL
         try:
-            parts = urlsplit(server_scan_result.server.url)
+            parts = urlsplit(server.url)
             if parts.query:
                 qs = parse_qsl(parts.query)
-                redacted_qs = [(k, REDACTED) for k, _ in qs]
+                redacted_qs = [(key, REDACTED) for key, _value in qs]
                 new_query = urlencode(redacted_qs)
-                server_scan_result.server.url = urlunsplit(
-                    (parts.scheme, parts.netloc, parts.path, new_query, parts.fragment)
-                )
+                server.url = urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
         except Exception:
-            logger.error("Failed to redact URL: %s", server_scan_result.server.url)
+            logger.error("Failed to redact URL: %s", server.url)
 
-    # Redact traceback in server error
-    if server_scan_result.error and server_scan_result.error.traceback:
-        server_scan_result.error.traceback = redact_absolute_paths(server_scan_result.error.traceback)
-
-    # Redact all absolute paths in server output (stderr, protocol messages)
-    if server_scan_result.error and server_scan_result.error.server_output:
-        server_scan_result.error.server_output = redact_absolute_paths(server_scan_result.error.server_output)
-
-    return server_scan_result
+    return server
 
 
 def redact_data(data: dict, redact_patterns: list[re.Pattern[str]]) -> dict:
@@ -739,27 +813,44 @@ def redact_data(data: dict, redact_patterns: list[re.Pattern[str]]) -> dict:
     return data
 
 
-def redact_scan_result(result: ScanPathResult) -> ScanPathResult:
+def _redact_scan_error_in_place(error: ScanError | None) -> None:
+    """Redact the traceback and server output of a ``ScanError`` in place.
+
+    Only these two fields are touched: they are diagnostic noise (a local
+    filesystem layout, captured stderr/protocol traffic), not user content,
+    so they are safe to sanitize with :func:`redact_error_text`. ``message``
+    and ``exception`` are left as-is here, matching the analyze/push API
+    boundary's own error sanitization in ``models/api/v20260710.py``.
     """
-    Redact sensitive information from a scan path result before upload.
+    if error is None:
+        return
+    error.traceback = redact_error_text(error.traceback)
+    error.server_output = redact_error_text(error.server_output)
 
-    This redacts:
-    - Tracebacks in path-level errors
-    - Server-level sensitive data (via redact_server)
 
-    Args:
-        result: The scan path result to redact
+def redact_inspected_server(inspected: InspectedServer) -> InspectedServer:
+    """Redact sensitive values from one ``InspectedServer`` in place.
 
-    Returns:
-        The same result with sensitive data redacted
+    Redacts the server config (env/args/headers/URL query params, via
+    :func:`redact_server_config`) and the server-level error's traceback and
+    server output.
     """
-    # Redact path-level error traceback
-    if result.error and result.error.traceback:
-        result.error.traceback = redact_absolute_paths(result.error.traceback)
+    redact_server_config(inspected.server)
+    _redact_scan_error_in_place(inspected.error)
+    return inspected
 
-    # Redact all server-level sensitive data
-    if result.servers:
-        for i, server in enumerate(result.servers):
-            result.servers[i] = redact_server(server)
 
-    return result
+def redact_inspected_path(path: InspectedPath) -> InspectedPath:
+    """Redact sensitive information from an ``InspectedPath`` in place.
+
+    ``mcp-scan inspect`` prints/dumps ``InspectedPath`` results directly,
+    without going through the analyze/push pipeline's API-boundary
+    sanitization (``_server_for_request`` / ``_error_for_request`` in
+    ``models/api/v20260710.py``). This applies the equivalent local
+    redaction so every caller of ``inspect_pipeline`` -- both `mcp-scan
+    scan` and `mcp-scan inspect` -- gets sanitized results.
+    """
+    _redact_scan_error_in_place(path.error)
+    for server in path.servers:
+        redact_inspected_server(server)
+    return path

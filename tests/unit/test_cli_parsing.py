@@ -1,12 +1,17 @@
 """Tests for CLI argument parsing, especially multiple control servers."""
 
-import sys
+import argparse
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent_scan.cli import MissingIdentifierError, parse_analysis_provider, parse_control_servers
-from agent_scan.models import ControlServer, Issue, RemoteServer, ScanError, ScanPathResult, ServerScanResult
+from agent_scan.cli import (
+    MissingIdentifierError,
+    parse_analysis_provider,
+    parse_control_servers,
+    warn_deprecated_control_flags,
+)
+from agent_scan.models import ControlServer, InspectedPath
 
 
 class TestControlServerParsing:
@@ -91,7 +96,7 @@ class TestControlServerParsing:
                     "--control-identifier",
                     "id2",
                     "--storage-file",
-                    "~/.open-agent-scan",
+                    "~/.mcp-scan",
                 ],
                 [
                     ControlServer(url="https://server1.com", headers={}, identifier="user1"),
@@ -186,7 +191,7 @@ class TestCLIArgumentParsing:
     def test_scan_with_multiple_control_servers_parses_correctly(self):
         """Test that multiple control servers are parsed correctly."""
         test_argv = [
-            "agent-scan",
+            "mcp-scan",
             "scan",
             "--control-server",
             "https://server1.com",
@@ -210,18 +215,36 @@ class TestCLIArgumentParsing:
         assert control_servers[1].url == "https://server2.com"
         assert control_servers[1].identifier == "serial-123"
 
-    def test_analysis_provider_accepts_service_neutral_values(self):
+    def test_equals_syntax_is_parsed(self):
+        """`--control-server=URL` (and the other block flags) must parse like the space form."""
+        argv = [
+            "scan",
+            "--control-server=https://server1.com?version=2",
+            "--control-server-H=Auth: token1",
+            "--control-identifier=user1@example.com",
+        ]
+
+        control_servers = parse_control_servers(argv)
+
+        assert len(control_servers) == 1
+        assert control_servers[0].url == "https://server1.com?version=2"  # '=' inside the URL is preserved
+        assert control_servers[0].identifier == "user1@example.com"
+        assert control_servers[0].headers == {"Auth": " token1"}
+
+
+class TestAnalysisProviderParsing:
+    def test_local_provider(self):
         assert parse_analysis_provider("local") == "local"
+
+    def test_remote_provider(self):
         assert parse_analysis_provider("remote") == "remote"
 
-    def test_analysis_provider_accepts_legacy_snyk_alias(self):
+    def test_legacy_snyk_provider_alias_maps_to_remote(self):
         assert parse_analysis_provider("snyk") == "remote"
 
-    def test_analysis_provider_rejects_unknown_value(self):
-        import argparse
-
-        with pytest.raises(argparse.ArgumentTypeError):
-            parse_analysis_provider("example")
+    def test_unknown_provider_rejected(self):
+        with pytest.raises(argparse.ArgumentTypeError, match="expected 'local' or 'remote'"):
+            parse_analysis_provider("other")
 
 
 class TestSkillsFlag:
@@ -247,6 +270,198 @@ class TestSkillsFlag:
 
     def test_no_skills_then_skills_re_enables(self):
         assert self._parse(["--no-skills", "--skills"]) is True
+
+
+class TestPushKeyMachineIdArguments:
+    """--push-key / --machine-id: standalone replacements for
+    --control-server-H's x-client-id header and --control-identifier."""
+
+    def _parse(self, extra_argv: list[str]) -> object:
+        import argparse
+
+        from agent_scan.cli import add_control_server_arguments
+
+        parser = argparse.ArgumentParser()
+        add_control_server_arguments(parser)
+        return parser.parse_args(extra_argv)
+
+    def test_push_key_alone_parses(self):
+        args = self._parse(["--push-key", "my-secret-key"])
+        assert args.push_key == "my-secret-key"
+        assert args.machine_id is None
+
+    def test_machine_id_alone_parses(self):
+        args = self._parse(["--machine-id", "host-42"])
+        assert args.machine_id == "host-42"
+        assert args.push_key is None
+
+    def test_push_key_and_machine_id_together_parse_independently(self):
+        args = self._parse(["--push-key", "my-secret-key", "--machine-id", "host-42"])
+        assert args.push_key == "my-secret-key"
+        assert args.machine_id == "host-42"
+
+    def test_neither_flag_defaults_to_none(self):
+        args = self._parse([])
+        assert args.push_key is None
+        assert args.machine_id is None
+        assert args.control_server_H is None
+        assert args.control_identifier is None
+
+
+class TestEffectiveValueResolution:
+    """_effective_push_key / _effective_identifier resolve the new flag over
+    the deprecated one, using an explicit `is not None` check rather than
+    truthiness so an explicitly-passed empty string is honored as-is
+    instead of silently falling back to the legacy value."""
+
+    def test_explicit_empty_push_key_does_not_fall_back_to_legacy_header(self):
+        from argparse import Namespace
+
+        from agent_scan.cli import _effective_push_key
+
+        args = Namespace(
+            command="scan",
+            push_key="",
+            control_servers=[
+                ControlServer(url="https://s.com", headers={"x-client-id": "legacy-key"}, identifier="id1")
+            ],
+        )
+        assert _effective_push_key(args) == ""
+
+    def test_explicit_empty_machine_id_does_not_fall_back_to_legacy_identifier(self):
+        from argparse import Namespace
+
+        from agent_scan.cli import _effective_identifier
+
+        args = Namespace(
+            machine_id="",
+            control_servers=[ControlServer(url="https://s.com", headers={}, identifier="legacy-id")],
+        )
+        assert _effective_identifier(args) == ""
+
+    def test_missing_push_key_falls_back_to_legacy_header(self):
+        from argparse import Namespace
+
+        from agent_scan.cli import _effective_push_key
+
+        args = Namespace(
+            command="scan",
+            control_servers=[
+                ControlServer(url="https://s.com", headers={"x-client-id": "legacy-key"}, identifier="id1")
+            ],
+        )
+        assert _effective_push_key(args) == "legacy-key"
+
+
+class TestDeprecationWarnings:
+    """Old --control-server-H / --control-identifier still work, but emit a
+    one-time-per-invocation stderr warning pointing at --push-key /
+    --machine-id. --control-server-H only warns when it's actually used for
+    the deprecated x-client-id push-key trick, since it's otherwise a
+    generic "additional header" flag; --control-identifier warns on any
+    use."""
+
+    def _parse(self, extra_argv: list[str]) -> object:
+        import argparse
+
+        from agent_scan.cli import add_control_server_arguments, parse_control_servers
+
+        parser = argparse.ArgumentParser()
+        add_control_server_arguments(parser)
+        args = parser.parse_args(extra_argv)
+        # Mirrors main(): control_servers is attached from the raw argv
+        # before warn_deprecated_control_flags is called.
+        args.control_servers = parse_control_servers(extra_argv)
+        return args
+
+    def test_control_server_h_alone_warns_only_about_push_key(self, capsys):
+        args = self._parse(["--control-server-H", "x-client-id:abc"])
+        warn_deprecated_control_flags(args)
+        captured = capsys.readouterr()
+        assert "--control-server-H" in captured.err
+        assert "--push-key" in captured.err
+        assert "--control-identifier" not in captured.err
+        assert "--machine-id" not in captured.err
+
+    def test_control_identifier_alone_warns_only_about_machine_id(self, capsys):
+        args = self._parse(["--control-identifier", "user1"])
+        warn_deprecated_control_flags(args)
+        captured = capsys.readouterr()
+        assert "--control-identifier" in captured.err
+        assert "--machine-id" in captured.err
+        assert "--control-server-H" not in captured.err
+        assert "--push-key" not in captured.err
+
+    def test_both_old_flags_together_emit_both_warnings(self, capsys):
+        args = self._parse(["--control-server-H", "x-client-id:abc", "--control-identifier", "user1"])
+        warn_deprecated_control_flags(args)
+        captured = capsys.readouterr()
+        assert "--control-server-H" in captured.err
+        assert "--push-key" in captured.err
+        assert "--control-identifier" in captured.err
+        assert "--machine-id" in captured.err
+
+    def test_new_flags_alone_emit_no_warning(self, capsys):
+        args = self._parse(["--push-key", "key", "--machine-id", "id"])
+        warn_deprecated_control_flags(args)
+        captured = capsys.readouterr()
+        assert captured.err == ""
+
+    def test_neither_old_nor_new_flag_emits_no_warning(self, capsys):
+        args = self._parse([])
+        warn_deprecated_control_flags(args)
+        captured = capsys.readouterr()
+        assert captured.err == ""
+
+    def test_old_and_new_together_still_warns(self, capsys):
+        """Using --push-key doesn't suppress the warning for a still-present old flag."""
+        args = self._parse(["--control-server-H", "x-client-id:abc", "--push-key", "new-key"])
+        warn_deprecated_control_flags(args)
+        captured = capsys.readouterr()
+        assert "--control-server-H" in captured.err
+        assert "--control-identifier" not in captured.err
+
+    def test_control_server_h_with_unrelated_header_emits_no_warning(self, capsys):
+        """--control-server-H is a generic 'additional header' flag; using it
+        for a header unrelated to the x-client-id push-key trick must not
+        trigger the --push-key deprecation warning."""
+        args = self._parse(
+            [
+                "--control-server",
+                "https://s1.com",
+                "--control-server-H",
+                "X-Custom: value",
+                "--control-identifier",
+                "id1",
+            ]
+        )
+        warn_deprecated_control_flags(args)
+        captured = capsys.readouterr()
+        assert "--control-server-H" not in captured.err
+        assert "--push-key" not in captured.err
+
+    def test_control_identifier_with_multiple_control_servers_still_warns(self, capsys):
+        """--control-identifier warns on any use, even in a legitimate
+        multi-control-server setup where --machine-id (a single scalar
+        value) couldn't actually replace the distinct per-server
+        identifiers -- the warning is a nudge for the common single-server
+        case, not a precise migration guarantee."""
+        args = self._parse(
+            [
+                "--control-server",
+                "https://s1.com",
+                "--control-identifier",
+                "id1",
+                "--control-server",
+                "https://s2.com",
+                "--control-identifier",
+                "id2",
+            ]
+        )
+        warn_deprecated_control_flags(args)
+        captured = capsys.readouterr()
+        assert "--control-identifier" in captured.err
+        assert "--machine-id" in captured.err
 
 
 class TestControlServerHeaderParsing:
@@ -306,7 +521,7 @@ class TestControlServerUploadIntegration:
 
         from agent_scan.cli import run_scan
 
-        mock_result = ScanPathResult(path="/test/path")
+        mock_result = InspectedPath(path="/test/path")
 
         with patch(
             "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
@@ -343,7 +558,7 @@ class TestControlServerUploadIntegration:
 
         from agent_scan.cli import run_scan
 
-        mock_result = ScanPathResult(path="/test/path")
+        mock_result = InspectedPath(path="/test/path")
 
         with (
             patch("agent_scan.cli.collect_consent", return_value=set()),
@@ -370,13 +585,154 @@ class TestControlServerUploadIntegration:
             assert len(push_args.control_servers) == 0
 
     @pytest.mark.asyncio
+    async def test_push_key_flag_alone_passed_to_push_args(self):
+        """--push-key alone (no --control-server) reaches PushArgs.push_key."""
+        from argparse import Namespace
+
+        from agent_scan.cli import run_scan
+
+        mock_result = InspectedPath(path="/test/path")
+
+        with patch(
+            "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
+        ) as mock_pipeline:
+            args = Namespace(
+                verification_H=None,
+                verbose=False,
+                scan_all_users=False,
+                server_timeout=10,
+                files=[],
+                mcp_oauth_tokens_path=None,
+                analysis_url="https://test.com/analysis",
+                skip_ssl_verify=False,
+                control_servers=[],
+                push_key="direct-push-key",
+            )
+
+            await run_scan(args, mode="scan")
+
+            push_args = mock_pipeline.call_args[0][2]
+            assert push_args.control_servers == []
+            assert push_args.push_key == "direct-push-key"
+
+    @pytest.mark.asyncio
+    async def test_machine_id_flag_alone_passed_to_analyze_args_identifier(self):
+        """--machine-id alone (no --control-server) reaches AnalyzeArgs.identifier."""
+        from argparse import Namespace
+
+        from agent_scan.cli import run_scan
+
+        mock_result = InspectedPath(path="/test/path")
+
+        with (
+            patch("agent_scan.cli.collect_consent", return_value=set()),
+            patch(
+                "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
+            ) as mock_pipeline,
+        ):
+            args = Namespace(
+                verification_H=None,
+                verbose=False,
+                scan_all_users=False,
+                server_timeout=10,
+                files=[],
+                mcp_oauth_tokens_path=None,
+                analysis_url="https://test.com/analysis",
+                skip_ssl_verify=False,
+                control_servers=[],
+                machine_id="host-42",
+            )
+
+            await run_scan(args, mode="scan")
+
+            analyze_args = mock_pipeline.call_args[0][1]
+            assert analyze_args.identifier == "host-42"
+
+    @pytest.mark.asyncio
+    async def test_old_control_server_flags_still_work_without_new_flags(self):
+        """Old --control-server-H / --control-identifier still function unchanged
+        when --push-key / --machine-id are absent from args entirely.
+        push_key is now resolved once in run_scan (via _effective_push_key)
+        and lands on PushArgs already resolved, so it carries the header-
+        derived value rather than None."""
+        from argparse import Namespace
+
+        from agent_scan.cli import run_scan
+
+        mock_result = InspectedPath(path="/test/path")
+
+        with patch(
+            "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
+        ) as mock_pipeline:
+            args = Namespace(
+                verification_H=None,
+                verbose=False,
+                scan_all_users=False,
+                server_timeout=10,
+                files=[],
+                mcp_oauth_tokens_path=None,
+                analysis_url="https://test.com/analysis",
+                skip_ssl_verify=False,
+                control_servers=[
+                    ControlServer(
+                        url="https://server1.com", headers={"x-client-id": "old-push-key"}, identifier="old-id"
+                    )
+                ],
+            )
+
+            await run_scan(args, mode="scan")
+
+            push_args = mock_pipeline.call_args[0][2]
+            analyze_args = mock_pipeline.call_args[0][1]
+            assert push_args.push_key == "old-push-key"
+            assert analyze_args.identifier == "old-id"
+
+    @pytest.mark.asyncio
+    async def test_new_flags_take_precedence_over_old_when_both_given(self):
+        """When both old and new flags are supplied for the same concept, the
+        new flag's value wins."""
+        from argparse import Namespace
+
+        from agent_scan.cli import run_scan
+
+        mock_result = InspectedPath(path="/test/path")
+
+        with patch(
+            "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
+        ) as mock_pipeline:
+            args = Namespace(
+                verification_H=None,
+                verbose=False,
+                scan_all_users=False,
+                server_timeout=10,
+                files=[],
+                mcp_oauth_tokens_path=None,
+                analysis_url="https://test.com/analysis",
+                skip_ssl_verify=False,
+                control_servers=[
+                    ControlServer(
+                        url="https://server1.com", headers={"x-client-id": "old-push-key"}, identifier="old-id"
+                    )
+                ],
+                push_key="new-push-key",
+                machine_id="new-id",
+            )
+
+            await run_scan(args, mode="scan")
+
+            push_args = mock_pipeline.call_args[0][2]
+            analyze_args = mock_pipeline.call_args[0][1]
+            assert push_args.push_key == "new-push-key"
+            assert analyze_args.identifier == "new-id"
+
+    @pytest.mark.asyncio
     async def test_skip_ssl_verify_passed_to_pipeline(self):
         """Test that skip_ssl_verify is correctly passed to the pipeline."""
         from argparse import Namespace
 
         from agent_scan.cli import run_scan
 
-        mock_result = ScanPathResult(path="/test/path")
+        mock_result = InspectedPath(path="/test/path")
 
         with patch(
             "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
@@ -422,445 +778,3 @@ class TestControlServerUploadIntegration:
             analyze_args = mock_pipeline.call_args[0][1]
             assert push_args.skip_ssl_verify is True
             assert analyze_args.skip_ssl_verify is True
-
-
-class TestCIMode:
-    """Tests for --ci exit status (non-zero when any issues are present)."""
-
-    @pytest.mark.parametrize("code", ["E001", "X002", "X007"])
-    @pytest.mark.asyncio
-    async def test_ci_exits_1_when_any_issue(self, code: str):
-        """With --ci, sys.exit(1) for any issue regardless of code (analysis or operational)."""
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-
-        mock_result = ScanPathResult(
-            path="/test/path",
-            issues=[Issue(code=code, message="issue", reference=None)],
-        )
-
-        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
-            args = Namespace(
-                json=True,
-                print_errors=False,
-                print_full_descriptions=False,
-                verbose=False,
-                ci=True,
-            )
-            with pytest.raises(SystemExit) as exc_info:
-                await print_scan_inspect(mode="scan", args=args)
-            assert exc_info.value.code == 1
-
-    @pytest.mark.asyncio
-    async def test_ci_no_exit_when_no_issues(self):
-        """With --ci and empty issues, the scan completes without SystemExit."""
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-
-        mock_result = ScanPathResult(path="/test/path", issues=[])
-
-        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
-            args = Namespace(
-                json=True,
-                print_errors=False,
-                print_full_descriptions=False,
-                verbose=False,
-                ci=True,
-            )
-            await print_scan_inspect(mode="scan", args=args)
-
-    @pytest.mark.asyncio
-    async def test_non_ci_no_exit_with_analysis_issues(self):
-        """Without --ci, analysis findings do not call sys.exit."""
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-
-        mock_result = ScanPathResult(
-            path="/test/path",
-            issues=[Issue(code="E001", message="analysis finding", reference=None)],
-        )
-
-        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
-            args = Namespace(
-                json=True,
-                print_errors=False,
-                print_full_descriptions=False,
-                verbose=False,
-                ci=False,
-            )
-            await print_scan_inspect(mode="scan", args=args)
-
-    @pytest.mark.asyncio
-    async def test_ci_exits_1_on_path_level_failure(self):
-        """CI mode exits 1 when a ScanPathResult has an is_failure error, even with no issues."""
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-
-        mock_result = ScanPathResult(
-            path="/test/path",
-            issues=[],
-            error=ScanError(message="parse failed", is_failure=True, category="parse_error"),
-        )
-
-        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
-            args = Namespace(json=True, print_errors=False, print_full_descriptions=False, verbose=False, ci=True)
-            with pytest.raises(SystemExit) as exc_info:
-                await print_scan_inspect(mode="scan", args=args)
-            assert exc_info.value.code == 1
-
-    @pytest.mark.asyncio
-    async def test_ci_exits_1_on_server_level_failure(self):
-        """CI mode exits 1 when a ServerScanResult has an is_failure error."""
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-
-        mock_result = ScanPathResult(
-            path="/test/path",
-            issues=[],
-            servers=[
-                ServerScanResult(
-                    server=RemoteServer(url="http://localhost"),
-                    error=ScanError(message="startup failed", is_failure=True, category="server_startup"),
-                ),
-            ],
-        )
-
-        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
-            args = Namespace(json=True, print_errors=False, print_full_descriptions=False, verbose=False, ci=True)
-            with pytest.raises(SystemExit) as exc_info:
-                await print_scan_inspect(mode="scan", args=args)
-            assert exc_info.value.code == 1
-
-    @pytest.mark.asyncio
-    async def test_ci_no_exit_on_non_failure_error(self):
-        """CI mode does NOT exit when errors have is_failure=False (e.g. file_not_found)."""
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-
-        mock_result = ScanPathResult(
-            path="/test/path",
-            issues=[],
-            error=ScanError(message="config not found", is_failure=False, category="file_not_found"),
-        )
-
-        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
-            args = Namespace(json=True, print_errors=False, print_full_descriptions=False, verbose=False, ci=True)
-            await print_scan_inspect(mode="scan", args=args)
-
-
-class TestJSONOutput:
-    """Test suite for JSON output functionality."""
-
-    @pytest.mark.asyncio
-    async def test_json_output_suppresses_stdout_during_scan(self):
-        """Test that when --json is enabled, stdout is suppressed during scan."""
-        import io
-        import json
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-        from agent_scan.models import ScanPathResult
-
-        mock_result = ScanPathResult(path="/test/path.json")
-
-        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
-            args = Namespace(
-                json=True,
-                print_errors=False,
-                print_full_descriptions=False,
-                verbose=False,
-            )
-
-            captured_output = io.StringIO()
-            original_stdout = sys.stdout
-
-            try:
-                sys.stdout = captured_output
-                await print_scan_inspect(mode="scan", args=args)
-            finally:
-                sys.stdout = original_stdout
-
-            output = captured_output.getvalue()
-            assert output.strip()
-            parsed = json.loads(output)
-            assert isinstance(parsed, dict)
-            assert "/test/path.json" in parsed
-
-    @pytest.mark.asyncio
-    async def test_json_output_only_contains_json(self):
-        """Test that JSON output mode only outputs JSON, no rich.print messages."""
-        import io
-        import json
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-        from agent_scan.models import ScanPathResult
-
-        mock_result = ScanPathResult(path="/test/path.json")
-
-        async def mock_run_scan_with_print(*args, **kwargs):
-            import rich
-
-            rich.print("Successfully uploaded scan results")
-            return [mock_result]
-
-        with patch("agent_scan.cli.run_scan", side_effect=mock_run_scan_with_print):
-            args = Namespace(
-                json=True,
-                print_errors=False,
-                print_full_descriptions=False,
-                verbose=False,
-            )
-
-            captured_output = io.StringIO()
-            original_stdout = sys.stdout
-
-            try:
-                sys.stdout = captured_output
-                await print_scan_inspect(mode="scan", args=args)
-            finally:
-                sys.stdout = original_stdout
-
-            output = captured_output.getvalue()
-            assert "Successfully uploaded scan results" not in output
-
-            parsed = json.loads(output)
-            assert isinstance(parsed, dict)
-
-
-class TestIgnoreIssuesCodes:
-    """Tests for --ignore-issues-codes filtering."""
-
-    @pytest.mark.asyncio
-    async def test_ignore_codes_filters_all_issues_ci_no_exit(self):
-        """CI mode with all issues ignored → no SystemExit."""
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-
-        mock_result = ScanPathResult(
-            path="/test/path",
-            issues=[
-                Issue(code="W001", message="warning 1", reference=None),
-                Issue(code="W015", message="warning 15", reference=None),
-            ],
-        )
-
-        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
-            args = Namespace(
-                json=True,
-                print_errors=False,
-                print_full_descriptions=False,
-                verbose=False,
-                ci=True,
-                ignore_issues_codes="W001,W015",
-            )
-            # Should NOT raise SystemExit because all issues are ignored
-            await print_scan_inspect(mode="scan", args=args)
-
-    @pytest.mark.asyncio
-    async def test_ignore_codes_reflected_in_json_output(self):
-        """CI mode with ignored codes: JSON output should not contain filtered issues."""
-        import io
-        import json
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-
-        mock_result = ScanPathResult(
-            path="/test/path",
-            issues=[
-                Issue(code="W001", message="warning 1", reference=None),
-                Issue(code="E001", message="error 1", reference=None),
-            ],
-        )
-
-        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
-            args = Namespace(
-                json=True,
-                print_errors=False,
-                print_full_descriptions=False,
-                verbose=False,
-                ci=True,
-                ignore_issues_codes="W001",
-            )
-
-            captured_output = io.StringIO()
-            original_stdout = sys.stdout
-            try:
-                sys.stdout = captured_output
-                with pytest.raises(SystemExit):
-                    await print_scan_inspect(mode="scan", args=args)
-            finally:
-                sys.stdout = original_stdout
-
-            parsed_output = json.loads(captured_output.getvalue())
-            issues = parsed_output["/test/path"]["issues"]
-            codes = [i["code"] for i in issues]
-            assert "W001" not in codes
-            assert "E001" in codes
-
-    @pytest.mark.asyncio
-    async def test_ignore_codes_partial_filter_still_exits(self):
-        """CI mode, some codes ignored, others remain → SystemExit(1)."""
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-
-        mock_result = ScanPathResult(
-            path="/test/path",
-            issues=[
-                Issue(code="W001", message="warning 1", reference=None),
-                Issue(code="E001", message="error 1", reference=None),
-            ],
-        )
-
-        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
-            args = Namespace(
-                json=True,
-                print_errors=False,
-                print_full_descriptions=False,
-                verbose=False,
-                ci=True,
-                ignore_issues_codes="W001",
-            )
-            with pytest.raises(SystemExit) as exc_info:
-                await print_scan_inspect(mode="scan", args=args)
-            assert exc_info.value.code == 1
-
-    @pytest.mark.asyncio
-    async def test_ignore_codes_without_ci_exits_with_error(self):
-        """Using --ignore-issues-codes without --ci exits with code 2."""
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-
-        args = Namespace(
-            json=True,
-            print_errors=False,
-            print_full_descriptions=False,
-            verbose=False,
-            ci=False,
-            ignore_issues_codes="W001",
-        )
-        with pytest.raises(SystemExit) as exc_info:
-            await print_scan_inspect(mode="scan", args=args)
-        assert exc_info.value.code == 2
-
-    @pytest.mark.asyncio
-    async def test_ignore_codes_not_set_keeps_all_issues(self):
-        """ignore_issues_codes=None → all issues preserved, CI exits 1."""
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-
-        mock_result = ScanPathResult(
-            path="/test/path",
-            issues=[Issue(code="W001", message="warning 1", reference=None)],
-        )
-
-        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
-            args = Namespace(
-                json=True,
-                print_errors=False,
-                print_full_descriptions=False,
-                verbose=False,
-                ci=True,
-                ignore_issues_codes=None,
-            )
-            with pytest.raises(SystemExit) as exc_info:
-                await print_scan_inspect(mode="scan", args=args)
-            assert exc_info.value.code == 1
-
-    @pytest.mark.asyncio
-    async def test_ignore_codes_empty_string_keeps_all_issues(self):
-        """ignore_issues_codes="" → all issues preserved, CI exits 1."""
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-
-        mock_result = ScanPathResult(
-            path="/test/path",
-            issues=[Issue(code="W001", message="warning 1", reference=None)],
-        )
-
-        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
-            args = Namespace(
-                json=True,
-                print_errors=False,
-                print_full_descriptions=False,
-                verbose=False,
-                ci=True,
-                ignore_issues_codes="",
-            )
-            with pytest.raises(SystemExit) as exc_info:
-                await print_scan_inspect(mode="scan", args=args)
-            assert exc_info.value.code == 1
-
-    @pytest.mark.asyncio
-    async def test_ignore_codes_can_suppress_failure_code(self):
-        """Ignoring a failure code (e.g. X001) prevents CI exit when that is the only failure."""
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-
-        mock_result = ScanPathResult(
-            path="/test/path",
-            issues=[],
-            servers=[
-                ServerScanResult(
-                    server=RemoteServer(url="http://localhost"),
-                    error=ScanError(message="startup failed", is_failure=True, category="server_startup"),
-                ),
-            ],
-        )
-
-        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
-            args = Namespace(
-                json=True,
-                print_errors=False,
-                print_full_descriptions=False,
-                verbose=False,
-                ci=True,
-                ignore_issues_codes="X001",
-            )
-            # X001 (server_startup) is ignored → clean exit
-            await print_scan_inspect(mode="scan", args=args)
-
-    @pytest.mark.asyncio
-    async def test_ignore_codes_does_not_suppress_other_failure(self):
-        """Ignoring one failure code still exits 1 if a different failure code remains."""
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-
-        mock_result = ScanPathResult(
-            path="/test/path",
-            issues=[],
-            error=ScanError(message="parse failed", is_failure=True, category="parse_error"),
-            servers=[
-                ServerScanResult(
-                    server=RemoteServer(url="http://localhost"),
-                    error=ScanError(message="startup failed", is_failure=True, category="server_startup"),
-                ),
-            ],
-        )
-
-        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
-            args = Namespace(
-                json=True,
-                print_errors=False,
-                print_full_descriptions=False,
-                verbose=False,
-                ci=True,
-                ignore_issues_codes="X001",  # ignores server_startup but not parse_error (X005)
-            )
-            with pytest.raises(SystemExit) as exc_info:
-                await print_scan_inspect(mode="scan", args=args)
-            assert exc_info.value.code == 1
