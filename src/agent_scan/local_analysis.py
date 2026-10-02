@@ -105,9 +105,7 @@ def _analyze_server(server: InspectedServer, other_server_names: list[str]) -> M
     if isinstance(server.server, StdioServer):
         startup_evidence = _suspicious_startup_evidence(server.server)
         if startup_evidence is not None:
-            destructive_evidence.append(
-                "Suspicious startup command: " + ", ".join(startup_evidence["reasons"])
-            )
+            destructive_evidence.append("Suspicious startup command: " + ", ".join(startup_evidence["reasons"]))
 
     entities = server.signature.entities if server.signature is not None else []
     for index, entity in enumerate(entities):
@@ -269,7 +267,7 @@ def _suspicious_words(text: str) -> list[str]:
     return sorted(words)
 
 
-def _other_server_names(server_names: list[str | None], current_index: int) -> list[str]:
+def _other_server_names(server_names: list[str], current_index: int) -> list[str]:
     return sorted(
         {name for index, name in enumerate(server_names) if index != current_index and name and len(name.strip()) >= 4}
     )

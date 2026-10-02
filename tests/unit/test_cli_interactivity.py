@@ -135,6 +135,7 @@ class TestIsInteractiveRun:
         """Missing --push-key attribute (e.g. inspect parser) falls through safely to True."""
         assert is_interactive_run(_ns(command="scan")) is True
 
+
 class TestIsInteractiveRunMatrix:
     """
     Pins the full truth table for ``is_interactive_run`` across every
@@ -614,6 +615,7 @@ class TestResolveServerIoDefault:
         args = Namespace(command="scan", control_servers=[])
         resolve_server_io_default(args)
         assert args.suppress_mcpserver_io is False
+
 
 class TestRunScanConsentAndStreamStderrWiring:
     """

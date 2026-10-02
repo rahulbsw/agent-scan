@@ -20,11 +20,11 @@ async def test_scan_pipeline_returns_api_response():
         ) as inspect_pipeline,
         patch("agent_scan.pipelines.analyze_machine", new_callable=AsyncMock, return_value=response) as analyze,
     ):
-            result = await inspect_analyze_push_pipeline(
-                InspectArgs(timeout=10, tokens=[], paths=[]),
-                AnalyzeArgs(analysis_url="https://test.example/api", analysis_mode="remote"),
-                PushArgs(control_servers=[], version="0.6.0"),
-            )
+        result = await inspect_analyze_push_pipeline(
+            InspectArgs(timeout=10, tokens=[], paths=[]),
+            AnalyzeArgs(analysis_url="https://test.example/api", analysis_mode="remote"),
+            PushArgs(control_servers=[], version="0.6.0"),
+        )
 
     assert result is response
     inspect_pipeline.assert_awaited_once()

@@ -709,9 +709,7 @@ class TestHookInvocationRenderers:
 
 
 class TestPrepareClaudeDiscoveryHook:
-    discover_command = (
-        "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/agent-guard-discover.sh'"
-    )
+    discover_command = "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/agent-guard-discover.sh'"
 
     def test_adds_separate_async_matcherless_session_start_group(self, tmp_path):
         with patch(f"{_G}.IS_WINDOWS", False):
@@ -775,9 +773,7 @@ class TestPrepareClaudeDiscoveryHook:
 
 
 class TestPrepareCursorDiscoveryHook:
-    discover_command = (
-        "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/agent-guard-discover.sh'"
-    )
+    discover_command = "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/agent-guard-discover.sh'"
 
     def test_adds_flat_session_start_entry(self, tmp_path):
         data, _, _ = _prepare_cursor_config(
@@ -844,9 +840,7 @@ COPILOT_AGENTGUARD_CMD = "PUSH_KEY='pk-old' REMOTE_HOOKS_BASE_URL='https://api.s
 
 
 class TestPrepareGitHubCopilotDiscoveryHook:
-    discover_command = (
-        "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/agent-guard-discover.sh'"
-    )
+    discover_command = "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/agent-guard-discover.sh'"
 
     def test_adds_flat_session_start_entry(self, tmp_path):
         data, _, _ = _prepare_copilot_config(
@@ -906,9 +900,7 @@ class TestPrepareGitHubCopilotDiscoveryHook:
 
 
 class TestPrepareCodexDiscoveryHook:
-    discover_command = (
-        "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/agent-guard-discover.sh'"
-    )
+    discover_command = "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/agent-guard-discover.sh'"
 
     def test_adds_async_matcherless_session_start_group(self, tmp_path):
         data, _, _ = _prepare_codex_config(
@@ -1280,9 +1272,7 @@ class TestDiscoveryHookScriptFiles:
 
     def test_full_claude_install_shape_then_uninstall_removes_entries_and_scripts(self, tmp_path):
         config = tmp_path / "settings.json"
-        discover_command = (
-            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/agent-guard-discover.sh'"
-        )
+        discover_command = "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/agent-guard-discover.sh'"
         settings, _, preserved = _prepare_claude_config(
             AGENT_SCAN_CMD,
             config,
@@ -2675,8 +2665,7 @@ class TestDetectInstall:
     def test_first_match_in_constant_order_supplies_parsed_command(self, tmp_path, client):
         first, last = self._events(client)[0], self._events(client)[-1]
         first_command = (
-            "PUSH_KEY='pk-first' REMOTE_HOOKS_BASE_URL='https://first.example' "
-            "bash '/x/agent-guard.sh' --client test"
+            "PUSH_KEY='pk-first' REMOTE_HOOKS_BASE_URL='https://first.example' bash '/x/agent-guard.sh' --client test"
         )
         later_discovery_command = (
             "PUSH_KEY='pk-later' REMOTE_HOOKS_BASE_URL='https://later.example' "
@@ -4884,9 +4873,7 @@ class TestInstallHooksOrchestration:
         ctx["dest"].unlink.assert_called_once_with(missing_ok=True)
 
     def test_test_event_failure_cleans_new_discovery_script(self, ctx, tmp_path):
-        discover_script_name = (
-            "agent-guard-discover.ps1" if guard_module.IS_WINDOWS else "agent-guard-discover.sh"
-        )
+        discover_script_name = "agent-guard-discover.ps1" if guard_module.IS_WINDOWS else "agent-guard-discover.sh"
         discover_script = tmp_path / "hooks" / discover_script_name
 
         def copy_scripts(dest):
@@ -4911,9 +4898,7 @@ class TestInstallHooksOrchestration:
         assert not discover_script.exists()
 
     def test_test_event_failure_keeps_existing_discovery_script(self, ctx, tmp_path):
-        discover_script_name = (
-            "agent-guard-discover.ps1" if guard_module.IS_WINDOWS else "agent-guard-discover.sh"
-        )
+        discover_script_name = "agent-guard-discover.ps1" if guard_module.IS_WINDOWS else "agent-guard-discover.sh"
         discover_script = tmp_path / "hooks" / discover_script_name
         discover_script.parent.mkdir(parents=True)
         discover_script.write_text("existing\n")
@@ -6385,9 +6370,7 @@ class TestComputeHooksDiff:
         assert result["added"] == {
             "ExtraEvent": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/agent-guard.sh'"}]}]
         }
-        assert result["removed"] == {
-            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/agent-guard.sh'"}]}]
-        }
+        assert result["removed"] == {"Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/agent-guard.sh'"}]}]}
         assert result["modified"] == {"PreToolUse": {"expected_value": new_val, "actual_value": old_val}}
 
     def test_unchanged_keys_excluded_from_all_categories(self):
@@ -6929,9 +6912,7 @@ class TestRunInstallAll:
 
     @patch("agent_scan.guard._revoke_after_failure")
     @patch("agent_scan.guard._install_hooks")
-    def test_install_all_first_client_failure_does_not_revoke(
-        self, mock_install, mock_revoke, tmp_path, monkeypatch
-    ):
+    def test_install_all_first_client_failure_does_not_revoke(self, mock_install, mock_revoke, tmp_path, monkeypatch):
         """First client fails — caller-provided push key is not revoked."""
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
         mock_install.side_effect = RuntimeError("first client failed")
@@ -7050,9 +7031,7 @@ class TestRunInstallSkipsUninstalledClients:
 
     @pytest.mark.parametrize("client", ["claude", "codex", "all"])
     @patch("agent_scan.guard._install_hooks")
-    def test_managed_install_ignores_the_invoking_users_home(
-        self, mock_install, tmp_path, monkeypatch, capsys, client
-    ):
+    def test_managed_install_ignores_the_invoking_users_home(self, mock_install, tmp_path, monkeypatch, capsys, client):
         """A managed destination is system-wide, so the invoking account's home is irrelevant."""
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
         with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
