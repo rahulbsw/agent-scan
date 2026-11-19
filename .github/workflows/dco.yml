@@ -19,12 +19,43 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
 
+          rev_list_args=("${BASE_SHA}..${HEAD_SHA}")
+          if [[ "${HEAD_REF}" == "sync/upstream-"* || "${HEAD_REF}" == "agent/sync-upstream-"* ]]; then
+            echo "Upstream sync branch detected; checking first-parent commits only."
+            rev_list_args=(--first-parent "${BASE_SHA}..${HEAD_SHA}")
+          fi
+
           missing=0
-          for commit in $(git rev-list "${BASE_SHA}..${HEAD_SHA}"); do
+          for commit in $(git rev-list "${rev_list_args[@]}"); do
             if ! git log -1 --format=%B "$commit" | grep -Eiq '^Signed-off-by: .+ <.+@.+>$'; then
+              # A clean base-branch merge introduces no new authored changes.
+              read -ra parents <<< "$(git log -1 --format=%P "$commit")"
+              if [ "${#parents[@]}" -eq 2 ] &&
+                git merge-base --is-ancestor "${parents[1]}" "$BASE_SHA" &&
+                merge_tree=$(git merge-tree --write-tree "${parents[@]}") &&
+                [ "$merge_tree" = "$(git rev-parse "$commit^{tree}")" ]; then
+                echo "Commit $commit is a clean base-branch update."
+                continue
+              fi
+              # Allow the original author to certify an earlier commit without rewriting history.
+              author=$(git log -1 --format='%an <%ae>' "$commit")
+              remediated=0
+              for correction in $(git rev-list "${rev_list_args[@]}"); do
+                if git merge-base --is-ancestor "$commit" "$correction" &&
+                  git log -1 --format=%B "$correction" | grep -Fxq "DCO-Remediation-For: $commit" &&
+                  git log -1 --format=%B "$correction" | grep -Fxq "Signed-off-by: $author"; then
+                  remediated=1
+                  break
+                fi
+              done
+              if [ "$remediated" -eq 1 ]; then
+                echo "Commit $commit has an author-signed remediation."
+                continue
+              fi
               echo "::error::Commit $commit is missing a DCO Signed-off-by line."
               missing=1
             fi

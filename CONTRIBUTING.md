@@ -14,6 +14,23 @@ Signed-off-by: Your Name <your.email@example.com>
 
 Use `git commit -s` to add this automatically.
 
+Clean merges from the PR base branch (including GitHub's **Update branch**)
+do not need a separate sign-off when their tree exactly matches Git's automatic
+merge result. Conflict resolutions and merges with manual edits still require
+sign-off. New contribution commits always require sign-off.
+
+If a published commit is missing its sign-off (for example, a GitHub-generated
+branch-update merge), its original author can add a later commit containing:
+
+```text
+DCO-Remediation-For: <full-commit-sha>
+Signed-off-by: Original Author <original-author-email>
+```
+
+The sign-off must match the earlier commit's author name and email exactly, and
+the correction must descend from that commit. Only certify work you are entitled
+to sign off. This preserves shared history; new contributions still need sign-off.
+
 - Follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 - Do not include real credentials, private customer data, exploit payloads that
   phone home, or third-party content without permission.

@@ -16,7 +16,7 @@ from agent_scan.cli import (
     run_scan,
     str2bool,
 )
-from agent_scan.models import ControlServer, ScanPathResult
+from agent_scan.models import ControlServer, InspectedPath
 
 
 def _ns(**kwargs) -> Namespace:
@@ -125,6 +125,15 @@ class TestIsInteractiveRun:
         """get_push_key tolerates missing attribute."""
         args = Namespace(command="scan")
         assert is_interactive_run(args) is True
+
+    def test_scan_with_push_key_flag_is_non_interactive(self):
+        """--push-key alone (no --control-server) must behave like the deprecated push-key header."""
+        args = _ns(command="scan", push_key="direct-push-key")
+        assert is_interactive_run(args) is False
+
+    def test_scan_without_push_key_flag_is_interactive(self):
+        """Missing --push-key attribute (e.g. inspect parser) falls through safely to True."""
+        assert is_interactive_run(_ns(command="scan")) is True
 
 
 class TestIsInteractiveRunMatrix:
@@ -406,6 +415,22 @@ class TestDecideHandshake:
         # guard is outside the allowlist → safe-default skip.
         assert decide_handshake(Namespace(command="guard")).do_stdio_handshake is False
 
+    # -- --push-key flag must behave like a control-server push-key header --
+
+    def test_scan_with_push_key_flag_skips_handshake_like_deprecated_header(self):
+        """--push-key alone (no --control-server) must match the
+        `x-client-id`-header behavior it replaces: no handshake, no consent."""
+        decision = decide_handshake(_ns(command="scan", push_key="direct-push-key"))
+        assert decision.do_stdio_handshake is False
+        assert decision.collect_consent is False
+
+    def test_scan_with_push_key_flag_and_dangerous_still_handshakes(self):
+        """--dangerously-run-mcp-servers overrides --push-key the same way it
+        overrides the deprecated header-derived push key."""
+        decision = decide_handshake(_ns(command="scan", push_key="direct-push-key", dangerously_run_mcp_servers=True))
+        assert decision.do_stdio_handshake is True
+        assert decision.collect_consent is False
+
 
 class TestEnforceConsentRequirements:
     def test_non_ci_run_is_not_gated(self):
@@ -638,7 +663,7 @@ class TestRunScanConsentAndStreamStderrWiring:
             patch(
                 "agent_scan.cli.inspect_analyze_push_pipeline",
                 new_callable=AsyncMock,
-                return_value=[ScanPathResult(path="/cfg.json")],
+                return_value=[InspectedPath(path="/cfg.json")],
             ) as mock_pipeline,
         ):
             await run_scan(args, mode="scan")

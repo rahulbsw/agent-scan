@@ -1,15 +1,19 @@
 """Tests for the per-agent discovery ABC (agent_scan.agents package)."""
 
+import json
 import sys
-from unittest.mock import patch
+from pathlib import Path
+from subprocess import CompletedProcess
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 
+from agent_scan.agents import DiscoveryScope
 from agent_scan.models import (
     ClientToInspect,
     CouldNotParseMCPConfig,
+    DiscoveredSkill,
     RemoteServer,
-    SkillServer,
     StdioServer,
 )
 
@@ -177,9 +181,9 @@ def test_claude_code_discoverer_parses_skills(tmp_path):
     skills = skills_dirs[dir_path]
     assert isinstance(skills, list)
     assert len(skills) == 1
-    skill_name, skill = skills[0]
-    assert skill_name == "my-skill"
-    assert isinstance(skill, SkillServer)
+    skill = skills[0]
+    assert skill.name == "my-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_claude_code_discoverer_skills_returns_empty_when_dir_missing(tmp_path):
@@ -238,22 +242,22 @@ def test_claude_code_discoverer_project_folders_empty_when_config_missing(tmp_pa
     assert folders == []
 
 
-# --- ClaudeCodeDiscoverer: _project_paths_with_ancestors ---
+# --- ClaudeCodeDiscoverer: _discovery_paths_with_ancestors ---
 
 
-def test_project_paths_with_ancestors_empty_when_no_projects(tmp_path):
+def test_discovery_paths_with_ancestors_empty_when_no_projects(tmp_path):
     """No projects listed in ~/.claude.json → empty list."""
     from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"projects": {}}')
 
-    paths = ClaudeCodeDiscoverer(tmp_path)._project_paths_with_ancestors()
+    paths = ClaudeCodeDiscoverer(tmp_path)._discovery_paths_with_ancestors()
 
     assert paths == []
 
 
-def test_project_paths_with_ancestors_walks_up_to_filesystem_root(tmp_path):
+def test_discovery_paths_with_ancestors_walks_up_to_filesystem_root(tmp_path):
     """A single project fans out into itself + every ancestor up to '/'."""
     from pathlib import Path
 
@@ -262,7 +266,7 @@ def test_project_paths_with_ancestors_walks_up_to_filesystem_root(tmp_path):
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"projects": {"/a/b/c/d": {"mcpServers": {}}}}')
 
-    paths = set(ClaudeCodeDiscoverer(tmp_path)._project_paths_with_ancestors())
+    paths = set(ClaudeCodeDiscoverer(tmp_path)._discovery_paths_with_ancestors())
 
     assert Path("/a/b/c/d") in paths
     assert Path("/a/b/c") in paths
@@ -271,7 +275,7 @@ def test_project_paths_with_ancestors_walks_up_to_filesystem_root(tmp_path):
     assert Path("/") in paths
 
 
-def test_project_paths_with_ancestors_dedups_shared_ancestors(tmp_path):
+def test_discovery_paths_with_ancestors_dedups_shared_ancestors(tmp_path):
     """Two sibling projects sharing ancestors yield each ancestor only once."""
     from pathlib import Path
 
@@ -282,7 +286,7 @@ def test_project_paths_with_ancestors_dedups_shared_ancestors(tmp_path):
         '{"projects": {"/a/b/c/d": {"mcpServers": {}}, "/a/b/x/y": {"mcpServers": {}}}}'
     )
 
-    paths = ClaudeCodeDiscoverer(tmp_path)._project_paths_with_ancestors()
+    paths = ClaudeCodeDiscoverer(tmp_path)._discovery_paths_with_ancestors()
 
     assert len(paths) == len(set(paths))  # no duplicates
     as_set = set(paths)
@@ -297,7 +301,7 @@ def test_project_paths_with_ancestors_dedups_shared_ancestors(tmp_path):
     } <= as_set
 
 
-def test_project_paths_with_ancestors_terminates_at_root(tmp_path):
+def test_discovery_paths_with_ancestors_terminates_at_root(tmp_path):
     """Walk terminates at filesystem root (no infinite loop)."""
     from pathlib import Path
 
@@ -306,7 +310,7 @@ def test_project_paths_with_ancestors_terminates_at_root(tmp_path):
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"projects": {"/": {"mcpServers": {}}}}')
 
-    paths = ClaudeCodeDiscoverer(tmp_path)._project_paths_with_ancestors()
+    paths = ClaudeCodeDiscoverer(tmp_path)._discovery_paths_with_ancestors()
 
     assert paths == [Path("/")]
 
@@ -556,9 +560,9 @@ def test_claude_code_discoverer_project_skills_scans_per_project_dotclaude(tmp_p
     assert key.endswith("/.claude/skills")
     entries = skills_dirs[key]
     assert isinstance(entries, list) and len(entries) == 1
-    skill_name, skill = entries[0]
-    assert skill_name == "proj-skill"
-    assert isinstance(skill, SkillServer)
+    skill = entries[0]
+    assert skill.name == "proj-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_claude_code_discoverer_project_skills_scans_agents_skills(tmp_path):
@@ -583,9 +587,9 @@ def test_claude_code_discoverer_project_skills_scans_agents_skills(tmp_path):
     assert len(keys) == 1
     entries = skills_dirs[keys[0]]
     assert isinstance(entries, list) and len(entries) == 1
-    skill_name, skill = entries[0]
-    assert skill_name == "agents-skill"
-    assert isinstance(skill, SkillServer)
+    skill = entries[0]
+    assert skill.name == "agents-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_claude_code_discoverer_project_skills_skips_missing_project_folders(tmp_path):
@@ -904,9 +908,9 @@ def test_claude_code_discoverer_plugin_skills_scans_cache(tmp_path):
     assert key.endswith("/my-plugin/skills")
     entries = skills_dirs[key]
     assert isinstance(entries, list) and len(entries) == 1
-    skill_name, skill = entries[0]
-    assert skill_name == "plug-skill"
-    assert isinstance(skill, SkillServer)
+    skill = entries[0]
+    assert skill.name == "plug-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_claude_code_discoverer_plugin_skills_empty_when_cache_missing(tmp_path):
@@ -1095,6 +1099,30 @@ def test_claude_code_honors_plugin_seed_dir_env_on_own_home_scan(tmp_path, monke
     assert "seed-b-srv" in names, f"seed dir B must be scanned; got: {list(mcp_configs)}"
 
 
+def test_claude_code_plugin_seed_dir_rejects_relative_and_anchor_roots(tmp_path, monkeypatch):
+    import os
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    home = tmp_path / "me"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    valid_seed = tmp_path / "valid-seed"
+    valid_plugin = valid_seed / "cache" / "mp" / "plugin"
+    valid_plugin.mkdir(parents=True)
+    (valid_plugin / ".mcp.json").write_text('{"valid-seed": {"command": "mcp"}}')
+    monkeypatch.setenv(
+        "CLAUDE_CODE_PLUGIN_SEED_DIR",
+        os.pathsep.join(("relative-seed", tmp_path.anchor, valid_seed.as_posix())),
+    )
+    discoverer = ClaudeCodeDiscoverer(home)
+
+    configs = discoverer._discover_plugin_mcp_servers()
+
+    assert discoverer._plugin_root_dirs() == [home / ".claude" / "plugins", valid_seed]
+    assert next(iter(configs.values()))[0][0] == "valid-seed"
+
+
 def test_claude_code_ignores_plugin_env_dirs_under_multiuser_scan(tmp_path, monkeypatch):
     """Under a multi-user scan (an explicit other-user home is passed), the
     scanning process's plugin env vars must NOT relocate the target's plugins."""
@@ -1115,6 +1143,814 @@ def test_claude_code_ignores_plugin_env_dirs_under_multiuser_scan(tmp_path, monk
 
     names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
     assert "should-not-appear" not in names
+
+
+def _write_claude_plugin_registry(home, install_paths, *, version=2):
+    registry = home / ".claude" / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(
+        json.dumps(
+            {
+                "version": version,
+                "plugins": {
+                    "test@marketplace": [
+                        {"scope": "user", "installPath": install_path} for install_path in install_paths
+                    ]
+                },
+            }
+        )
+    )
+    return registry
+
+
+def _write_claude_marketplaces(home, marketplaces):
+    path = home / ".claude" / "plugins" / "known_marketplaces.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(marketplaces))
+    return path
+
+
+def test_claude_code_discoverer_plugin_mcp_servers_scans_synced_dir(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "synced" / "synced-plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"synced-srv": {"command": "sync"}}')
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert any("/plugins/synced/" in key for key in configs)
+
+
+def test_claude_code_discoverer_plugin_skills_scans_synced_dir(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    skills_dir = tmp_path / ".claude" / "plugins" / "synced" / "p" / "skills"
+    _write_skill(skills_dir, "synced-skill")
+
+    skills = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_skills()
+
+    assert any("/plugins/synced/" in key for key in skills)
+
+
+def test_claude_code_registry_discovers_external_install_path(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / "src" / "prodsec-plugins" / "jira"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"jira": {"command": "jira-mcp"}}')
+    _write_claude_plugin_registry(tmp_path, [plugin.as_posix()])
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert configs[plugin.joinpath(".mcp.json").as_posix()][0][0] == "jira"
+
+
+def test_claude_code_registry_install_path_inline_manifest(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / "external" / "inline-plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"mcpServers": {"inline": {"command": "inline-mcp"}}}')
+    _write_claude_plugin_registry(tmp_path, [plugin.as_posix()])
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_manifest_mcp_servers()
+
+    assert configs[manifest.as_posix()][0][0] == "inline"
+
+
+def test_claude_code_registry_missing_file_is_tolerated(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "cached"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"cached": {"command": "cached-mcp"}}')
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert next(iter(configs.values()))[0][0] == "cached"
+
+
+def test_claude_code_registry_malformed_json_is_tolerated(tmp_path, caplog):
+    import logging
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "cached"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"cached": {"command": "cached-mcp"}}')
+    registry = tmp_path / ".claude" / "plugins" / "installed_plugins.json"
+    registry.write_text("{not json")
+
+    with caplog.at_level(logging.WARNING):
+        configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert registry.as_posix() not in configs
+    assert next(iter(configs.values()))[0][0] == "cached"
+    assert f"Skipping malformed {registry.as_posix()}" in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+@pytest.mark.parametrize("content", ["{not json", json.dumps({"bad": "not-a-dict", "empty": None})])
+def test_claude_code_known_marketplaces_malformed_is_tolerated(tmp_path, content):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "cached"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"cached": {"command": "cached-mcp"}}')
+    marketplaces = tmp_path / ".claude" / "plugins" / "known_marketplaces.json"
+    marketplaces.write_text(content)
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert marketplaces.as_posix() not in configs
+    assert next(iter(configs.values()))[0][0] == "cached"
+
+
+def test_claude_code_registry_tolerates_malformed_entry_shapes(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    registry = tmp_path / ".claude" / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        json.dumps(
+            {
+                "plugins": {
+                    "a": "notalist",
+                    "b": [{}],
+                    "c": [{"installPath": 123}],
+                    "d": [{"installPath": "   "}],
+                    "e": [None],
+                }
+            }
+        )
+    )
+
+    assert ClaudeCodeDiscoverer(tmp_path)._installed_plugin_dirs() == []
+
+
+@pytest.mark.parametrize(
+    "install_path",
+    ["relative/plugin", "../../etc", "~", "~/", "~/../../etc", "~root/.ssh", "/Users", "/home"],
+)
+def test_claude_code_registry_rejects_unsafe_or_overly_broad_install_paths(tmp_path, caplog, install_path):
+    import logging
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    _write_claude_plugin_registry(tmp_path, [install_path])
+
+    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
+        assert ClaudeCodeDiscoverer(tmp_path)._installed_plugin_dirs() == []
+
+    assert caplog.text.count("Skipping installed_plugins.json plugin root") == 1
+
+
+def test_claude_code_registry_rejects_target_home_as_install_path(tmp_path, caplog):
+    import logging
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    _write_claude_plugin_registry(tmp_path, [tmp_path.as_posix()])
+
+    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
+        assert ClaudeCodeDiscoverer(tmp_path)._installed_plugin_dirs() == []
+
+    assert caplog.text.count("Skipping installed_plugins.json plugin root") == 1
+
+
+def test_claude_code_rejects_ancestor_of_relocated_config_dir(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    home = tmp_path / "home"
+    home.mkdir()
+    relocated_parent = tmp_path / "relocated"
+    relocated = relocated_parent / "claude"
+    relocated.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", relocated.as_posix())
+    discoverer = ClaudeCodeDiscoverer(home)
+
+    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
+        root = discoverer._sanitize_external_root(relocated_parent.as_posix(), source="installed_plugins.json")
+
+    assert root is None
+    assert caplog.text.count("Skipping installed_plugins.json plugin root") == 1
+
+
+def test_claude_code_registry_normalizes_absolute_install_paths(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / "external" / "plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"normalized": {"command": "mcp"}}')
+    raw = plugin.parent / "discarded" / ".." / plugin.name
+    _write_claude_plugin_registry(tmp_path, [raw.as_posix(), raw.as_posix()])
+
+    assert ClaudeCodeDiscoverer(tmp_path)._installed_plugin_dirs() == [plugin]
+
+
+def test_claude_code_registry_path_inside_cache_does_not_duplicate(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"cached": {"command": "mcp"}}')
+    _write_claude_plugin_registry(tmp_path, [plugin.as_posix()])
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+
+    bases = discoverer._plugin_base_dirs()
+    configs = discoverer._discover_plugin_mcp_servers()
+
+    assert plugin not in bases
+    assert len(configs) == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_claude_code_registry_symlinked_plugin_inside_cache_is_walked_as_its_own_base(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    real = tmp_path / "src" / "linked-plugin"
+    manifest = real / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"mcpServers": {"inline": {"command": "inline"}}}')
+    config = real / ".mcp.json"
+    config.write_text('{"linked": {"command": "mcp"}}')
+    skills_dir = real / "skills"
+    _write_skill(skills_dir, "linked-skill")
+    cache = tmp_path / ".claude" / "plugins" / "cache" / "mp"
+    cache.mkdir(parents=True)
+    linked = cache / "linked-plugin"
+    linked.symlink_to(real, target_is_directory=True)
+    _write_claude_plugin_registry(tmp_path, [linked.as_posix()])
+
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+
+    assert linked in discoverer._plugin_base_dirs()
+    assert next(iter(discoverer._discover_plugin_mcp_servers().values()))[0][0] == "linked"
+    assert next(iter(discoverer._discover_plugin_manifest_mcp_servers().values()))[0][0] == "inline"
+    assert next(iter(discoverer._discover_plugin_skills().values()))[0].name == "linked-skill"
+
+
+def test_claude_code_registry_honored_for_other_user_home(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "scanner-home")
+    rogue = tmp_path / "rogue-cache"
+    rogue.mkdir()
+    (rogue / ".mcp.json").write_text('{"rogue": {"command": "rogue"}}')
+    monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", rogue.as_posix())
+    alice = tmp_path / "alice"
+    plugin = tmp_path / "alice-source" / "plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"alice": {"command": "alice"}}')
+    _write_claude_plugin_registry(alice, [plugin.as_posix()])
+
+    configs = ClaudeCodeDiscoverer(alice)._discover_plugin_mcp_servers()
+    names = {name for entries in configs.values() if isinstance(entries, list) for name, _ in entries}
+
+    assert names == {"alice"}
+
+
+def test_claude_code_directory_marketplace_catalog_clone_is_not_scanned(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    marketplace = tmp_path / ".claude" / "plugins" / "marketplaces" / "official"
+    marker = marketplace / ".claude-plugin" / "marketplace.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{}")
+    plugin = marketplace / "plugins" / "not-installed"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"catalog-only": {"command": "no"}}')
+    _write_claude_marketplaces(
+        tmp_path,
+        {
+            "official": {
+                "source": {"source": "directory", "path": marketplace.as_posix()},
+                "installLocation": marketplace.as_posix(),
+            }
+        },
+    )
+
+    assert ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers() == {}
+
+
+def test_claude_code_local_marketplace_without_marketplace_manifest_is_skipped(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    marketplace = tmp_path / "src" / "unmarked-marketplace"
+    plugin = marketplace / "plugins" / "offered"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"offered": {"command": "no"}}')
+    _write_claude_marketplaces(
+        tmp_path,
+        {
+            "unmarked": {
+                "source": {"source": "directory", "path": marketplace.as_posix()},
+                "installLocation": marketplace.as_posix(),
+            }
+        },
+    )
+
+    assert ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers() == {}
+
+
+def test_claude_code_local_marketplace_root_is_not_scanned(tmp_path):
+    """A registered local marketplace must never become a walk base.
+
+    Its checkout is arbitrary user territory — ``node_modules``, vendored repos and
+    repro cases inside it are not the user's configured MCP servers. Installing from
+    a local-directory marketplace copies the plugin into ``cache`` (verified against
+    a real ``claude plugin install``), which the documented walk already covers, so
+    the root buys no coverage and only widens the blast radius.
+    """
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    marketplace = tmp_path / "src" / "prodsec-marketplace"
+    marker = marketplace / ".claude-plugin" / "marketplace.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{}")
+    unrelated = marketplace / "node_modules" / "@acme" / "sdk"
+    unrelated.mkdir(parents=True)
+    (unrelated / ".mcp.json").write_text('{"acme-vendor": {"command": "acme"}}')
+    _write_claude_marketplaces(
+        tmp_path,
+        {
+            "prodsec": {
+                "source": {"source": "directory", "path": marketplace.as_posix()},
+                "installLocation": marketplace.as_posix(),
+            }
+        },
+    )
+    installed = tmp_path / ".claude" / "plugins" / "cache" / "prodsec" / "jira" / "1.0.0"
+    installed.mkdir(parents=True)
+    (installed / ".mcp.json").write_text('{"jira": {"command": "jira"}}')
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    names = {name for value in configs.values() if isinstance(value, list) for name, _ in value}
+    assert names == {"jira"}, f"unrelated servers leaked from the marketplace checkout; got: {sorted(names)}"
+
+
+def test_claude_code_github_marketplace_install_location_not_scanned(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    marketplace = tmp_path / ".claude" / "plugins" / "marketplaces" / "official"
+    marker = marketplace / ".claude-plugin" / "marketplace.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{}")
+    plugin = marketplace / "plugins" / "not-installed"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"catalog-only": {"command": "no"}}')
+    _write_claude_marketplaces(
+        tmp_path,
+        {
+            "official": {
+                "source": {"source": "github", "repo": "anthropics/claude-plugins-official"},
+                "installLocation": marketplace.as_posix(),
+            }
+        },
+    )
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert configs == {}
+
+
+def test_claude_code_skills_dir_plugin_with_manifest_contributes_mcp_servers(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "skills" / "skills-dir-plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name": "skills-dir-plugin"}')
+    config = plugin / ".mcp.json"
+    config.write_text('{"skills-dir": {"command": "mcp"}}')
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert configs[config.as_posix()][0][0] == "skills-dir"
+
+
+def test_claude_code_skills_dir_plugin_inline_manifest_mcp_servers(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "skills" / "inline-plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"mcpServers": {"inline-skills-dir": {"command": "mcp"}}}')
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_manifest_mcp_servers()
+
+    assert configs[manifest.as_posix()][0][0] == "inline-skills-dir"
+
+
+def test_claude_code_skills_dir_folder_without_manifest_is_not_treated_as_plugin(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    ordinary_skill = tmp_path / ".claude" / "skills" / "ordinary-skill"
+    ordinary_skill.mkdir(parents=True)
+    (ordinary_skill / "SKILL.md").write_text("---\nname: ordinary\ndescription: ordinary\n---\n")
+    (ordinary_skill / ".mcp.json").write_text('{"not-a-plugin": {"command": "no"}}')
+
+    assert ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers() == {}
+
+
+def test_claude_code_registry_unknown_version_is_still_read(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / "external" / "future-plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"future": {"command": "mcp"}}')
+    _write_claude_plugin_registry(tmp_path, [plugin.as_posix()], version=99)
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert next(iter(configs.values()))[0][0] == "future"
+
+
+def test_claude_code_registry_rejects_filesystem_anchor_install_path(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    _write_claude_plugin_registry(tmp_path, [tmp_path.anchor])
+
+    assert ClaudeCodeDiscoverer(tmp_path)._installed_plugin_dirs() == []
+
+
+def test_claude_code_registry_external_root_without_plugin_marker_is_skipped(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    root = tmp_path / "external" / "stale-plugin"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    (nested / ".mcp.json").write_text('{"nested": {"command": "no"}}')
+    _write_claude_plugin_registry(tmp_path, [root.as_posix()])
+
+    assert ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers() == {}
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [".codex-plugin/plugin.json", ".cursor-plugin/plugin.json", "skills", "commands", "agents"],
+)
+def test_claude_code_registry_accepts_supported_plugin_markers(tmp_path, marker):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    root = tmp_path / "external" / marker.replace("/", "-").replace(".", "dot")
+    marker_path = root / marker
+    if marker.endswith("plugin.json"):
+        marker_path.parent.mkdir(parents=True)
+        marker_path.write_text("{}")
+    else:
+        marker_path.mkdir(parents=True)
+    _write_claude_plugin_registry(tmp_path, [root.as_posix()])
+
+    assert root in ClaudeCodeDiscoverer(tmp_path)._plugin_base_dirs()
+
+
+def test_claude_code_registry_install_path_picks_up_plugin_skills(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / "external" / "plugin-with-skills"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name": "plugin-with-skills"}')
+    skills_dir = plugin / "skills"
+    _write_skill(skills_dir, "external-skill")
+    _write_claude_plugin_registry(tmp_path, [plugin.as_posix()])
+
+    skills = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_skills()
+
+    assert {skill.name for skill in skills[skills_dir.as_posix()]} == {"external-skill"}
+
+
+def test_claude_code_registry_caps_number_of_external_roots(tmp_path, caplog):
+    import logging
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    roots = []
+    for index in range(257):
+        root = tmp_path / "external" / f"plugin-{index}"
+        root.mkdir(parents=True)
+        (root / ".mcp.json").write_text('{"server": {"command": "mcp"}}')
+        roots.append(root.as_posix())
+    _write_claude_plugin_registry(tmp_path, roots)
+
+    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
+        bases = ClaudeCodeDiscoverer(tmp_path)._plugin_base_dirs()
+
+    external = [base for base in bases if "/external/plugin-" in base.as_posix()]
+    assert len(external) == 256
+    assert "256" in caplog.text
+
+
+def test_claude_code_registry_cap_counts_external_roots_not_cache_entries(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    cache = tmp_path / ".claude" / "plugins" / "cache"
+    cache_entries = [(cache / "mp" / f"plugin-{index}").as_posix() for index in range(256)]
+    external = tmp_path / "external" / "in-place"
+    external.mkdir(parents=True)
+    (external / ".mcp.json").write_text('{"in-place": {"command": "mcp"}}')
+    _write_claude_plugin_registry(tmp_path, [*cache_entries, external.as_posix()])
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert configs[external.joinpath(".mcp.json").as_posix()][0][0] == "in-place"
+
+
+def test_claude_code_registry_caps_examined_entries_independently(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.agents import claude_code as claude_code_module
+
+    monkeypatch.setattr(claude_code_module, "_MAX_REGISTRY_ENTRIES", 4)
+    external = tmp_path / "external" / "in-place"
+    external.mkdir(parents=True)
+    (external / ".mcp.json").write_text('{"in-place": {"command": "mcp"}}')
+    cache = tmp_path / ".claude" / "plugins" / "cache"
+    covered = [(cache / "mp" / f"plugin-{index}").as_posix() for index in range(4)]
+    _write_claude_plugin_registry(tmp_path, [*covered, external.as_posix()])
+
+    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
+        roots = ClaudeCodeDiscoverer(tmp_path)._installed_plugin_dirs()
+
+    assert external not in roots
+    assert "4" in caplog.text
+
+
+def test_claude_code_skills_dir_plugin_bases_are_capped(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.agents import claude_code as claude_code_module
+
+    monkeypatch.setattr(claude_code_module, "_MAX_EXTERNAL_PLUGIN_ROOTS", 2)
+    for index in range(3):
+        manifest = tmp_path / ".claude" / "skills" / f"plugin-{index}" / ".claude-plugin" / "plugin.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text("{}")
+
+    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
+        roots = ClaudeCodeDiscoverer(tmp_path)._skills_dir_plugin_bases()
+
+    assert len(roots) == 2
+    assert "2" in caplog.text
+
+
+def test_claude_code_stale_cached_versions_still_reported_with_registry_present(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "official" / "slack"
+    old = plugin / "1.2.0"
+    current = plugin / "1.3.0"
+    old.mkdir(parents=True)
+    current.mkdir()
+    (old / ".mcp.json").write_text('{"slack-old": {"command": "old"}}')
+    (current / ".mcp.json").write_text('{"slack-current": {"command": "current"}}')
+    _write_claude_plugin_registry(tmp_path, [current.as_posix()])
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+    names = {name for entries in configs.values() if isinstance(entries, list) for name, _ in entries}
+
+    assert names == {"slack-old", "slack-current"}
+
+
+def test_claude_code_plugin_cache_env_dir_scanned_as_cache_when_no_root_markers(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    cache = tmp_path / "direct-cache"
+    plugin = cache / "official" / "plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"direct-cache": {"command": "mcp"}}')
+    monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", cache.as_posix())
+
+    configs = ClaudeCodeDiscoverer(home)._discover_plugin_mcp_servers()
+
+    assert next(iter(configs.values()))[0][0] == "direct-cache"
+
+
+def test_claude_code_plugin_cache_env_relative_path_warns_and_is_skipped(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", "relative/cache")
+
+    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
+        roots = ClaudeCodeDiscoverer(home)._plugin_root_dirs()
+
+    assert roots == [home / ".claude" / "plugins"]
+    assert caplog.text.count("Skipping CLAUDE_CODE_PLUGIN_CACHE_DIR plugin root") == 1
+
+
+def test_claude_code_reads_registry_from_env_plugin_root(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    plugin_root = tmp_path / "plugins-root"
+    plugin_root.mkdir()
+    monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", plugin_root.as_posix())
+    plugin = tmp_path / "external" / "in-place"
+    plugin.mkdir(parents=True)
+    config = plugin / ".mcp.json"
+    config.write_text('{"env-registry": {"command": "mcp"}}')
+    (plugin_root / "installed_plugins.json").write_text(
+        json.dumps({"version": 2, "plugins": {"p@m": [{"installPath": plugin.as_posix()}]}})
+    )
+
+    configs = ClaudeCodeDiscoverer(home).discover_mcp_servers()
+
+    assert configs[config.resolve().as_posix()][0][0] == "env-registry"
+
+
+def test_claude_code_plugin_cache_env_dir_scanned_as_root_and_still_skips_marketplaces(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    root = tmp_path / "plugins-root"
+    cached = root / "cache" / "mp" / "installed"
+    catalog = root / "marketplaces" / "mp" / "not-installed"
+    cached.mkdir(parents=True)
+    catalog.mkdir(parents=True)
+    (cached / ".mcp.json").write_text('{"installed": {"command": "yes"}}')
+    (catalog / ".mcp.json").write_text('{"catalog": {"command": "no"}}')
+    monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", root.as_posix())
+
+    configs = ClaudeCodeDiscoverer(home)._discover_plugin_mcp_servers()
+    names = {name for entries in configs.values() if isinstance(entries, list) for name, _ in entries}
+
+    assert names == {"installed"}
+
+
+def test_claude_code_plugin_cache_env_direct_base_ignored_under_multiuser_scan(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "scanner-home")
+    cache = tmp_path / "direct-cache"
+    plugin = cache / "mp" / "plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"rogue": {"command": "no"}}')
+    monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", cache.as_posix())
+    alice = tmp_path / "alice"
+    (alice / ".claude").mkdir(parents=True)
+
+    assert ClaudeCodeDiscoverer(alice)._discover_plugin_mcp_servers() == {}
+
+
+def test_claude_code_global_skills_dir_is_not_double_reported(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    skills_dir = tmp_path / ".claude" / "skills"
+    _write_skill(skills_dir, "ordinary-skill")
+
+    skills = ClaudeCodeDiscoverer(tmp_path).discover_skills()
+
+    assert list(skills) == [skills_dir.as_posix()]
+
+
+def test_claude_code_plugin_base_dirs_exclude_project_skill_dirs(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    project = tmp_path / "project"
+    plugin = project / ".claude" / "skills" / "project-plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"mcpServers": {"project-plugin": {"command": "no"}}}')
+    (tmp_path / ".claude.json").write_text(json.dumps({"projects": {project.as_posix(): {}}}))
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_manifest_mcp_servers()
+
+    assert manifest.as_posix() not in configs
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_claude_code_symlinked_claude_plugin_dir_manifest_is_discovered(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    outside = tmp_path / "manifest-source"
+    outside.mkdir()
+    (outside / "plugin.json").write_text('{"mcpServers": {"linked": {"command": "mcp"}}}')
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "linked-plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".claude-plugin").symlink_to(outside, target_is_directory=True)
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_manifest_mcp_servers()
+
+    assert next(iter(configs.values()))[0][0] == "linked"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_claude_code_symlinked_mcp_json_file_is_discovered(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    source = tmp_path / "mcp-source.json"
+    source.write_text('{"linked-mcp": {"command": "mcp"}}')
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "linked-plugin"
+    plugin.mkdir(parents=True)
+    config = plugin / ".mcp.json"
+    config.symlink_to(source)
+
+    configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert configs[source.resolve().as_posix()][0][0] == "linked-mcp"
+
+
+def test_claude_code_sibling_agent_plugin_json_is_still_discovered(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "shared-plugin"
+    manifest = plugin / ".cursor-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"mcpServers": {"cursor-manifest": {"command": "mcp"}}}')
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_manifest_mcp_servers()
+
+    assert configs[manifest.as_posix()][0][0] == "cursor-manifest"
+
+
+def test_claude_code_real_claude_plugin_dir_manifest_reported_once(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    manifest = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "plugin" / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"mcpServers": {"once": {"command": "mcp"}}}')
+
+    manifests = ClaudeCodeDiscoverer(tmp_path)._plugin_manifests()
+
+    assert [path for path, _ in manifests] == [manifest]
+
+
+def test_claude_code_plugin_manifests_are_memoized(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.agents import claude_plugins as claude_plugins_module
+
+    manifest = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "plugin" / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}")
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+
+    with patch.object(
+        claude_plugins_module,
+        "_walk_manifest_candidates",
+        wraps=claude_plugins_module._walk_manifest_candidates,
+    ) as walk:
+        first = discoverer._plugin_manifests()
+        first_call_count = walk.call_count
+        second = discoverer._plugin_manifests()
+
+    assert first is second
+    assert first_call_count > 0
+    assert walk.call_count == first_call_count
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_claude_code_plugin_walk_does_not_follow_symlinked_subdir_out_of_tree(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / ".mcp.json").write_text('{"outside": {"command": "no"}}')
+    cache = tmp_path / ".claude" / "plugins" / "cache"
+    cache.mkdir(parents=True)
+    (cache / "escape").symlink_to(outside, target_is_directory=True)
+
+    assert ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers() == {}
+
+
+def test_claude_code_registry_root_depth_cap_measured_from_install_path(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / "very" / "deep" / "external" / "plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"marker": {"command": "marker"}}')
+    at_limit = plugin.joinpath(*(["nested"] * 9))
+    beyond_limit = at_limit / "too-deep"
+    at_limit.mkdir(parents=True)
+    beyond_limit.mkdir()
+    (at_limit / ".mcp.json").write_text('{"at-limit": {"command": "yes"}}')
+    (beyond_limit / ".mcp.json").write_text('{"too-deep": {"command": "no"}}')
+    _write_claude_plugin_registry(tmp_path, [plugin.as_posix()])
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+    names = {name for entries in configs.values() if isinstance(entries, list) for name, _ in entries}
+
+    assert names == {"marker", "at-limit"}
 
 
 # --- ClaudeCodeDiscoverer: end-to-end discover() ---
@@ -1145,6 +1981,32 @@ def test_claude_code_discoverer_discover_returns_none_when_not_installed(tmp_pat
     cti = ClaudeCodeDiscoverer(tmp_path).discover()
 
     assert cti is None
+
+
+@pytest.mark.parametrize(
+    "scope,expect_servers,expect_skills",
+    [
+        ("all", True, True),
+        ("servers", True, False),
+        ("skills", False, True),
+    ],
+)
+def test_discover_scope_only_populates_requested_half(tmp_path, scope, expect_servers, expect_skills):
+    from agent_scan.agents import ClaudeCodeDiscoverer, DiscoveryScope
+
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+    with (
+        patch.object(discoverer, "client_exists", return_value="/installed/claude"),
+        patch.object(discoverer, "discover_mcp_servers", return_value={"servers": []}) as discover_servers,
+        patch.object(discoverer, "discover_skills", return_value={"skills": []}) as discover_skills,
+    ):
+        client = discoverer.discover(DiscoveryScope(scope))
+
+    assert client is not None
+    assert client.mcp_configs == ({"servers": []} if expect_servers else {})
+    assert client.skills_dirs == ({"skills": []} if expect_skills else {})
+    assert discover_servers.called is expect_servers
+    assert discover_skills.called is expect_skills
 
 
 # --- ABC enforcement ---
@@ -1189,6 +2051,7 @@ def test_DISCOVERERS_registers_claude_code_and_vscode_family():
         "codex",
         "claude desktop",
         "opencode",
+        "github copilot",
     }
 
 
@@ -1213,6 +2076,28 @@ def test_find_discoverers_returns_empty_when_no_agents_installed(tmp_path):
 
 
 # --- Pipeline dispatch: legacy for all + ABC merge phase ---
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_to_inspect_normalizes_unresolved_windows_path():
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    windows_path = r"C:\Users\alice\missing.json"
+
+    def expand_windows_home(path: str) -> str:
+        return r"C:\Users\alice" if path == "~" else path
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[]),
+        patch("agent_scan.pipelines.client_to_inspect_from_path", return_value=[]),
+        patch("agent_scan.utils.os.path.expanduser", side_effect=expand_windows_home),
+    ):
+        _, unresolved_paths, _ = await discover_clients_to_inspect(
+            InspectArgs(timeout=10, tokens=[], paths=[windows_path])
+        )
+
+    assert unresolved_paths[0].path == "C:/Users/alice/missing.json"
+    assert unresolved_paths[0].client == "C:/Users/alice/missing.json"
 
 
 @pytest.mark.asyncio
@@ -1247,6 +2132,41 @@ async def test_discover_clients_to_inspect_runs_legacy_for_claude_code(tmp_path)
         await discover_clients_to_inspect(args)
 
     assert spy_legacy.called, "Legacy path must be called for claude code"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", list(DiscoveryScope))
+async def test_phase_a_receives_the_requested_discovery_scope(tmp_path, scope):
+    """Phase A must honor discovery_scope too; otherwise --scope servers saves nothing."""
+    from agent_scan.models import CandidateClient
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {}}')
+
+    candidate = CandidateClient(
+        name="claude code",
+        client_exists_paths=["~/.claude"],
+        mcp_config_paths=["~/.claude.json"],
+        skills_dir_paths=["~/.claude/skills"],
+    )
+
+    with (
+        patch(
+            "agent_scan.pipelines.get_readable_home_directories",
+            return_value=[(tmp_path, "alice")],
+        ),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[]),
+        patch(
+            "agent_scan.pipelines.get_mcp_config_per_client",
+            new=AsyncMock(return_value=[]),
+        ) as spy_legacy,
+    ):
+        args = InspectArgs(timeout=10, tokens=[], paths=[], discovery_scope=scope)
+        await discover_clients_to_inspect(args)
+
+    assert spy_legacy.await_args.kwargs["scope"] is scope
     called_names = {call.args[0].name for call in spy_legacy.call_args_list}
     assert "claude code" in called_names
 
@@ -1695,11 +2615,18 @@ async def test_discover_clients_to_inspect_skips_discoverer_whose_discover_raise
 
         def client_exists(self):
             # Returns truthy so it gets into find_discoverers' return list,
-            # then blows up inside discover_mcp_servers.
+            # then blows up inside discover().
             return "/fake/path"
 
+        def discover(self, scope=DiscoveryScope.ALL):
+            # Raise from discover() itself, not from one half: discover() isolates
+            # discover_mcp_servers()/discover_skills() individually (see
+            # ``test_discover_clients_to_inspect_keeps_the_half_that_succeeded``), so
+            # only an escape from discover() reaches the pipeline's catch-all.
+            raise RuntimeError("boom from discover")
+
         def discover_mcp_servers(self):
-            raise RuntimeError("boom from discover_mcp_servers")
+            return {}
 
         def discover_skills(self):
             return {}
@@ -1732,6 +2659,58 @@ async def test_discover_clients_to_inspect_skips_discoverer_whose_discover_raise
     names = {c.name for c in ctis}
     assert "claude code" in names
     assert "exploding-mid" not in names
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_to_inspect_keeps_the_half_that_succeeded(tmp_path):
+    """When only one half of a discoverer raises, the client still reaches the
+    pipeline carrying the half that worked — the pipeline's catch-all is at
+    whole-``discover()`` granularity, so without the per-half isolation an
+    unreadable skills dir would silently cost every MCP server too."""
+    from agent_scan.agents import DISCOVERERS, AgentDiscoverer
+    from agent_scan.models import CandidateClient
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    class HalfExplodingDiscoverer(AgentDiscoverer):
+        name = "exploding-half"
+
+        def client_exists(self):
+            return "/fake/path"
+
+        def discover_mcp_servers(self):
+            raise RuntimeError("boom from discover_mcp_servers")
+
+        def discover_skills(self):
+            return {"/fake/path/skills": [DiscoveredSkill(name="survivor", path="/fake/path/skills/survivor")]}
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {}}')
+
+    candidate = CandidateClient(
+        name="claude code",
+        client_exists_paths=["~/.claude"],
+        mcp_config_paths=["~/.claude.json"],
+        skills_dir_paths=["~/.claude/skills"],
+    )
+
+    DISCOVERERS["exploding-half"] = HalfExplodingDiscoverer
+    try:
+        with (
+            patch(
+                "agent_scan.pipelines.get_readable_home_directories",
+                return_value=[(tmp_path, "alice")],
+            ),
+            patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+        ):
+            args = InspectArgs(timeout=10, tokens=[], paths=[])
+            ctis, _, _ = await discover_clients_to_inspect(args)
+    finally:
+        del DISCOVERERS["exploding-half"]
+
+    surviving = [c for c in ctis if c.name == "exploding-half"]
+    assert len(surviving) == 1, f"the half that succeeded must still land; got {[c.name for c in ctis]}"
+    assert surviving[0].mcp_configs == {}
+    assert "/fake/path/skills" in surviving[0].skills_dirs
 
 
 # --- _load_json_file permission handling ---
@@ -2806,9 +3785,9 @@ def test_vscode_discoverer_parses_copilot_skills_dir(tmp_path):
     assert len(keys) == 1
     entries = skills_dirs[keys[0]]
     assert isinstance(entries, list)
-    skill_name, skill = entries[0]
-    assert skill_name == "my-skill"
-    assert isinstance(skill, SkillServer)
+    skill = entries[0]
+    assert skill.name == "my-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 @pytest.mark.parametrize("relative", ["~/.copilot/skills", "~/.claude/skills", "~/.agents/skills"])
@@ -2834,8 +3813,7 @@ def test_vscode_discoverer_reads_each_documented_user_skills_path(tmp_path, rela
     assert len(matching) == 1, f"VSCodeDiscoverer must surface skills at {relative}; got keys: {list(skills_dirs)}"
     entries = skills_dirs[matching[0]]
     assert isinstance(entries, list)
-    skill_name, _ = entries[0]
-    assert skill_name == "user-skill"
+    assert entries[0].name == "user-skill"
 
 
 def _setup_vscode_workspace(tmp_path, workspace_relpath):
@@ -2874,9 +3852,9 @@ def test_vscode_discoverer_reads_each_documented_workspace_skills_path(tmp_path,
     )
     entries = skills_dirs[matching[0]]
     assert isinstance(entries, list)
-    skill_name, skill = entries[0]
-    assert skill_name == "ws-skill"
-    assert isinstance(skill, SkillServer)
+    skill = entries[0]
+    assert skill.name == "ws-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_kiro_discoverer_has_no_skills_dir(tmp_path):
@@ -3052,18 +4030,18 @@ def _setup_cursor_workspace(tmp_path, workspace_relpath):
     return discoverer, workspace
 
 
-def test_project_paths_with_ancestors_lives_on_agent_discoverer_base():
+def test_discovery_paths_with_ancestors_lives_on_agent_discoverer_base():
     """The ancestor walk is shared by every discoverer, so it lives on the abstract base."""
     from agent_scan.agents import AgentDiscoverer
 
-    assert "_project_paths_with_ancestors" in AgentDiscoverer.__dict__
+    assert "_discovery_paths_with_ancestors" in AgentDiscoverer.__dict__
 
 
-def test_vscode_family_project_paths_with_ancestors_uses_workspace_storage(tmp_path):
+def test_vscode_family_discovery_paths_with_ancestors_uses_workspace_storage(tmp_path):
     """For VSCode family, project roots come from workspaceStorage, then fan out into ancestors."""
     discoverer, workspace = _setup_cursor_workspace(tmp_path, "deep/nested/repo")
 
-    paths = set(discoverer._project_paths_with_ancestors())
+    paths = set(discoverer._discovery_paths_with_ancestors())
 
     # Workspace + every ancestor up to filesystem root.
     cur = workspace
@@ -3074,12 +4052,12 @@ def test_vscode_family_project_paths_with_ancestors_uses_workspace_storage(tmp_p
         cur = cur.parent
 
 
-def test_vscode_family_project_paths_empty_when_no_workspaces(tmp_path):
+def test_vscode_family_discovery_paths_empty_when_no_workspaces(tmp_path):
     """No workspaceStorage entries means no project paths and no ancestors."""
     from agent_scan.agents import CursorDiscoverer
 
     (tmp_path / ".cursor").mkdir()
-    assert CursorDiscoverer(tmp_path)._project_paths_with_ancestors() == []
+    assert CursorDiscoverer(tmp_path)._discovery_paths_with_ancestors() == []
 
 
 # --- Cursor workspace-scoped skills discovery ---
@@ -3107,9 +4085,9 @@ def test_cursor_discovers_workspace_skills_at_each_supported_relative_path(tmp_p
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
     assert isinstance(entries, list)
-    skill_name, skill = entries[0]
-    assert skill_name == "ws-skill"
-    assert isinstance(skill, SkillServer)
+    skill = entries[0]
+    assert skill.name == "ws-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_cursor_workspace_skills_picked_up_from_ancestor(tmp_path):
@@ -3326,9 +4304,9 @@ def test_vscode_extension_skills_discovers_skills_dir(tmp_path):
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
     assert isinstance(entries, list)
-    name, skill = entries[0]
-    assert name == "ext-skill"
-    assert isinstance(skill, SkillServer)
+    skill = entries[0]
+    assert skill.name == "ext-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_vscode_extension_skills_empty_when_extensions_dir_missing(tmp_path, monkeypatch):
@@ -3906,7 +4884,7 @@ def test_windsurf_discovers_workspace_skills_at_each_supported_relative_path(tmp
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
     assert isinstance(entries, list)
-    assert any(name == "ws-skill" for name, _ in entries)
+    assert any(skill.name == "ws-skill" for skill in entries)
 
 
 def test_kiro_user_global_skills_discovered(tmp_path):
@@ -3920,7 +4898,7 @@ def test_kiro_user_global_skills_discovered(tmp_path):
     matching = [k for k in skills_dirs if k.endswith("/.kiro/skills")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "kiro-user-skill" for name, _ in entries)
+    assert any(skill.name == "kiro-user-skill" for skill in entries)
 
 
 def test_kiro_user_data_dir_resolves_to_capital_kiro(tmp_path):
@@ -3958,7 +4936,7 @@ def test_kiro_discovers_workspace_skills_at_each_supported_relative_path(tmp_pat
     matching = [k for k in skills_dirs if k.endswith(f"/myproj/{relative}")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "kr-ws-skill" for name, _ in entries)
+    assert any(skill.name == "kr-ws-skill" for skill in entries)
 
 
 def test_antigravity_user_global_skills_discovered(tmp_path):
@@ -3972,7 +4950,7 @@ def test_antigravity_user_global_skills_discovered(tmp_path):
     matching = [k for k in skills_dirs if k.endswith("/.gemini/antigravity/skills")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "ag-user-skill" for name, _ in entries)
+    assert any(skill.name == "ag-user-skill" for skill in entries)
 
 
 def test_antigravity_user_data_dir_resolves_to_capital_antigravity(tmp_path):
@@ -4000,7 +4978,7 @@ def test_antigravity_discovers_workspace_skills_at_singular_agent_relative(tmp_p
     matching = [k for k in skills_dirs if k.endswith("/myproj/.agent/skills")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "ag-ws-skill" for name, _ in entries)
+    assert any(skill.name == "ag-ws-skill" for skill in entries)
 
 
 # NOTE: ``.agents/skills`` (plural) IS now a documented Antigravity workspace
@@ -4064,7 +5042,7 @@ def test_antigravity_workspace_skills_discovered_via_gemini_projects_registry(tm
     matching = [k for k in skills_dirs if k.endswith("/myproj/.agents/skills")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "ws-skill" for name, _ in entries)
+    assert any(skill.name == "ws-skill" for skill in entries)
 
 
 @pytest.mark.parametrize(
@@ -4234,7 +5212,7 @@ def test_antigravity_discovers_workspace_skills_via_v2_userdata(tmp_path):
     matching = [k for k in skills_dirs if k.endswith("/v2proj/.agent/skills")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "v2-skill" for name, _ in entries)
+    assert any(skill.name == "v2-skill" for skill in entries)
 
 
 def test_antigravity_client_exists_detects_v2_userdata_only_install(tmp_path):
@@ -4274,7 +5252,7 @@ def test_cursor_user_global_cross_compat_skills_discovered(tmp_path, relative):
     matching = [k for k in skills_dirs if k.endswith(f"/{relative}")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "cur-user-cross-skill" for name, _ in entries)
+    assert any(skill.name == "cur-user-cross-skill" for skill in entries)
 
 
 @pytest.mark.parametrize(
@@ -4295,7 +5273,7 @@ def test_windsurf_user_global_cross_compat_skills_discovered(tmp_path, relative)
     matching = [k for k in skills_dirs if k.endswith(f"/{relative}")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "ws-user-cross-skill" for name, _ in entries)
+    assert any(skill.name == "ws-user-cross-skill" for skill in entries)
 
 
 # --- Kiro: workspace MCP under ``.kiro/settings/mcp.json`` ---
@@ -4415,7 +5393,7 @@ def test_antigravity_user_shared_skills_discovered(tmp_path):
     matching = [k for k in skills_dirs if k.endswith("/.gemini/skills")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "shared-skill" for name, _ in entries)
+    assert any(skill.name == "shared-skill" for skill in entries)
 
 
 # --- Antigravity: extension walks under ``~/.gemini/extensions/`` ---
@@ -5063,7 +6041,35 @@ def test_claude_code_discovers_inline_plugin_manifest_skills(tmp_path):
 
     keys = [k for k in skills if k.endswith("/my-plugin/custom-skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills[keys[0]]} == {"special"}
+    assert {skill.name for skill in skills[keys[0]]} == {"special"}
+
+
+@pytest.mark.parametrize("form", ["absolute", "posix_parent", "windows_parent"])
+def test_claude_code_discoverer_rejects_manifest_skills_paths_outside_the_plugin(tmp_path, form):
+    """A manifest ``skills`` entry that would land outside the plugin that declared it is
+    dropped, so a manifest cannot redirect the skills scan somewhere else on disk. Mirrors
+    ``test_github_copilot_discoverer_rejects_manifest_paths_outside_the_plugin``."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "evil"
+    manifest_dir = plugin / ".claude-plugin"
+    manifest_dir.mkdir(parents=True)
+    # Two escape targets, each holding a skill that must not be attributed to the plugin.
+    _write_skill(tmp_path / "outside-skills", "leaked")
+    _write_skill(plugin.parent / "sibling-skills", "leaked")
+    rel = {
+        "absolute": (tmp_path / "outside-skills").as_posix(),
+        "posix_parent": "../sibling-skills",
+        "windows_parent": "..\\sibling-skills",
+    }[form]
+    (manifest_dir / "plugin.json").write_text(json.dumps({"name": "evil", "skills": [rel]}))
+
+    skills = ClaudeCodeDiscoverer(tmp_path).discover_skills()
+
+    leaked = [
+        key for key, value in skills.items() if isinstance(value, list) and any(s.name == "leaked" for s in value)
+    ]
+    assert leaked == []
 
 
 # --- VSCode family: NEW gaps (agentSkillsLocations, devcontainer, .code-workspace,
@@ -5087,7 +6093,7 @@ def test_vscode_agent_skills_locations_dotted_key_absolute_path(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/my-custom-skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"custom-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"custom-skill"}
 
 
 def test_vscode_agent_skills_locations_nested_key(tmp_path):
@@ -5120,7 +6126,7 @@ def test_vscode_agent_skills_locations_workspace_relative(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/proj/team-skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"team-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"team-skill"}
 
 
 def test_vscode_agent_skills_locations_object_form_enabled(tmp_path):
@@ -5143,7 +6149,7 @@ def test_vscode_agent_skills_locations_object_form_enabled(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/object-skills")]
     assert len(keys) == 1, f"object-form agentSkillsLocations must be honored; got: {list(skills_dirs)}"
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"object-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"object-skill"}
 
 
 def test_vscode_agent_skills_locations_object_form_false_excluded(tmp_path):
@@ -5464,7 +6470,7 @@ def test_windsurf_discovers_system_skills_dir(tmp_path, monkeypatch):
 
     keys = [k for k in skills_dirs if k.endswith("/system-windsurf-skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"system-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"system-skill"}
 
 
 @pytest.mark.skipif(
@@ -5544,7 +6550,7 @@ def test_antigravity_discovers_singular_agent_home_skills(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/.agent/skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"home-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"home-skill"}
 
 
 def test_antigravity_discovers_plural_agents_home_skills(tmp_path):
@@ -5560,7 +6566,7 @@ def test_antigravity_discovers_plural_agents_home_skills(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/.agents/skills")]
     assert len(keys) == 1, f"plural ~/.agents/skills must be scanned; got: {list(skills_dirs)}"
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"plural-home-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"plural-home-skill"}
 
 
 def test_vscode_devcontainer_non_dict_intermediate_does_not_crash(tmp_path):
@@ -5609,9 +6615,9 @@ def test_vscode_builtin_extension_skills_discovered(tmp_path, monkeypatch):
 
     matching = [k for k in skills_dirs if k.endswith("/github.copilot-chat/assets/prompts/skills")]
     assert len(matching) == 1, f"built-in extension skills must surface; got: {list(skills_dirs)}"
-    name, skill = skills_dirs[matching[0]][0]
-    assert name == "create-skill"
-    assert isinstance(skill, SkillServer)
+    skill = skills_dirs[matching[0]][0]
+    assert skill.name == "create-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_vscode_builtin_extension_mcp_discovered(tmp_path, monkeypatch):
@@ -5794,7 +6800,7 @@ def test_cursor_builtin_skills_discovered_in_discover_skills(tmp_path, monkeypat
     skills_dirs = discoverer.discover_skills()
 
     assert builtin_dir.as_posix() in skills_dirs, f"built-in skills dir must be surfaced; got: {list(skills_dirs)}"
-    skill_names = {name for name, _ in skills_dirs[builtin_dir.as_posix()]}
+    skill_names = {skill.name for skill in skills_dirs[builtin_dir.as_posix()]}
     assert "migrate-to-skills" in skill_names, f"migrate-to-skills must be discovered; got: {skill_names}"
     assert "loop" in skill_names, f"loop must be discovered; got: {skill_names}"
 
@@ -5854,7 +6860,7 @@ def test_cursor_skills_cursor_dir_discovered(tmp_path):
 
     key = skills_cursor.as_posix()
     assert key in skills_dirs, f"~/.cursor/skills-cursor must be surfaced; got: {list(skills_dirs)}"
-    skill_names = {name for name, _ in skills_dirs[key]}
+    skill_names = {skill.name for skill in skills_dirs[key]}
     assert {"migrate-to-skills", "loop"} <= skill_names, f"managed skills must be discovered; got: {skill_names}"
 
 
@@ -5925,6 +6931,269 @@ def test_walk_under_depth_yields_hits_for_readable_tree(tmp_path):
 
     assert [h.name for h in hits] == ["mcp.json"]
     assert hits[0] == target / "mcp.json"
+
+
+# --- _scan_skills_dir: unreadable skills dirs must not abort discovery ---
+# ``_walk_under_depth`` (above) tolerates an unreadable *base*, but the skills
+# *inspection* that follows it was unguarded: ``inspect_skills_dir`` opens with a
+# bare ``os.listdir``, which raises for a directory that is traversable but not
+# readable (mode 0o111, or another user's dir under ``--scan-all-users``) even
+# though ``exists()``/``is_dir()`` both succeed. That propagated out of
+# ``discover()``, which the pipeline catches to drop the *whole* discoverer —
+# losing every already-collected reachable source for that client/user. These
+# tests deny ``os.listdir`` for one specific path so the real ``inspect_skills_dir``
+# raises, rather than patching the indirection under test.
+
+
+def _deny_listdir(monkeypatch, denied, error):
+    """Make ``os.listdir`` raise ``error`` for ``denied`` only, delegating otherwise."""
+    import os as os_module
+
+    real_listdir = os_module.listdir
+
+    def fake_listdir(path, *args, **kwargs):
+        if Path(path) == Path(denied):
+            raise error
+        return real_listdir(path, *args, **kwargs)
+
+    monkeypatch.setattr("agent_scan.skill_client.os.listdir", fake_listdir)
+
+
+_UNREADABLE_ERRORS = [
+    pytest.param(PermissionError(13, "Permission denied"), id="permission_error"),
+    pytest.param(OSError(5, "I/O error"), id="os_error"),
+    pytest.param(ValueError("embedded null byte"), id="value_error"),
+]
+
+
+@pytest.mark.parametrize("error", _UNREADABLE_ERRORS)
+def test_claude_code_manifest_skills_unreadable_dir_does_not_abort_discovery(tmp_path, monkeypatch, caplog, error):
+    """One unreadable manifest-declared skills dir is skipped with a warning; the
+    plugin's readable skills dir is still reported and ``discover_skills`` returns."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "my-plugin"
+    manifest_dir = plugin / ".claude-plugin"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "plugin.json").write_text(
+        json.dumps({"name": "my-plugin", "skills": ["locked-skills", "open-skills"]})
+    )
+    _write_skill(plugin / "locked-skills", "hidden")
+    _write_skill(plugin / "open-skills", "visible")
+
+    _deny_listdir(monkeypatch, plugin / "locked-skills", error)
+
+    with caplog.at_level("WARNING"):
+        skills = ClaudeCodeDiscoverer(tmp_path).discover_skills()
+
+    assert not any(k.endswith("/locked-skills") for k in skills), f"unreadable dir leaked: {list(skills)}"
+    open_keys = [k for k in skills if k.endswith("/open-skills")]
+    assert len(open_keys) == 1, f"readable sibling must survive; got {list(skills)}"
+    assert {skill.name for skill in skills[open_keys[0]]} == {"visible"}
+    assert "locked-skills" in caplog.text
+
+
+def test_claude_code_manifest_skills_unreadable_dir_keeps_mcp_configs(tmp_path, monkeypatch):
+    """The whole ``ClientToInspect`` must survive an unreadable skills dir — pre-fix
+    the raise escaped ``discover()`` and ``pipelines`` dropped every MCP config too."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {"global-srv": {"command": "g"}}}')
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "my-plugin"
+    manifest_dir = plugin / ".claude-plugin"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "plugin.json").write_text(json.dumps({"name": "my-plugin", "skills": ["locked-skills"]}))
+    _write_skill(plugin / "locked-skills", "hidden")
+
+    _deny_listdir(monkeypatch, plugin / "locked-skills", PermissionError(13, "Permission denied"))
+
+    cti = ClaudeCodeDiscoverer(tmp_path).discover()
+
+    assert cti is not None
+    found = {name for value in cti.mcp_configs.values() if isinstance(value, list) for name, _server in value}
+    assert "global-srv" in found, f"MCP configs must survive; got {list(cti.mcp_configs)}"
+
+
+def test_claude_code_plugin_skills_walk_tolerates_unreadable_match(tmp_path, monkeypatch):
+    """``_discover_skill_and_command_dirs`` inspects every walk hit; one unreadable
+    hit must not cost the readable ones."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    cache = tmp_path / ".claude" / "plugins" / "cache" / "mp"
+    _write_skill(cache / "plugin-a" / "skills", "from-a")
+    _write_skill(cache / "plugin-b" / "skills", "from-b")
+
+    _deny_listdir(monkeypatch, cache / "plugin-a" / "skills", PermissionError(13, "Permission denied"))
+
+    skills = ClaudeCodeDiscoverer(tmp_path).discover_skills()
+
+    assert not any(k.endswith("/plugin-a/skills") for k in skills)
+    b_keys = [k for k in skills if k.endswith("/plugin-b/skills")]
+    assert len(b_keys) == 1, f"readable plugin must survive; got {list(skills)}"
+    assert {skill.name for skill in skills[b_keys[0]]} == {"from-b"}
+
+
+def test_vscode_extension_skills_tolerates_unreadable_dir(tmp_path, monkeypatch):
+    """The VSCode-family extension ``skills/`` walk inspects hits directly; an
+    unreadable extension must not abort the discoverer."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    exts = tmp_path / ".vscode" / "extensions"
+    _write_skill(exts / "p.locked-1.0.0" / "skills", "locked-skill")
+    _write_skill(exts / "p.open-1.0.0" / "skills", "open-skill")
+    (exts / "extensions.json").write_text(
+        json.dumps([{"relativeLocation": "p.locked-1.0.0"}, {"relativeLocation": "p.open-1.0.0"}])
+    )
+
+    _deny_listdir(monkeypatch, exts / "p.locked-1.0.0" / "skills", PermissionError(13, "Permission denied"))
+
+    skills = VSCodeDiscoverer(tmp_path).discover_skills()
+
+    assert not any(k.endswith("/p.locked-1.0.0/skills") for k in skills)
+    open_keys = [k for k in skills if k.endswith("/p.open-1.0.0/skills")]
+    assert len(open_keys) == 1, f"readable extension must survive; got {list(skills)}"
+    assert {skill.name for skill in skills[open_keys[0]]} == {"open-skill"}
+
+
+# --- discover(): one failing half must not discard the other ---
+# ``discover()`` holds ``mcp_configs`` and ``skills_dirs`` in locals and builds the
+# ``ClientToInspect`` only at the end, so a raise while computing the second threw
+# away the first. The pipeline's catch-all then dropped the client entirely.
+
+
+def test_discover_keeps_mcp_configs_when_discover_skills_raises(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {"global-srv": {"command": "g"}}}')
+
+    def boom(self):
+        raise RuntimeError("skills discovery exploded")
+
+    monkeypatch.setattr(ClaudeCodeDiscoverer, "discover_skills", boom)
+
+    cti = ClaudeCodeDiscoverer(tmp_path).discover()
+
+    assert cti is not None
+    found = {name for value in cti.mcp_configs.values() if isinstance(value, list) for name, _server in value}
+    assert "global-srv" in found
+    assert cti.skills_dirs == {}
+
+
+def test_discover_keeps_skills_dirs_when_discover_mcp_servers_raises(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    _write_skill(tmp_path / ".claude" / "skills", "user-skill")
+
+    def boom(self):
+        raise RuntimeError("mcp discovery exploded")
+
+    monkeypatch.setattr(ClaudeCodeDiscoverer, "discover_mcp_servers", boom)
+
+    cti = ClaudeCodeDiscoverer(tmp_path).discover()
+
+    assert cti is not None
+    assert cti.mcp_configs == {}
+    names = {skill.name for value in cti.skills_dirs.values() if isinstance(value, list) for skill in value}
+    assert "user-skill" in names
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_walk_manifest_candidates_finds_files_and_symlinked_named_dirs_in_one_walk(tmp_path):
+    import os
+
+    from agent_scan.agents import base as base_module
+
+    base = tmp_path / "base"
+    ordinary = base / "ordinary" / "plugin.json"
+    ordinary.parent.mkdir(parents=True)
+    ordinary.write_text("{}")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "plugin.json").write_text("{}")
+    linked_dir = base / "linked" / ".claude-plugin"
+    linked_dir.parent.mkdir()
+    linked_dir.symlink_to(source, target_is_directory=True)
+    real_walk = os.walk
+
+    with patch.object(base_module.os, "walk", wraps=real_walk) as walk:
+        candidates = list(base_module._walk_manifest_candidates(base, "plugin.json", (".claude-plugin",), 10))
+
+    # os.walk yields siblings in filesystem order, which is not stable across runners.
+    assert sorted(candidates) == sorted([ordinary, linked_dir / "plugin.json"])
+    assert walk.call_count == 1
+
+
+def test_walk_manifest_candidates_skips_named_dir_without_manifest(tmp_path):
+    """A named manifest *directory* holding no manifest file yields no candidate.
+
+    Consumers rank candidates by location precedence *before* reading them and keep one
+    per plugin root, so a synthesized candidate for a file that does not exist would
+    outrank -- and discard -- the plugin's real manifest.
+    """
+    from agent_scan.agents import base as base_module
+
+    base = tmp_path / "base"
+    real = base / "plugin-a" / ".claude-plugin" / "plugin.json"
+    real.parent.mkdir(parents=True)
+    real.write_text("{}")
+    (base / "plugin-b" / ".claude-plugin").mkdir(parents=True)
+
+    candidates = list(base_module._walk_manifest_candidates(base, "plugin.json", (".claude-plugin",), 10))
+
+    assert candidates == [real]
+
+
+def test_canonicalize_keys_prefers_parsed_servers_over_a_parse_error_sentinel(tmp_path):
+    """Two spellings of one file where one arm recorded a parse failure and another parsed
+    servers: the servers survive the merge in either order rather than being dropped."""
+    from agent_scan.agents import base as base_module
+
+    (tmp_path / "a").mkdir()
+    literal = (tmp_path / "a" / "mcp.json").as_posix()
+    aliased = (tmp_path / "a" / ".." / "a" / "mcp.json").as_posix()
+    error = CouldNotParseMCPConfig(message="boom", traceback=None)
+    entry = ("srv", StdioServer(command="mcp"))
+
+    sentinel_first = base_module._canonicalize_keys({literal: error, aliased: [entry]})
+    list_first = base_module._canonicalize_keys({aliased: [entry], literal: error})
+
+    assert sentinel_first == {literal: [entry]}
+    assert list_first == {literal: [entry]}
+
+
+def test_canonicalize_keys_prefers_discovered_skills_over_a_missing_dir_sentinel(tmp_path):
+    """The same rule holds for the skills aggregate, which mixes skill lists with a
+    ``FileNotFoundConfig`` sentinel."""
+    from agent_scan.agents import base as base_module
+    from agent_scan.models import FileNotFoundConfig
+
+    (tmp_path / "skills").mkdir()
+    literal = (tmp_path / "skills").as_posix()
+    aliased = (tmp_path / "skills" / ".." / "skills").as_posix()
+    missing = FileNotFoundConfig(message="absent")
+    skill = DiscoveredSkill(name="review", path=literal)
+
+    merged = base_module._canonicalize_keys({literal: missing, aliased: [skill]})
+
+    assert merged == {literal: [skill]}
+
+
+def test_canonicalize_keys_does_not_mutate_the_source_aggregate(tmp_path):
+    """Merging aliased keys must not extend the caller's own list in place."""
+    from agent_scan.agents import base as base_module
+
+    (tmp_path / "a").mkdir()
+    literal = (tmp_path / "a" / "mcp.json").as_posix()
+    aliased = (tmp_path / "a" / ".." / "a" / "mcp.json").as_posix()
+    first = ("one", StdioServer(command="one"))
+    second = ("two", StdioServer(command="two"))
+    source = {literal: [first], aliased: [second]}
+
+    merged = base_module._canonicalize_keys(source)
+
+    assert merged == {literal: [first, second]}
+    assert source[literal] == [first]
 
 
 def test_vscode_extension_walks_unreadable_do_not_abort_discovery(tmp_path, monkeypatch):
@@ -6045,6 +7314,38 @@ def test_claude_code_project_skills_path_that_is_a_file_is_skipped(tmp_path):
 
 
 # --- #8: _scans_own_home resolves symlinks and accepts the uid's passwd home ---
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_scans_own_home_false_when_home_resolution_fails(tmp_path, monkeypatch):
+    """An unresolvable ``home_directory`` answers False instead of comparing literals.
+
+    This gate decides whether the *scanning process's* ``CLAUDE_CONFIG_DIR`` /
+    ``VSCODE_PORTABLE`` are honored for the home being scanned, so "cannot prove this is
+    my own home" must fail closed. Here the scanned home really is the same directory as
+    ``Path.home()`` (one is a symlink of the other), but its resolution fails -- and the
+    conservative answer is still False.
+    """
+    from pathlib import Path
+
+    from agent_scan.agents import VSCodeDiscoverer
+
+    real_home = tmp_path / "real_home"
+    real_home.mkdir()
+    link_home = tmp_path / "link_home"
+    link_home.symlink_to(real_home)
+    monkeypatch.setattr(Path, "home", lambda: link_home)
+
+    unpatched_resolve = Path.resolve
+
+    def resolve_fails_for_real_home(self, *args, **kwargs):
+        if self == real_home:
+            raise OSError("stale NFS file handle")
+        return unpatched_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_fails_for_real_home)
+
+    assert VSCodeDiscoverer(real_home)._scans_own_home() is False
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
@@ -6461,6 +7762,148 @@ def test_codex_discoverer_extra_codex_keys_do_not_sink_validation(tmp_path):
     assert server.command == "npx"
 
 
+def test_codex_discoverer_resolves_all_managed_relative_binaries_for_signing_and_startup(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    codex_home = tmp_path / ".codex"
+    computer_use_command = (
+        "./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient"
+    )
+    computer_use_binary = codex_home / "computer-use" / computer_use_command
+    computer_use_binary.parent.mkdir(parents=True)
+    computer_use_binary.write_text("binary")
+    helper_command = "./bin/native-helper"
+    helper_binary = codex_home / "native-helper" / helper_command
+    helper_binary.parent.mkdir(parents=True)
+    helper_binary.write_text("binary")
+    (codex_home / "config.toml").write_text(
+        f'[mcp_servers.computer-use]\ncommand = "{computer_use_command}"\n'
+        'args = ["mcp"]\ncwd = "."\nenabled = false\n\n'
+        f'[mcp_servers.native-helper]\ncommand = "{helper_command}"\n'
+        'args = ["serve"]\ncwd = "."\nenabled = true\n'
+    )
+
+    def fake_codesign(args, **_kwargs):
+        if "--verify" in args:
+            return CompletedProcess(args=args, returncode=0)
+        identifier = Path(args[-1]).name
+        return CompletedProcess(
+            args=args,
+            returncode=0,
+            stderr="\n".join(
+                (
+                    f"Identifier={identifier}",
+                    "Authority=Developer ID Application: OpenAI, L.L.C.",
+                    "Authority=Apple Root CA",
+                )
+            ),
+        )
+
+    with (
+        patch("agent_scan.signed_binary.sys.platform", "darwin"),
+        patch("agent_scan.signed_binary.subprocess.run", side_effect=fake_codesign) as run,
+    ):
+        mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = (codex_home / "config.toml").as_posix()
+    by_name = dict(mcp_configs[config_path])
+    computer_use = by_name["computer-use"]
+    helper = by_name["native-helper"]
+    assert isinstance(computer_use, StdioServer)
+    assert computer_use.command == computer_use_command
+    assert computer_use.args == ["mcp"]
+    assert computer_use.binary_identifier == "SkyComputerUseClient"
+    assert computer_use.runtime_command == str(computer_use_binary.resolve())
+    assert computer_use.runtime_cwd == str((codex_home / "computer-use").resolve())
+    assert isinstance(helper, StdioServer)
+    assert helper.command == helper_command
+    assert helper.args == ["serve"]
+    assert helper.binary_identifier == "native-helper"
+    assert helper.runtime_command == str(helper_binary.resolve())
+    assert helper.runtime_cwd == str((codex_home / "native-helper").resolve())
+    computer_use_path = str(computer_use_binary.resolve())
+    helper_path = str(helper_binary.resolve())
+    assert run.call_args_list == [
+        call(
+            ["codesign", "--verify", "--strict", "--verbose=3", computer_use_path],
+            capture_output=True,
+            text=True,
+            check=False,
+        ),
+        call(["codesign", "-dvvv", computer_use_path], capture_output=True, text=True, check=False),
+        call(
+            ["codesign", "--verify", "--strict", "--verbose=3", helper_path],
+            capture_output=True,
+            text=True,
+            check=False,
+        ),
+        call(["codesign", "-dvvv", helper_path], capture_output=True, text=True, check=False),
+    ]
+
+
+def test_codex_discoverer_does_not_guess_between_multiple_relative_binary_candidates(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    codex_home = tmp_path / ".codex"
+    for root in (codex_home, codex_home / "ambiguous"):
+        binary = root / "bin" / "server"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text("binary")
+    (codex_home / "config.toml").write_text(
+        '[mcp_servers.ambiguous]\ncommand = "./bin/server"\nargs = ["serve"]\ncwd = "."\n'
+    )
+
+    with (
+        patch("agent_scan.signed_binary.sys.platform", "darwin"),
+        patch("agent_scan.signed_binary.subprocess.run") as run,
+    ):
+        mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = (codex_home / "config.toml").as_posix()
+    _name, server = mcp_configs[config_path][0]
+    assert isinstance(server, StdioServer)
+    assert server.binary_identifier is None
+    assert server.runtime_command is None
+    assert server.runtime_cwd is None
+    run.assert_not_called()
+
+
+def test_codex_discoverer_ignores_config_supplied_runtime_context(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    declared = tmp_path / "declared-mcp"
+    declared.write_text("binary")
+    different = tmp_path / "different-mcp"
+    different.write_text("binary")
+    (codex_home / "config.toml").write_text(
+        f'[mcp_servers.override]\ncommand = "{declared.as_posix()}"\nargs = ["serve"]\n'
+        f'runtime_command = "{different.as_posix()}"\nruntime_cwd = "{tmp_path.as_posix()}"\n'
+    )
+
+    with (
+        patch("agent_scan.signed_binary.sys.platform", "darwin"),
+        patch(
+            "agent_scan.signed_binary.subprocess.run",
+            return_value=CompletedProcess(args=[], returncode=1, stderr="not signed"),
+        ) as run,
+    ):
+        mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    _name, server = mcp_configs[(codex_home / "config.toml").as_posix()][0]
+    assert isinstance(server, StdioServer)
+    assert server.command == declared.as_posix()
+    assert server.runtime_command is None
+    assert server.runtime_cwd is None
+    run.assert_called_once_with(
+        ["codesign", "--verify", "--strict", "--verbose=3", str(declared.resolve())],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def test_codex_discoverer_degrades_without_toml_support(tmp_path, monkeypatch):
     """With no TOML decoder available (Python < 3.11 and no ``tomli`` backport),
     Codex TOML discovery degrades to no servers rather than raising."""
@@ -6534,8 +7977,8 @@ def test_codex_discoverer_discovers_user_skills(tmp_path, monkeypatch):
 
     keys = [k for k in skills_dirs if k.endswith("/.agents/skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"my-skill"}
-    assert isinstance(skills_dirs[keys[0]][0][1], SkillServer)
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"my-skill"}
+    assert isinstance(skills_dirs[keys[0]][0], DiscoveredSkill)
 
 
 def test_codex_discoverer_discovers_admin_skills(tmp_path, monkeypatch):
@@ -6552,7 +7995,7 @@ def test_codex_discoverer_discovers_admin_skills(tmp_path, monkeypatch):
 
     keys = [k for k in skills_dirs if k.endswith("/etc-codex-skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"ops-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"ops-skill"}
 
 
 def test_codex_discoverer_returns_empty_skills_when_no_dirs(tmp_path, monkeypatch):
@@ -6581,7 +8024,7 @@ def test_codex_discoverer_discovers_codex_home_skills_default(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/.codex/skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"home-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"home-skill"}
 
 
 def test_codex_discoverer_discovers_codex_home_skills_under_relocation(tmp_path, monkeypatch):
@@ -6601,7 +8044,7 @@ def test_codex_discoverer_discovers_codex_home_skills_under_relocation(tmp_path,
 
     keys = [k for k in skills_dirs if k.endswith("/relocated-codex/skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"legacy-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"legacy-skill"}
 
 
 def test_codex_discoverer_discovers_system_embedded_skills(tmp_path):
@@ -6622,7 +8065,7 @@ def test_codex_discoverer_discovers_system_embedded_skills(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/.codex/skills/.system")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"imagegen"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"imagegen"}
 
 
 def test_codex_discoverer_discovers_system_embedded_skills_under_relocation(tmp_path, monkeypatch):
@@ -6641,7 +8084,7 @@ def test_codex_discoverer_discovers_system_embedded_skills_under_relocation(tmp_
 
     keys = [k for k in skills_dirs if k.endswith("/relocated-codex/skills/.system")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"imagegen"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"imagegen"}
 
 
 # --- CodexDiscoverer: full discover() + registry ---
@@ -6795,7 +8238,7 @@ def test_codex_discoverer_discovers_project_skills(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/repo/.agents/skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"proj-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"proj-skill"}
 
 
 def test_codex_discoverer_walks_project_ancestors_for_skills(tmp_path):
@@ -6820,7 +8263,7 @@ def test_codex_discoverer_walks_project_ancestors_for_skills(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/monorepo/.agents/skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"root-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"root-skill"}
 
 
 # --- CodexDiscoverer: profile + managed (admin) MCP sources ---
@@ -6916,7 +8359,7 @@ def test_codex_discoverer_discovers_plugin_skills(tmp_path, monkeypatch):
 
     keys = [k for k in skills_dirs if k.endswith("/latex/0.2.2/skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"latex-compile"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"latex-compile"}
 
 
 def test_codex_discoverer_discovers_plugin_mcp_flat(tmp_path):
@@ -6936,6 +8379,58 @@ def test_codex_discoverer_discovers_plugin_mcp_flat(tmp_path):
     name, server = mcp_configs[keys[0]][0]
     assert name == "docs"
     assert isinstance(server, StdioServer)
+
+
+def test_codex_discoverer_signs_relative_plugin_binary_from_plugin_root(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    cache = tmp_path / ".codex" / "plugins" / "cache"
+    plugin_dir = _make_codex_plugin(cache, "mkt", "native-plugin", "1.0.0")
+    binary = plugin_dir / "bin" / "native-mcp"
+    binary.parent.mkdir()
+    binary.write_text("binary")
+    (plugin_dir / ".mcp.json").write_text(
+        '{"mcpServers": {"native": {"command": "./bin/native-mcp", "args": ["serve"], "cwd": "."}}}'
+    )
+    details = "\n".join(
+        (
+            "Identifier=native-mcp",
+            "Authority=Developer ID Application: Example",
+            "Authority=Apple Root CA",
+        )
+    )
+
+    with (
+        patch("agent_scan.signed_binary.sys.platform", "darwin"),
+        patch(
+            "agent_scan.signed_binary.subprocess.run",
+            side_effect=(
+                CompletedProcess(args=[], returncode=0),
+                CompletedProcess(args=[], returncode=0, stderr=details),
+            ),
+        ) as run,
+    ):
+        mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = (plugin_dir / ".mcp.json").as_posix()
+    name, server = mcp_configs[config_path][0]
+    assert name == "native"
+    assert isinstance(server, StdioServer)
+    assert server.command == "./bin/native-mcp"
+    assert server.args == ["serve"]
+    assert server.binary_identifier == "native-mcp"
+    assert server.runtime_command == str(binary.resolve())
+    assert server.runtime_cwd == str(plugin_dir.resolve())
+    binary_path = str(binary.resolve())
+    assert run.call_args_list == [
+        call(
+            ["codesign", "--verify", "--strict", "--verbose=3", binary_path],
+            capture_output=True,
+            text=True,
+            check=False,
+        ),
+        call(["codesign", "-dvvv", binary_path], capture_output=True, text=True, check=False),
+    ]
 
 
 def test_codex_discoverer_discovers_plugin_mcp_camel_wrapped(tmp_path):
@@ -7082,6 +8577,43 @@ def test_codex_discoverer_honors_claude_plugin_manifest_fallback(tmp_path):
     assert mcp_configs[keys[0]][0][0] == "compat_srv"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_codex_discoverer_reaches_symlinked_manifest_directory(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    plugin = tmp_path / ".codex" / "plugins" / "cache" / "mkt" / "linked" / "1.0.0"
+    plugin.mkdir(parents=True)
+    source = tmp_path / "codex-manifest-source"
+    source.mkdir()
+    (source / "plugin.json").write_text('{"mcpServers": "./servers.json"}')
+    (plugin / "servers.json").write_text('{"linked-codex": {"command": "mcp"}}')
+    (plugin / ".codex-plugin").symlink_to(source, target_is_directory=True)
+
+    configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert next(iter(configs.values()))[0][0] == "linked-codex"
+
+
+def test_codex_empty_manifest_dir_does_not_shadow_claude_compat_manifest(tmp_path):
+    """A ``.codex-plugin`` *directory* with no ``plugin.json`` inside is not a manifest, so
+    it must not outrank -- and discard -- the plugin's real ``.claude-plugin`` fallback."""
+    from agent_scan.agents import CodexDiscoverer
+
+    plugin_dir = tmp_path / ".codex" / "plugins" / "cache" / "mkt" / "compat-plugin" / "1.0.0"
+    (plugin_dir / ".codex-plugin").mkdir(parents=True)
+    _write_codex_manifest(
+        plugin_dir,
+        '{"name": "compat-plugin", "mcpServers": "./servers.json"}',
+        relpath=".claude-plugin/plugin.json",
+    )
+    (plugin_dir / "servers.json").write_text('{"compat_srv": {"command": "c"}}')
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    all_names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert "compat_srv" in all_names
+
+
 @pytest.mark.parametrize(
     "override",
     ["servers.json", "../escape.json", "/etc/abs.json", "./", ""],
@@ -7127,10 +8659,10 @@ def test_codex_discoverer_honors_manifest_skills_override(tmp_path):
 
     extra_keys = [k for k in skills_dirs if k.endswith("/skill-plugin/1.0.0/extra-skills")]
     assert len(extra_keys) == 1
-    assert {n for n, _ in skills_dirs[extra_keys[0]]} == {"extra-skill"}
+    assert {skill.name for skill in skills_dirs[extra_keys[0]]} == {"extra-skill"}
     default_keys = [k for k in skills_dirs if k.endswith("/skill-plugin/1.0.0/skills")]
     assert len(default_keys) == 1
-    assert {n for n, _ in skills_dirs[default_keys[0]]} == {"default-skill"}
+    assert {skill.name for skill in skills_dirs[default_keys[0]]} == {"default-skill"}
 
 
 def test_codex_discoverer_rejects_invalid_skills_override_path(tmp_path):
@@ -7170,12 +8702,6 @@ def test_codex_discoverer_malformed_manifest_does_not_break_default_walk(tmp_pat
 
 
 # --- ClaudeDesktopDiscoverer: per-OS config (claude_desktop_config.json) ---
-#
-# Claude Desktop stores MCP servers in a single per-OS file
-# (``claude_desktop_config.json``) in the wrapped ``{"mcpServers": {...}}`` form.
-# It has no project scope, no skills feature, and no documented extension / env-var
-# paths. ``sys.platform`` is monkeypatched in every path-dependent test so they are
-# deterministic regardless of the OS running the suite (e.g. Linux CI).
 
 
 def _claude_desktop_dir(home, platform):
@@ -7184,6 +8710,8 @@ def _claude_desktop_dir(home, platform):
         return home / "Library" / "Application Support" / "Claude"
     if platform == "win32":
         return home / "AppData" / "Roaming" / "Claude"
+    if platform == "linux":
+        return home / ".config" / "Claude"
     raise ValueError(f"unsupported platform: {platform}")
 
 
@@ -7210,20 +8738,37 @@ def test_claude_desktop_discoverer_returns_none_when_absent(tmp_path, monkeypatc
 
 
 def test_claude_desktop_discoverer_returns_none_on_unsupported_platform(tmp_path, monkeypatch):
-    """Claude Desktop is macOS/Windows only; on Linux there is no documented path,
-    so detection returns None even if a same-named dir happens to exist."""
+    """Outside macOS, Windows and Linux there is no Desktop path, so detection
+    returns None even if a same-named dir happens to exist."""
     from agent_scan.agents import claude_desktop as claude_desktop_module
 
-    monkeypatch.setattr(claude_desktop_module.sys, "platform", "linux")
-    # Plant both candidate layouts; neither must be honored on an unsupported OS.
-    (tmp_path / "Library" / "Application Support" / "Claude").mkdir(parents=True)
-    (tmp_path / "AppData" / "Roaming" / "Claude").mkdir(parents=True)
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "freebsd14")
+    for platform in ("darwin", "win32", "linux"):
+        _claude_desktop_dir(tmp_path, platform).mkdir(parents=True)
 
     disc = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path)
 
     assert disc.client_exists() is None
     assert disc._config_path() is None
     assert disc.discover_mcp_servers() == {}
+
+
+def test_claude_desktop_discoverer_linux_path(tmp_path, monkeypatch):
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "linux")
+    # The macOS and Windows layouts must not be honored on Linux.
+    (tmp_path / "Library" / "Application Support" / "Claude").mkdir(parents=True)
+    (tmp_path / "AppData" / "Roaming" / "Claude").mkdir(parents=True)
+    install = _claude_desktop_dir(tmp_path, "linux")
+    install.mkdir(parents=True)
+    (install / "claude_desktop_config.json").write_text('{"mcpServers": {"lin": {"command": "l"}}}')
+
+    disc = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path)
+    assert disc.client_exists().endswith("/.config/Claude")
+    mcp_configs = disc.discover_mcp_servers()
+    assert list(mcp_configs) == [(install / "claude_desktop_config.json").resolve().as_posix()]
+    assert mcp_configs[next(iter(mcp_configs))][0][0] == "lin"
 
 
 def test_claude_desktop_discoverer_parses_stdio_mcp_server(tmp_path, monkeypatch):
@@ -7312,9 +8857,7 @@ def test_claude_desktop_discoverer_returns_empty_when_config_absent(tmp_path, mo
     assert mcp_configs == {}
 
 
-def test_claude_desktop_discoverer_has_no_skills(tmp_path, monkeypatch):
-    """Claude Desktop's Skills are cloud-stored (uploaded via Settings), with no
-    documented local filesystem path -- so there is nothing on disk to discover."""
+def test_claude_desktop_discoverer_has_no_skills_without_plugins(tmp_path, monkeypatch):
     from agent_scan.agents import claude_desktop as claude_desktop_module
 
     monkeypatch.setattr(claude_desktop_module.sys, "platform", "darwin")
@@ -7369,9 +8912,23 @@ def test_claude_desktop_config_path_is_per_os(tmp_path, monkeypatch):
     monkeypatch.setattr(claude_desktop_module.sys, "platform", "win32")
     assert disc._config_path() == tmp_path / "AppData" / "Roaming" / "Claude" / "claude_desktop_config.json"
 
-    # Linux is not an officially supported Claude Desktop platform -> no path.
     monkeypatch.setattr(claude_desktop_module.sys, "platform", "linux")
-    assert disc._config_path() is None
+    assert disc._config_path() == tmp_path / ".config" / "Claude" / "claude_desktop_config.json"
+
+
+def test_get_client_from_path_attributes_linux_claude_desktop_config(tmp_path, monkeypatch):
+    """An explicitly scanned Linux Desktop config must be attributed to ``claude desktop``."""
+    from agent_scan import well_known_clients
+
+    monkeypatch.setattr(well_known_clients.sys, "platform", "linux")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    config = _claude_desktop_dir(tmp_path, "linux") / "claude_desktop_config.json"
+    config.parent.mkdir(parents=True)
+    config.write_text('{"mcpServers": {}}')
+
+    assert well_known_clients.get_client_from_path(str(config)) == "claude desktop"
+    assert well_known_clients.get_client_from_path("~/.config/Claude/claude_desktop_config.json") == "claude desktop"
 
 
 def test_find_discoverers_returns_claude_desktop_when_installed(tmp_path, monkeypatch):
@@ -7733,9 +9290,9 @@ def test_opencode_discoverer_parses_global_skills(tmp_path):
     assert dir_path.endswith("/.config/opencode/skills")
     skills = skills_dirs[dir_path]
     assert isinstance(skills, list)
-    name, server = skills[0]
-    assert name == "my-skill"
-    assert isinstance(server, SkillServer)
+    skill = skills[0]
+    assert skill.name == "my-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_opencode_discoverer_skills_returns_empty_when_dir_missing(tmp_path):
@@ -8053,6 +9610,29 @@ def test_opencode_discoverer_discovers_project_opencode_json(tmp_path):
     assert entries[0][0] == "proj-srv"
 
 
+def test_opencode_discoverer_discovers_project_dot_opencode_config(tmp_path):
+    """A project's ``.opencode/opencode.jsonc`` is a real opencode config location
+    (config.ts step 5) and must be discovered, not just ``<root>/opencode.json``."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    project = tmp_path / "repo"
+    (project / ".opencode").mkdir(parents=True)
+    (project / ".opencode" / "opencode.jsonc").write_text(
+        '{"mcp": {"dot-srv": {"type": "local", "command": ["echo", "hi"]}}}'
+    )
+    db_path = tmp_path / ".local" / "share" / "opencode" / "opencode.db"
+    _seed_opencode_db(db_path, [project.as_posix()])
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/repo/.opencode/opencode.jsonc")]
+    assert len(keys) == 1
+    entries = mcp_configs[keys[0]]
+    assert isinstance(entries, list)
+    assert entries[0][0] == "dot-srv"
+
+
 def test_opencode_discoverer_discovers_project_skills_dir(tmp_path):
     """``<project>/.opencode/skills`` is scanned for each opened project."""
     from agent_scan.agents import OpenCodeDiscoverer
@@ -8071,7 +9651,7 @@ def test_opencode_discoverer_discovers_project_skills_dir(tmp_path):
     assert len(matching) == 1
     skills = skills_dirs[matching[0]]
     assert isinstance(skills, list)
-    assert skills[0][0] == "proj-skill"
+    assert skills[0].name == "proj-skill"
 
 
 # --- OpenCodeDiscoverer: managed (system-wide) config ---
@@ -8175,7 +9755,7 @@ def test_opencode_discoverer_scans_singular_skill_global_dir(tmp_path):
     assert len(matching) == 1
     skills = skills_dirs[matching[0]]
     assert isinstance(skills, list)
-    assert skills[0][0] == "legacy-skill"
+    assert skills[0].name == "legacy-skill"
 
 
 def test_opencode_discoverer_scans_singular_skill_project_dir(tmp_path):
@@ -8218,7 +9798,7 @@ def test_opencode_discoverer_scans_global_claude_compat_skills(tmp_path):
     assert len(matching) == 1
     skills = skills_dirs[matching[0]]
     assert isinstance(skills, list)
-    assert skills[0][0] == "compat-skill"
+    assert skills[0].name == "compat-skill"
 
 
 def test_opencode_discoverer_scans_global_agents_compat_skills(tmp_path):
@@ -8300,7 +9880,7 @@ def test_opencode_discoverer_scans_opencode_config_dir_skills(tmp_path, monkeypa
     assert len(matching) == 1
     skills = skills_dirs[matching[0]]
     assert isinstance(skills, list)
-    assert skills[0][0] == "alt-skill"
+    assert skills[0].name == "alt-skill"
 
 
 def test_opencode_discoverer_ignores_opencode_config_dir_when_not_own_home(tmp_path, monkeypatch):
@@ -8343,7 +9923,7 @@ def test_opencode_discoverer_scans_dot_opencode_home_dir_skills(tmp_path):
     assert len(matching) == 1
     skills = skills_dirs[matching[0]]
     assert isinstance(skills, list)
-    assert skills[0][0] == "home-skill"
+    assert skills[0].name == "home-skill"
 
 
 def test_opencode_discoverer_scans_dot_opencode_home_dir_mcp(tmp_path):
@@ -8383,7 +9963,7 @@ def test_opencode_discoverer_scans_skills_paths_with_tilde_expansion(tmp_path):
     assert len(matching) == 1
     skills = skills_dirs[matching[0]]
     assert isinstance(skills, list)
-    assert skills[0][0] == "team-skill"
+    assert skills[0].name == "team-skill"
 
 
 def test_opencode_discoverer_scans_skills_paths_with_absolute_path(tmp_path):
@@ -8516,7 +10096,7 @@ def test_opencode_discoverer_scans_cached_url_skills(tmp_path):
     assert len(matching) == 1
     skills = skills_dirs[matching[0]]
     assert isinstance(skills, list)
-    assert skills[0][0] == "remote-skill"
+    assert skills[0].name == "remote-skill"
 
 
 def test_opencode_discoverer_scans_cached_url_skills_returns_empty_when_dir_absent(tmp_path):
@@ -8824,3 +10404,938 @@ def test_opencode_discoverer_client_exists_tolerates_oserror_on_candidate(tmp_pa
 
     assert result is not None
     assert result.endswith("/.opencode")
+
+
+# --- Explicit target-folder injection ---
+
+
+def test_project_and_target_folders_remain_separate(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    recorded = tmp_path / "recorded"
+    explicit = tmp_path / "explicit"
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{recorded.as_posix()}": {{}}}}}}')
+
+    discoverer = ClaudeCodeDiscoverer(tmp_path, [explicit])
+
+    assert discoverer._discover_project_folders() == [recorded]
+    assert discoverer._discover_target_folders() == [explicit]
+    assert discoverer._all_discovery_folders() == [recorded, explicit]
+
+
+def test_target_folders_gain_ancestors_and_dedup_recorded_roots(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    project = tmp_path / "monorepo" / "package"
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project.as_posix()}": {{}}}}}}')
+
+    discoverer = ClaudeCodeDiscoverer(tmp_path, [project])
+    paths = discoverer._discovery_paths_with_ancestors()
+
+    # ``project`` is both a recorded project root and an explicit target: listed once.
+    assert paths.count(project) == 1
+    assert project.parent in paths
+    assert tmp_path in paths
+
+
+def test_folder_dedupe_survives_resolve_runtime_error(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    target = tmp_path / "project"
+    target.mkdir()
+    discoverer = ClaudeCodeDiscoverer(tmp_path, [target])
+
+    with patch.object(Path, "resolve", side_effect=RuntimeError("Symlink loop")):
+        assert discoverer._all_discovery_folders() == [target]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_literal_project_spellings_both_contribute_inline_servers(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    project_link = tmp_path / "project-link"
+    project_link.symlink_to(project, target_is_directory=True)
+    (tmp_path / ".claude.json").write_text(
+        json.dumps(
+            {
+                "projects": {
+                    project.as_posix(): {"mcpServers": {"literal": {"command": "echo"}}},
+                    project_link.as_posix(): {"mcpServers": {"linked": {"command": "echo"}}},
+                }
+            }
+        )
+    )
+
+    servers = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    names = {name for entries in servers.values() if isinstance(entries, list) for name, _ in entries}
+    assert names >= {"literal", "linked"}
+
+
+def test_discovery_paths_are_memoized_and_resolve_roots_once(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    project = tmp_path / "project"
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+
+    with (
+        patch.object(discoverer, "_discover_project_folders", return_value=[project]),
+        patch.object(Path, "resolve", autospec=True, side_effect=lambda path: path) as resolve,
+    ):
+        first = discoverer._discovery_paths_with_ancestors()
+        second = discoverer._discovery_paths_with_ancestors()
+
+    assert second is first
+    assert resolve.call_count == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_all_discovery_folders_dedupes_resolved_paths_and_keeps_recorded_spelling(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    target = tmp_path / "real-project"
+    target.mkdir()
+    recorded_link = tmp_path / "linked-project"
+    recorded_link.symlink_to(target, target_is_directory=True)
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{recorded_link.as_posix()}": {{}}}}}}')
+
+    discoverer = ClaudeCodeDiscoverer(tmp_path, [target])
+
+    assert discoverer._discover_project_folders() == [recorded_link]
+    assert discoverer._discover_target_folders() == [target]
+    assert discoverer._all_discovery_folders() == [recorded_link]
+    paths = discoverer._discovery_paths_with_ancestors()
+    assert recorded_link in paths
+    assert target not in paths
+
+
+def test_all_discovery_folders_dedupes_project_roots_in_first_seen_order(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+
+    with patch.object(discoverer, "_discover_project_folders", return_value=[first, first, second]):
+        assert discoverer._all_discovery_folders() == [first, second]
+
+
+def test_claude_code_discovers_servers_and_skills_from_target_without_state_entry(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    project = tmp_path / "checkout"
+    project.mkdir()
+    (project / ".mcp.json").write_text('{"mcpServers":{"explicit-claude":{"command":"echo"}}}')
+    _write_skill(project / ".claude" / "skills", "claude-project-skill")
+    _write_skill(project / ".agents" / "skills", "shared-project-skill")
+
+    discoverer = ClaudeCodeDiscoverer(tmp_path, [project])
+    servers = discoverer.discover_mcp_servers()
+    skills = discoverer.discover_skills()
+
+    assert "explicit-claude" in {
+        name for entries in servers.values() if isinstance(entries, list) for name, _ in entries
+    }
+    assert (project / ".claude" / "skills").as_posix() in skills
+    assert (project / ".agents" / "skills").as_posix() in skills
+
+
+def test_claude_code_merges_project_history_and_target_discovery(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    recorded = tmp_path / "recorded"
+    recorded.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{recorded.as_posix()}": {{}}}}}}')
+    (recorded / ".mcp.json").write_text('{"mcpServers":{"recorded-server":{"command":"echo"}}}')
+    (target / ".mcp.json").write_text('{"mcpServers":{"target-server":{"command":"echo"}}}')
+
+    servers = ClaudeCodeDiscoverer(tmp_path, [target]).discover_mcp_servers()
+
+    names = {name for entries in servers.values() if isinstance(entries, list) for name, _ in entries}
+    assert names >= {"recorded-server", "target-server"}
+
+
+def test_codex_discovers_servers_and_skills_from_target(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    (tmp_path / ".codex").mkdir()
+    project = tmp_path / "checkout"
+    (project / ".codex").mkdir(parents=True)
+    (project / ".codex" / "config.toml").write_text('[mcp_servers.explicit_codex]\ncommand = "echo"\n')
+    _write_skill(project / ".agents" / "skills", "codex-project-skill")
+
+    discoverer = CodexDiscoverer(tmp_path, [project])
+    servers = discoverer.discover_mcp_servers()
+    skills = discoverer.discover_skills()
+
+    assert "explicit_codex" in {
+        name for entries in servers.values() if isinstance(entries, list) for name, _ in entries
+    }
+    assert (project / ".agents" / "skills").as_posix() in skills
+
+
+def test_cursor_discovers_servers_and_skills_from_target_without_workspace_state(tmp_path):
+    from agent_scan.agents import CursorDiscoverer
+
+    (tmp_path / ".cursor").mkdir()
+    project = tmp_path / "checkout"
+    (project / ".cursor").mkdir(parents=True)
+    (project / ".cursor" / "mcp.json").write_text('{"mcpServers":{"explicit-cursor":{"command":"echo"}}}')
+    _write_skill(project / ".cursor" / "skills", "cursor-project-skill")
+
+    discoverer = CursorDiscoverer(tmp_path, [project])
+    servers = discoverer.discover_mcp_servers()
+    skills = discoverer.discover_skills()
+
+    assert "explicit-cursor" in {
+        name for entries in servers.values() if isinstance(entries, list) for name, _ in entries
+    }
+    assert (project / ".cursor" / "skills").as_posix() in skills
+
+
+def test_opencode_relative_skills_path_anchors_at_target_root(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    project = tmp_path / "checkout"
+    project.mkdir()
+    (project / "opencode.json").write_text('{"skills":{"paths":["team-skills"]}}')
+    _write_skill(project / "team-skills", "relative-project-skill")
+
+    skills = OpenCodeDiscoverer(tmp_path, [project]).discover_skills()
+
+    assert (project / "team-skills").as_posix() in skills
+
+
+def test_find_discoverers_threads_target_folders(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer, find_discoverers
+
+    (tmp_path / ".claude").mkdir()
+    project = tmp_path / "checkout"
+
+    found = find_discoverers(tmp_path, target_folders=[project])
+
+    claude = next(discoverer for discoverer in found if isinstance(discoverer, ClaudeCodeDiscoverer))
+    assert claude.target_folders == [project]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_merges_target_servers_and_skills_into_installed_client(tmp_path):
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    project = tmp_path / "checkout"
+    project.mkdir()
+    (project / ".mcp.json").write_text('{"mcpServers":{"pipeline-project":{"command":"echo"}}}')
+    _write_skill(project / ".claude" / "skills", "pipeline-project-skill")
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+    ):
+        clients, _, _ = await discover_clients_to_inspect(
+            InspectArgs(timeout=0, tokens=[], paths=[], scan_skills=True, target_folders=[str(project)])
+        )
+
+    claude = next(client for client in clients if client.name == "claude code")
+    assert "pipeline-project" in {
+        name for entries in claude.mcp_configs.values() if isinstance(entries, list) for name, _ in entries
+    }
+    assert (project / ".claude" / "skills").as_posix() in claude.skills_dirs
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+async def test_pipeline_preserves_unresolved_target_folder_spelling(tmp_path):
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    home = tmp_path / "home"
+    home.mkdir()
+    target = tmp_path / "real-project"
+    target.mkdir()
+    project_link = tmp_path / "linked-project"
+    project_link.symlink_to(target, target_is_directory=True)
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[]) as find,
+    ):
+        await discover_clients_to_inspect(
+            InspectArgs(timeout=0, tokens=[], paths=[], target_folders=[str(project_link)])
+        )
+
+    find.assert_called_once_with(home, target_folders=[project_link])
+
+
+@pytest.mark.asyncio
+async def test_pipeline_skips_missing_target_folder_with_warning(tmp_path, caplog):
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    missing = tmp_path / "missing"
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+        caplog.at_level("WARNING", logger="agent_scan.pipelines"),
+    ):
+        await discover_clients_to_inspect(InspectArgs(timeout=0, tokens=[], paths=[], target_folders=[str(missing)]))
+
+    assert str(missing) in caplog.text
+    assert "Skipping" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_pipeline_skips_target_folder_when_exists_raises(tmp_path, caplog):
+    import errno
+
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    home = tmp_path / "home"
+    home.mkdir()
+    stale = tmp_path / "stale-mount"
+    good = tmp_path / "project"
+    good.mkdir()
+    real_exists = Path.exists
+
+    def flaky_exists(path):
+        if path == stale:
+            raise OSError(errno.ESTALE, "Stale file handle")
+        return real_exists(path)
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[]) as find,
+        patch.object(Path, "exists", flaky_exists),
+        caplog.at_level("WARNING", logger="agent_scan.pipelines"),
+    ):
+        await discover_clients_to_inspect(
+            InspectArgs(timeout=0, tokens=[], paths=[], target_folders=[str(stale), str(good)])
+        )
+
+    find.assert_called_once_with(home, target_folders=[good])
+    assert str(stale) in caplog.text
+    assert "Skipping" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_pipeline_explicit_paths_ignore_target_folders(tmp_path):
+    from unittest.mock import AsyncMock
+
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    explicit_config = tmp_path / "config.json"
+    project = tmp_path / "checkout"
+    project.mkdir()
+    from_path = AsyncMock(return_value=[])
+
+    inspect_args = InspectArgs(
+        timeout=0,
+        tokens=[],
+        paths=[str(explicit_config)],
+        target_folders=[str(project)],
+    )
+    assert inspect_args.target_folders == [str(project)]
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[]),
+        patch("agent_scan.pipelines.client_to_inspect_from_path", from_path),
+        patch("agent_scan.pipelines.find_discoverers") as find,
+    ):
+        await discover_clients_to_inspect(inspect_args)
+
+    from_path.assert_awaited_once()
+    find.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_runtime_error_resolving_target_keeps_literal_folder(tmp_path):
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    target = tmp_path / "project"
+    target.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[]) as find,
+        patch.object(Path, "resolve", side_effect=RuntimeError("Symlink loop")),
+    ):
+        await discover_clients_to_inspect(
+            InspectArgs(timeout=0, tokens=[], paths=[], target_folders=[target.as_posix()])
+        )
+
+    find.assert_called_once_with(home, target_folders=[target])
+
+
+@pytest.mark.asyncio
+async def test_pipeline_null_byte_target_folder_is_skipped_without_aborting(tmp_path):
+    """Target folders arrive from untrusted hook JSON, where a NUL byte raises ValueError.
+
+    ``Path.resolve()`` raises ``ValueError`` (not ``OSError``) for an embedded NUL, so a
+    payload such as ``{"cwd": "a\\0b"}`` must not take the whole discovery down with it --
+    the bad entry is dropped and the good one still reaches the discoverers.
+    """
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    home = tmp_path / "home"
+    home.mkdir()
+    good = tmp_path / "project"
+    good.mkdir()
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[]) as find,
+    ):
+        await discover_clients_to_inspect(
+            InspectArgs(timeout=0, tokens=[], paths=[], target_folders=["a\x00b", good.as_posix()])
+        )
+
+    find.assert_called_once_with(home, target_folders=[good])
+
+
+# --- GitHub Copilot: well-known client entry ---
+
+
+def _install_copilot_home(home: Path) -> Path:
+    """Lay out a Copilot home the way the CLI and the desktop app do."""
+    copilot = home / ".copilot"
+    skill = copilot / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: demo skill\n---\nbody\n")
+    (copilot / "mcp-config.json").write_text(
+        json.dumps({"mcpServers": {"playwright": {"command": "npx", "args": ["@playwright/mcp@latest"]}}})
+    )
+    return copilot
+
+
+@pytest.mark.asyncio
+async def test_github_copilot_configs_are_discovered_without_vscode(tmp_path):
+    """Copilot is reachable as a CLI and a desktop app, so its home must be scanned on a
+    machine that has never had VS Code installed."""
+    from agent_scan.inspect import get_mcp_config_per_home_directory
+    from agent_scan.well_known_clients import GITHUB_COPILOT_NAME, get_well_known_clients
+
+    copilot = _install_copilot_home(tmp_path)
+    clients = {client.name: client for client in get_well_known_clients()}
+
+    cti = await get_mcp_config_per_home_directory(clients[GITHUB_COPILOT_NAME], tmp_path)
+
+    assert cti is not None
+    assert (copilot / "mcp-config.json").resolve().as_posix() in cti.mcp_configs
+    assert (copilot / "skills").resolve().as_posix() in cti.skills_dirs
+    servers = cti.mcp_configs[(copilot / "mcp-config.json").resolve().as_posix()]
+    assert [name for name, _server in servers] == ["playwright"]
+
+
+@pytest.mark.asyncio
+async def test_vscode_entry_alone_leaves_copilot_unscanned(tmp_path):
+    """Why the entry above is needed: ``vscode`` claims the shared Copilot paths but is
+    gated on a VS Code install, so it finds nothing on a Copilot-only machine."""
+    from agent_scan.inspect import get_mcp_config_per_home_directory
+    from agent_scan.well_known_clients import get_well_known_clients
+
+    _install_copilot_home(tmp_path)
+    vscode_entries = [client for client in get_well_known_clients() if client.name == "vscode"]
+
+    assert vscode_entries
+    for entry in vscode_entries:
+        assert await get_mcp_config_per_home_directory(entry, tmp_path) is None
+
+
+@pytest.mark.asyncio
+async def test_vscode_well_known_client_includes_copilot_mcp_config(tmp_path):
+    """Phase A ``vscode`` must list ``~/.copilot/mcp-config.json``, matching Phase B."""
+    from agent_scan.inspect import get_mcp_config_per_home_directory
+    from agent_scan.well_known_clients import get_well_known_clients
+
+    (tmp_path / ".vscode").mkdir()
+    copilot = _install_copilot_home(tmp_path)
+    vscode_entries = [client for client in get_well_known_clients() if client.name == "vscode"]
+
+    assert vscode_entries
+    for entry in vscode_entries:
+        cti = await get_mcp_config_per_home_directory(entry, tmp_path)
+        assert cti is not None
+        assert (copilot / "mcp-config.json").resolve().as_posix() in cti.mcp_configs
+        servers = cti.mcp_configs[(copilot / "mcp-config.json").resolve().as_posix()]
+        assert [name for name, _server in servers] == ["playwright"]
+
+
+# --- GitHubCopilotDiscoverer ---
+
+
+def _skill(directory: Path, name: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name} skill\n---\nbody\n")
+
+
+def _wrapped_mcp(name: str) -> str:
+    return json.dumps({"mcpServers": {name: {"command": "npx", "args": ["server"]}}})
+
+
+def test_github_copilot_discoverer_detects_installation(tmp_path):
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    (tmp_path / ".copilot").mkdir()
+
+    assert GitHubCopilotDiscoverer(tmp_path).client_exists() == (tmp_path / ".copilot").as_posix()
+
+
+def test_github_copilot_discoverer_returns_none_when_absent(tmp_path):
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    assert GitHubCopilotDiscoverer(tmp_path).client_exists() is None
+    assert GitHubCopilotDiscoverer(tmp_path).discover() is None
+
+
+def test_github_copilot_discoverer_parses_user_mcp_config(tmp_path):
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    copilot = tmp_path / ".copilot"
+    copilot.mkdir()
+    (copilot / "mcp-config.json").write_text(_wrapped_mcp("playwright"))
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert [name for name, _ in mcp_configs[(copilot / "mcp-config.json").as_posix()]] == ["playwright"]
+
+
+def test_github_copilot_discoverer_parses_user_skills(tmp_path):
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    copilot = tmp_path / ".copilot"
+    copilot.mkdir()
+    _skill(copilot / "skills" / "demo", "demo")
+    _skill(tmp_path / ".agents" / "skills" / "shared", "shared")
+
+    skills_dirs = GitHubCopilotDiscoverer(tmp_path).discover_skills()
+
+    assert [s.name for s in skills_dirs[(copilot / "skills").as_posix()]] == ["demo"]
+    assert [s.name for s in skills_dirs[(tmp_path / ".agents" / "skills").as_posix()]] == ["shared"]
+
+
+def test_github_copilot_discoverer_scans_project_mcp_and_skills(tmp_path):
+    """Copilot loads repo-relative MCP files and skills; the target folder and its
+    ancestors are both scanned, so a monorepo root is reached from a sub-package."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    (tmp_path / ".copilot").mkdir()
+    repo = tmp_path / "repo"
+    package = repo / "package"
+    package.mkdir(parents=True)
+    (package / ".mcp.json").write_text(_wrapped_mcp("package-server"))
+    (repo / ".github").mkdir()
+    (repo / ".github" / "mcp.json").write_text(_wrapped_mcp("repo-server"))
+    _skill(repo / ".github" / "skills" / "repo-skill", "repo-skill")
+    _skill(package / ".claude" / "skills" / "compat-skill", "compat-skill")
+
+    discoverer = GitHubCopilotDiscoverer(tmp_path, target_folders=[package])
+    mcp_configs = discoverer.discover_mcp_servers()
+    skills_dirs = discoverer.discover_skills()
+
+    assert [name for name, _ in mcp_configs[(package / ".mcp.json").as_posix()]] == ["package-server"]
+    assert [name for name, _ in mcp_configs[(repo / ".github" / "mcp.json").as_posix()]] == ["repo-server"]
+    assert [s.name for s in skills_dirs[(repo / ".github" / "skills").as_posix()]] == ["repo-skill"]
+    assert [s.name for s in skills_dirs[(package / ".claude" / "skills").as_posix()]] == ["compat-skill"]
+
+
+def test_github_copilot_discoverer_project_folders_from_permissions_config(tmp_path):
+    """Copilot records every directory it has been used in under ``locations``; those
+    are project roots even when the scan passes no target folders."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    copilot = tmp_path / ".copilot"
+    copilot.mkdir()
+    project = tmp_path / "recorded-project"
+    project.mkdir()
+    (project / ".mcp.json").write_text(_wrapped_mcp("recorded-server"))
+    (copilot / "permissions-config.json").write_text(
+        json.dumps({"locations": {project.as_posix(): {"tool_approvals": [{"kind": "commands"}]}}})
+    )
+
+    discoverer = GitHubCopilotDiscoverer(tmp_path)
+
+    assert discoverer._discover_project_folders() == [Path(project.as_posix())]
+    mcp_configs = discoverer.discover_mcp_servers()
+    assert [name for name, _ in mcp_configs[(project / ".mcp.json").as_posix()]] == ["recorded-server"]
+
+
+@pytest.mark.parametrize("location", [".", "../repo", "  ../repo  ", "  ", "relative/repo"])
+def test_github_copilot_discoverer_ignores_relative_permissions_locations(tmp_path, monkeypatch, location):
+    """A relative key would resolve against Agent Scan's own working directory, so it
+    would inventory whatever project happens to be there as a Copilot project root."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    copilot = tmp_path / ".copilot"
+    copilot.mkdir()
+    (copilot / "permissions-config.json").write_text(json.dumps({"locations": {location: {}}}))
+    # Stand the working directory up as a scannable project: were the relative key
+    # honoured, these are the files that would be attributed to Copilot.
+    cwd = tmp_path / "unrelated-cwd"
+    (cwd / ".github" / "skills" / "cwd-skill").mkdir(parents=True)
+    _skill(cwd / ".github" / "skills" / "cwd-skill", "cwd-skill")
+    (cwd / ".mcp.json").write_text(_wrapped_mcp("cwd-server"))
+    monkeypatch.chdir(cwd)
+
+    discoverer = GitHubCopilotDiscoverer(tmp_path)
+
+    assert discoverer._discover_project_folders() == []
+    assert discoverer.discover_mcp_servers() == {}
+    assert discoverer.discover_skills() == {}
+
+
+def test_github_copilot_discoverer_strips_padding_from_an_absolute_location(tmp_path):
+    """Stripping is what makes the absolute check meaningful: a padded absolute key is
+    still an absolute path, while a padded relative one is still relative."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    copilot = tmp_path / ".copilot"
+    copilot.mkdir()
+    project = tmp_path / "recorded-project"
+    project.mkdir()
+    (project / ".mcp.json").write_text(_wrapped_mcp("recorded-server"))
+    (copilot / "permissions-config.json").write_text(json.dumps({"locations": {f"  {project.as_posix()}  ": {}}}))
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert [name for name, _ in mcp_configs[(project / ".mcp.json").as_posix()]] == ["recorded-server"]
+
+
+@pytest.mark.parametrize("locations", [None, "not-a-dict", {}, {"   ": {}}])
+def test_github_copilot_discoverer_tolerates_unusable_permissions_config(tmp_path, locations):
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    copilot = tmp_path / ".copilot"
+    copilot.mkdir()
+    (copilot / "permissions-config.json").write_text(json.dumps({"locations": locations}))
+
+    assert GitHubCopilotDiscoverer(tmp_path)._discover_project_folders() == []
+
+
+def test_github_copilot_discoverer_scans_installed_plugins(tmp_path):
+    """A plugin's default ``.mcp.json`` and ``skills/`` are found wherever the
+    marketplace layout puts the plugin root."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "acme-market" / "acme"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(json.dumps({"name": "acme", "version": "1.0.0"}))
+    (plugin / ".mcp.json").write_text(_wrapped_mcp("plugin-server"))
+    _skill(plugin / "skills" / "plugin-skill", "plugin-skill")
+
+    discoverer = GitHubCopilotDiscoverer(tmp_path)
+
+    mcp_configs = discoverer.discover_mcp_servers()
+    assert [name for name, _ in mcp_configs[(plugin / ".mcp.json").as_posix()]] == ["plugin-server"]
+    skills_dirs = discoverer.discover_skills()
+    assert [s.name for s in skills_dirs[(plugin / "skills").as_posix()]] == ["plugin-skill"]
+
+
+def test_github_copilot_discoverer_honors_plugin_manifest_overrides(tmp_path):
+    """A manifest may relocate its MCP config and declare several skills roots, as a
+    single string or a list."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(
+        json.dumps({"name": "acme", "mcpServers": "config/servers.json", "skills": ["skills/", "extra-skills/"]})
+    )
+    (plugin / "config").mkdir()
+    (plugin / "config" / "servers.json").write_text(_wrapped_mcp("relocated-server"))
+    _skill(plugin / "skills" / "first", "first")
+    _skill(plugin / "extra-skills" / "second", "second")
+
+    discoverer = GitHubCopilotDiscoverer(tmp_path)
+
+    mcp_configs = discoverer.discover_mcp_servers()
+    assert [name for name, _ in mcp_configs[(plugin / "config" / "servers.json").as_posix()]] == ["relocated-server"]
+    skills_dirs = discoverer.discover_skills()
+    assert [s.name for s in skills_dirs[(plugin / "skills").as_posix()]] == ["first"]
+    assert [s.name for s in skills_dirs[(plugin / "extra-skills").as_posix()]] == ["second"]
+
+
+def test_canonical_key_preserves_drive_less_rooted_path_on_windows(monkeypatch):
+    from agent_scan.agents import base
+
+    path = Path("/work/repo")
+    monkeypatch.setattr(base.sys, "platform", "win32")
+    with patch.object(Path, "resolve", side_effect=AssertionError("must not attach the current Windows drive")):
+        assert base._canonical_key(path) == "/work/repo"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs elevation on Windows")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("alias", ["home", "config"])
+async def test_github_copilot_symlinked_config_is_discovered_once(tmp_path, alias):
+    """Both phases read the same Copilot config, and the data-driven phase keys its
+    results by resolved path. A key here that kept the symlinked spelling would survive
+    the merge as a second entry and have the same server inspected twice.
+    """
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    real = tmp_path / "real-copilot"
+    (real / "skills" / "demo").mkdir(parents=True)
+    _skill(real / "skills" / "demo", "demo")
+    (real / "mcp-config.json").write_text(_wrapped_mcp("aliased-server"))
+
+    home = tmp_path / "home"
+    if alias == "home":
+        # The whole Copilot home is a symlink.
+        home.mkdir()
+        (home / ".copilot").symlink_to(real)
+    else:
+        # The home is real but the config file inside it is a symlink.
+        (home / ".copilot" / "skills").mkdir(parents=True)
+        (home / ".copilot" / "mcp-config.json").symlink_to(real / "mcp-config.json")
+
+    with patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]):
+        clients, _unresolved, _users = await discover_clients_to_inspect(
+            InspectArgs(timeout=1, tokens=[], paths=[], scan_skills=True)
+        )
+
+    copilot = [client for client in clients if client.name == "github copilot"]
+    assert len(copilot) == 1
+    assert list(copilot[0].mcp_configs) == [(real / "mcp-config.json").resolve().as_posix()]
+    servers = [name for entry in copilot[0].mcp_configs.values() for name, _ in entry]
+    assert servers == ["aliased-server"]
+
+
+def test_github_copilot_discoverer_reads_inline_manifest_mcp_servers(tmp_path):
+    """``mcpServers`` is documented as a path *or* inline server definitions; an inline
+    map is the definition itself, so it is keyed on the manifest carrying it."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(
+        json.dumps({"name": "acme", "mcpServers": {"inline-server": {"command": "node", "args": ["server.js"]}}})
+    )
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert [name for name, _ in mcp_configs[(plugin / "plugin.json").as_posix()]] == ["inline-server"]
+
+
+def test_github_copilot_discoverer_ignores_an_empty_inline_manifest_mcp_block(tmp_path):
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(json.dumps({"name": "acme", "mcpServers": {}}))
+
+    assert GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers() == {}
+
+
+def test_github_copilot_discoverer_reads_agent_plugins_1_0_mcp_json(tmp_path):
+    """Agent Plugins 1.0 fixes MCP servers at ``mcp.json`` — no leading dot — and its
+    component locations cannot be redeclared in the manifest."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "acme-market" / "acme"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(
+        json.dumps({"$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name": "acme"})
+    )
+    (plugin / "mcp.json").write_text(_wrapped_mcp("modern-server"))
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert [name for name, _ in mcp_configs[(plugin / "mcp.json").as_posix()]] == ["modern-server"]
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        ("plugin.json",),
+        (".plugin", "plugin.json"),
+        (".github", "plugin", "plugin.json"),
+        (".claude-plugin", "plugin.json"),
+    ],
+)
+def test_github_copilot_discoverer_resolves_manifest_paths_against_the_plugin_root(tmp_path, location):
+    """A manifest's declared paths resolve against the plugin root, not the manifest's
+    own directory — three of the four documented locations are subdirectories."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    manifest_path = plugin.joinpath(*location)
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(json.dumps({"name": "acme", "mcpServers": "config/servers.json", "skills": "custom/"}))
+    (plugin / "config").mkdir()
+    (plugin / "config" / "servers.json").write_text(_wrapped_mcp("root-relative-server"))
+    _skill(plugin / "custom" / "root-relative-skill", "root-relative-skill")
+
+    discoverer = GitHubCopilotDiscoverer(tmp_path)
+
+    mcp_configs = discoverer.discover_mcp_servers()
+    assert [name for name, _ in mcp_configs[(plugin / "config" / "servers.json").as_posix()]] == [
+        "root-relative-server"
+    ]
+    skills_dirs = discoverer.discover_skills()
+    assert [s.name for s in skills_dirs[(plugin / "custom").as_posix()]] == ["root-relative-skill"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_github_copilot_discoverer_reaches_symlinked_manifest_directory(tmp_path):
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "linked"
+    plugin.mkdir(parents=True)
+    source = tmp_path / "copilot-manifest-source"
+    source.mkdir()
+    (source / "plugin.json").write_text(json.dumps({"mcpServers": {"linked-copilot": {"command": "mcp"}}}))
+    (plugin / ".plugin").symlink_to(source, target_is_directory=True)
+
+    configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert next(iter(configs.values()))[0][0] == "linked-copilot"
+
+
+def test_github_copilot_empty_manifest_dir_does_not_shadow_bare_plugin_json(tmp_path):
+    """A ``.plugin`` *directory* with no ``plugin.json`` inside is not a manifest, so it must
+    not outrank -- and discard -- the plugin's real bare ``plugin.json``."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    (plugin / ".plugin").mkdir(parents=True)
+    (plugin / "plugin.json").write_text(json.dumps({"name": "acme", "mcpServers": {"bare": {"command": "node"}}}))
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    names = {name for value in mcp_configs.values() if isinstance(value, list) for name, _ in value}
+    assert names == {"bare"}
+
+
+def test_github_copilot_discoverer_prefers_the_first_searched_manifest_location(tmp_path):
+    """Copilot searches the manifest locations in order, so a plugin shipping two keeps
+    the earlier one rather than merging both."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    (plugin / ".plugin").mkdir(parents=True)
+    (plugin / ".plugin" / "plugin.json").write_text(
+        json.dumps({"name": "acme", "mcpServers": {"preferred": {"command": "node"}}})
+    )
+    (plugin / "plugin.json").write_text(json.dumps({"name": "acme", "mcpServers": {"ignored": {"command": "node"}}}))
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    names = {name for value in mcp_configs.values() if isinstance(value, list) for name, _ in value}
+    assert names == {"preferred"}
+
+
+def test_github_copilot_discoverer_ignores_a_plugin_json_outside_a_manifest_location(tmp_path):
+    """A ``plugin.json`` nested somewhere undocumented is another tool's file, not a
+    plugin manifest, so its declared paths are not resolved."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    stray = plugin / "node_modules" / "vendor" / "fixtures"
+    stray.mkdir(parents=True)
+    (stray / "plugin.json").write_text(json.dumps({"mcpServers": {"stray": {"command": "node"}}}))
+
+    assert GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers() == {}
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "/etc",
+        "../../../etc",
+        7,
+        "",
+        ["../escape"],
+        "C:/Windows/Temp",
+        "C:\\Windows\\Temp",
+        "..\\escape",
+        "\\\\server\\share",
+    ],
+)
+def test_github_copilot_discoverer_rejects_manifest_paths_outside_the_plugin(tmp_path, override):
+    """A manifest must not be able to point the scan at an arbitrary path on disk."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    plugin.mkdir(parents=True)
+
+    resolved = GitHubCopilotDiscoverer(tmp_path)._manifest_relative_paths(plugin, override)
+
+    assert resolved == []
+
+
+def test_github_copilot_discoverer_skips_unrecognized_plugin_mcp_files(tmp_path):
+    """The plugin walk matches every file named ``.mcp.json``; one with no MCP shape is
+    skipped rather than reported as a malformed config."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text(json.dumps({"unrelated": "fixture"}))
+
+    assert GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers() == {}
+
+
+def test_github_copilot_discoverer_honors_copilot_home_on_own_home_scan(tmp_path, monkeypatch):
+    """``COPILOT_HOME`` replaces the whole ``~/.copilot`` path on an own-home scan."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    relocated = tmp_path / "custom-copilot"
+    relocated.mkdir()
+    (relocated / "mcp-config.json").write_text(_wrapped_mcp("relocated"))
+    monkeypatch.setenv("COPILOT_HOME", str(relocated))
+
+    discoverer = GitHubCopilotDiscoverer(None)
+
+    assert discoverer.client_exists() == relocated.as_posix()
+    mcp_configs = discoverer.discover_mcp_servers()
+    assert [name for name, _ in mcp_configs[(relocated / "mcp-config.json").as_posix()]] == ["relocated"]
+
+
+def test_github_copilot_discoverer_ignores_copilot_home_when_home_passed(tmp_path, monkeypatch):
+    """Under a multi-user scan the scanning process's ``COPILOT_HOME`` must not
+    relocate the target user's config."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    relocated = tmp_path / "process-env-dir"
+    relocated.mkdir()
+    (relocated / "mcp-config.json").write_text(_wrapped_mcp("should-not-appear"))
+    monkeypatch.setenv("COPILOT_HOME", str(relocated))
+
+    home = tmp_path / "alice"
+    (home / ".copilot").mkdir(parents=True)
+    (home / ".copilot" / "mcp-config.json").write_text(_wrapped_mcp("alice-server"))
+
+    mcp_configs = GitHubCopilotDiscoverer(home).discover_mcp_servers()
+
+    names = {name for value in mcp_configs.values() if isinstance(value, list) for name, _ in value}
+    assert names == {"alice-server"}
+
+
+def test_github_copilot_discoverer_name_matches_well_known_client():
+    """The Phase-A/Phase-B merge keys on ``(name, username)``, so a drifted name would
+    split Copilot into two rows in scan output."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+    from agent_scan.well_known_clients import (
+        LINUX_WELL_KNOWN_CLIENTS,
+        MACOS_WELL_KNOWN_CLIENTS,
+        WINDOWS_WELL_KNOWN_CLIENTS,
+    )
+
+    for clients in (MACOS_WELL_KNOWN_CLIENTS, LINUX_WELL_KNOWN_CLIENTS, WINDOWS_WELL_KNOWN_CLIENTS):
+        assert GitHubCopilotDiscoverer.name in {client.name for client in clients}

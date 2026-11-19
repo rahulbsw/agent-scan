@@ -1,7 +1,7 @@
 # fix ssl certificates if custom certificates (i.e. ZScaler) are used
 # as this needs to occur at the beginning of the file, we need to disable the ruff rule
 # ruff: noqa: E402
-from typing import Literal
+from typing import Literal, NoReturn, cast
 
 import truststore
 
@@ -11,18 +11,25 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from dataclasses import dataclass
 
 import psutil
 import rich
+import yaml
+from pydantic import ValidationError
 from rich.logging import RichHandler
 
+from agent_scan.agents import DiscoveryScope
 from agent_scan.consent import collect_consent
 from agent_scan.models import (
     FAILURE_CATEGORY_TO_CODE,
     ControlServer,
-    ScanPathResult,
+    InspectedPath,
+    McpServerRiskIndexes,
+    ScanResponse,
+    SkillRiskIndexes,
     TokenAndClientInfo,
     TokenAndClientInfoList,
 )
@@ -34,7 +41,7 @@ from agent_scan.pipelines import (
     inspect_analyze_push_pipeline,
     inspect_pipeline,
 )
-from agent_scan.printer import print_scan_result
+from agent_scan.printer import print_inspected_machine, print_scan_response
 from agent_scan.utils import ensure_unicode_console, get_push_key, parse_headers, suppress_stdout
 from agent_scan.version import version_info
 
@@ -42,6 +49,8 @@ from agent_scan.version import version_info
 logging.getLogger().setLevel(logging.CRITICAL + 1)  # Higher than any standard level
 # Add null handler to prevent "No handler found" warnings
 logging.getLogger().addHandler(logging.NullHandler())
+
+CLI_USAGE_ERROR_EXIT_CODE = 2
 
 
 class MissingIdentifierError(Exception):
@@ -115,12 +124,31 @@ def parse_analysis_provider(value: str) -> Literal["local", "remote"]:
     raise argparse.ArgumentTypeError("expected 'local' or 'remote'")
 
 
+def _expand_equals_tokens(argv: list[str]) -> list[str]:
+    """
+    Expand ``--flag=value`` into ``--flag``, ``value`` for the control-server
+    block flags so both spellings parse identically. The block parser below scans
+    for bare flag tokens, so ``--control-server=https://x`` would otherwise be one
+    token and silently yield no servers. Only the first ``=`` is split, preserving
+    ``=`` inside URLs/headers (e.g. ``?version=2``).
+    """
+    control_flags = ("--control-server", "--control-server-H", "--control-identifier")
+    expanded: list[str] = []
+    for token in argv:
+        if "=" in token and token.split("=", 1)[0] in control_flags:
+            expanded.extend(token.split("=", 1))
+        else:
+            expanded.append(token)
+    return expanded
+
+
 def parse_control_servers(argv) -> list[ControlServer]:
     """
     Parse control server arguments from sys.argv.
     Returns a list of ControlServer instances.
-    Raises ValueError if any control server is missing an identifier.
+    Raises MissingIdentifierError if any control server is missing an identifier.
     """
+    argv = _expand_equals_tokens(argv)
     server_starts = [i for i, arg in enumerate(argv) if arg == "--control-server"]
 
     control_servers: list[ControlServer] = []
@@ -159,6 +187,290 @@ def parse_control_servers(argv) -> list[ControlServer]:
         )
 
     return control_servers
+
+
+def _warn_deprecated_flag(flag_name: str, replacement: str) -> None:
+    rich.print(
+        f"[yellow]Warning: {flag_name} is deprecated and will be removed in a future release. "
+        f"Use {replacement} instead.[/yellow]",
+        file=sys.stderr,
+    )
+
+
+def warn_deprecated_control_flags(args) -> None:
+    """Warn once per invocation for each deprecated control-server flag used.
+
+    --control-server-H is a generic "additional header" flag, so it only
+    warns when it's actually carrying the x-client-id push-key trick, not
+    when it's used for an unrelated custom header. --control-identifier
+    warns on any use, even though --machine-id can only hold a single value
+    and can't represent the distinct identifiers a multi-control-server
+    setup requires — the warning still nudges toward the replacement for
+    the common single-server case.
+    """
+    raw_headers = getattr(args, "control_server_H", None)
+    if raw_headers:
+        try:
+            headers = parse_headers(raw_headers)
+        except ValueError:
+            headers = {}
+        if any("x-client-id" in header.lower() for header in headers):
+            _warn_deprecated_flag("--control-server-H", "--push-key")
+
+    if getattr(args, "control_identifier", None):
+        _warn_deprecated_flag("--control-identifier", "--machine-id")
+
+
+# Option strings that make up a single control-server block. Passing any of
+# them on the CLI triggers complete replacement of the config-file's
+# ``control_servers`` list (see apply_config_file).
+_CONTROL_SERVER_DESTS = ("control_server", "control_server_H", "control_identifier")
+
+
+def _iter_all_actions(parser: argparse.ArgumentParser):
+    """Yield every argparse action reachable from ``parser``, descending into subparsers."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for subparser in action.choices.values():
+                yield from _iter_all_actions(subparser)
+        else:
+            yield action
+
+
+def explicitly_provided_dests(parser: argparse.ArgumentParser, argv: list[str]) -> set[str]:
+    """
+    Return the set of argument ``dest`` names the user passed explicitly on the
+    command line.
+
+    We inspect the raw ``argv`` rather than the parsed namespace because argparse
+    cannot distinguish "flag omitted" (dest holds its default) from "flag passed
+    with a value equal to its default". Both ``--flag value`` and ``--flag=value``
+    spellings are recognized, as are the two option strings of a
+    BooleanOptionalAction (``--skills`` / ``--no-skills`` both map to ``skills``).
+    """
+    option_to_dest: dict[str, str] = {}
+    for action in _iter_all_actions(parser):
+        for option in action.option_strings:
+            option_to_dest[option] = action.dest
+
+    provided: set[str] = set()
+    for token in argv:
+        option = token.split("=", 1)[0]
+        dest = option_to_dest.get(option)
+        if dest is not None:
+            provided.add(dest)
+    return provided
+
+
+def _fail_config(message: str) -> NoReturn:
+    """Print a config-file error to stderr and exit with the CLI's usage code."""
+    rich.print(f"[bold red]{message}[/bold red]", file=sys.stderr)
+    sys.exit(2)
+
+
+def load_config_file(path: str) -> dict:
+    """Read a YAML config file into a mapping. Exits with code 2 on any error."""
+    expanded = os.path.expanduser(path)
+    try:
+        with open(expanded) as f:
+            data = yaml.safe_load(f)
+    except FileNotFoundError:
+        _fail_config(f"Config file not found: {path}")
+    except OSError as e:
+        _fail_config(f"Could not read config file {path}: {e}")
+    except yaml.YAMLError as e:
+        _fail_config(f"Invalid YAML in config file {path}: {e}")
+
+    if data is None:  # empty file
+        return {}
+    if not isinstance(data, dict):
+        _fail_config(f"Config file {path} must contain a YAML mapping at the top level.")
+    return data
+
+
+def control_servers_from_config(raw) -> list[ControlServer]:
+    """
+    Build ControlServer instances from the config file's ``control_servers`` block.
+
+    Each entry is a mapping with ``url``, ``identifier``, and optional ``headers``.
+    Headers may be given as a mapping (``{name: value}``) or as a list of
+    ``"Name: value"`` strings (matching the ``--control-server-H`` CLI form).
+    """
+    if not isinstance(raw, list):
+        _fail_config("Invalid config file: 'control_servers' must be a list.")
+
+    control_servers: list[ControlServer] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            _fail_config("Invalid config file: each 'control_servers' entry must be a mapping.")
+        url = entry.get("url")
+        identifier = entry.get("identifier")
+        raw_headers = entry.get("headers") or {}
+
+        if not url or not isinstance(url, str):
+            _fail_config("Invalid config file: a 'control_servers' entry is missing a string 'url'.")
+        if identifier is None:
+            _fail_config(f"Invalid config file: control server '{url}' is missing an 'identifier'.")
+
+        # Headers may be a mapping ({name: value}) or a list of "Name: value"
+        # strings (matching the --control-server-H CLI form).
+        if isinstance(raw_headers, dict):
+            headers = raw_headers
+        elif isinstance(raw_headers, list):
+            try:
+                headers = parse_headers(raw_headers)
+            except ValueError as exc:
+                _fail_config(f"Invalid config file: control server '{url}' has an invalid header ({exc}).")
+        else:
+            _fail_config(
+                f"Invalid config file: control server '{url}' 'headers' must be a mapping "
+                "or a list of 'Name: value' strings."
+            )
+
+        try:
+            control_servers.append(ControlServer(url=url, headers=headers, identifier=identifier))
+        except ValidationError as exc:
+            detail = exc.errors()[0].get("msg", "invalid value") if exc.errors() else "invalid value"
+            _fail_config(f"Invalid config file: control server '{url}' is invalid ({detail}).")
+
+    return control_servers
+
+
+def _convert_config_scalar(action: argparse.Action, raw_key: str, value: object) -> object:
+    """
+    Apply the action's ``type`` converter to a single YAML scalar and enforce
+    ``choices`` — the same validation argparse would run on a CLI token.
+
+    ``type`` converters (e.g. ``str2bool``, ``int``, ``float``, ``str``) always
+    receive a string on the CLI (argv tokens are strings), so we stringify a
+    non-string YAML value (e.g. ``push_key: 12345``, ``server_timeout: 30``)
+    before converting, rather than only converting when YAML already handed us
+    a string. This is a generic, type-agnostic rule that applies to every
+    scalar flag: it normalizes a numeric YAML value into the flag's real type
+    (``str`` for a string flag, ``float`` for ``server_timeout``, etc.)
+    instead of silently keeping the mismatched native YAML type. Exits with
+    code 2 on a failed conversion or an out-of-choices value.
+    """
+    converted = value
+    # argparse's ``type`` may be a registered type name (str) rather than a
+    # callable; guard with callable() so we only invoke real converters.
+    if callable(action.type):
+        try:
+            converted = action.type(value) if isinstance(value, str) else action.type(str(value))
+        except (ValueError, TypeError) as exc:
+            _fail_config(f"Invalid config file: '{raw_key}' has an invalid value {value!r} ({exc}).")
+    if action.choices is not None and converted not in action.choices:
+        allowed = ", ".join(str(c) for c in action.choices)
+        _fail_config(f"Invalid config file: '{raw_key}' must be one of: {allowed}.")
+    return converted
+
+
+def _coerce_config_value(action: argparse.Action, raw_key: str, value: object) -> object:
+    """
+    Validate/convert a YAML value so it behaves like the equivalent CLI flag,
+    reusing argparse's expectations rather than a raw ``setattr``.
+
+    - Boolean flags (``store_true``/``store_false``/``BooleanOptionalAction``,
+      i.e. ``nargs == 0``): require a ``bool``, or a string normalized via
+      ``str2bool``; anything else is rejected. This stops values like
+      ``skip_ssl_verify: "false"`` from being silently truthy.
+    - List-shaped options (``append`` actions and ``nargs`` ``*``/``+`` such as
+      ``verification_H`` and the positional ``files``): require a list; a lone
+      scalar is wrapped into a one-element list; each element is type-converted.
+    - Plain scalars: reject collections (shape mismatch), then type-convert and
+      choice-check.
+
+    Exits with code 2 via ``_fail_config`` on any type/shape violation.
+    """
+    # store_true / store_false / BooleanOptionalAction consume no argument.
+    if action.nargs == 0:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return str2bool(value)
+        _fail_config(f"Invalid config file: '{raw_key}' must be a boolean.")
+
+    # append options and nargs '*'/'+' are list-shaped.
+    if isinstance(action, argparse._AppendAction) or action.nargs in ("*", "+"):
+        if isinstance(value, list):
+            items: list = value
+        elif isinstance(value, str | int | float | bool):
+            items = [value]  # accept a lone scalar as a single-element list
+        else:
+            _fail_config(f"Invalid config file: '{raw_key}' must be a list.")
+        return [_convert_config_scalar(action, raw_key, item) for item in items]
+
+    # Plain scalar option.
+    if isinstance(value, list | dict):
+        _fail_config(f"Invalid config file: '{raw_key}' must be a single value, not a {type(value).__name__}.")
+    return _convert_config_scalar(action, raw_key, value)
+
+
+def apply_config_file(parser: argparse.ArgumentParser, args: argparse.Namespace, argv: list[str]) -> None:
+    """
+    Merge values from ``args.config_file`` into ``args``.
+
+    Precedence cascade: code defaults < YAML config file < explicit CLI flags.
+    Scalar options are overridden field-by-field. Block/list options
+    (``control_servers``, append lists, and the positional ``files``) use
+    *complete replacement*: if the user supplied the corresponding flag on the
+    command line, the whole YAML value for that key is discarded rather than
+    merged element-wise.
+
+    No-op when ``--config-file`` was not supplied, preserving current behavior.
+    """
+    config_path = getattr(args, "config_file", None)
+    if not config_path:
+        return
+
+    config = load_config_file(config_path)
+    explicit = explicitly_provided_dests(parser, argv)
+
+    # The positional ``files`` list has no option string, so treat any positional
+    # value present on the CLI as an explicit override of the YAML ``files``.
+    if getattr(args, "files", None):
+        explicit.add("files")
+
+    dest_to_action = {a.dest: a for a in _iter_all_actions(parser)}
+    valid_dests = {dest for dest in dest_to_action if dest not in (argparse.SUPPRESS, "help")}
+
+    # control_servers is assembled outside argparse (see parse_control_servers),
+    # so it is handled here with complete-replacement semantics.
+    if config.get("control_servers") is not None and not any(dest in explicit for dest in _CONTROL_SERVER_DESTS):
+        args.control_servers = control_servers_from_config(config["control_servers"])
+
+    # For every remaining key the rule is uniform: an explicit CLI flag wins,
+    # otherwise the config value is applied. This yields field-level override for
+    # scalars and *complete replacement* for repeatable/list args (e.g. the
+    # ``append`` flag ``--verification-H``): argparse hands us the whole CLI list
+    # as one value, so we take either the entire CLI list or the entire YAML
+    # list, never a per-element merge — the same semantics used for
+    # ``control_servers`` above.
+    for raw_key, value in config.items():
+        # YAML allows non-string keys (e.g. ``true:`` or ``1:``); reject them
+        # cleanly instead of crashing on ``.replace``.
+        if not isinstance(raw_key, str):
+            _fail_config(f"Invalid config file: keys must be strings, got {raw_key!r}.")
+        key = raw_key.replace("-", "_")
+        if key in ("control_servers", "config_file"):
+            continue  # handled above / self-reference
+        if key in _CONTROL_SERVER_DESTS:
+            continue  # control servers come from the 'control_servers' block only
+        if key not in valid_dests:
+            rich.print(f"[yellow]Ignoring unknown key '{raw_key}' in config file.[/yellow]", file=sys.stderr)
+            continue
+        if key in explicit:
+            continue  # explicit CLI flag wins over the config file (whole value)
+        if value is None:
+            # A key written with no value (``push_key:``) parses as YAML/Python
+            # ``None``. Treat that the same as the key being absent entirely
+            # (keep the code default / CLI-derived value) rather than running
+            # it through the type converter, which would otherwise stringify
+            # it into the literal text "None".
+            continue
+        # Validate/convert exactly as argparse would for the equivalent CLI flag
+        # (type converters, choices, scalar-vs-list shape) before assigning.
+        setattr(args, key, _coerce_config_value(dest_to_action[key], raw_key, value))
 
 
 def add_common_arguments(parser):
@@ -218,7 +530,7 @@ def add_common_arguments(parser):
         "--print-full-descriptions",
         default=False,
         action="store_true",
-        help="Show error details and tracebacks",
+        help="Show full entity and skill-file descriptions without truncation",
     )
     parser.add_argument(
         "--json",
@@ -245,16 +557,36 @@ def add_common_arguments(parser):
         help="Scan all users on the machine.",
     )
     parser.add_argument(
+        "--show-analysis-results",
+        action="store_true",
+        default=False,
+        help="Show the scan results. Overrides the default behavior when using push keys.",
+    )
+    parser.add_argument(
         "--ci",
         action="store_true",
         default=False,
         help="Exit with a non-zero code when there are analysis findings or runtime failures. Requires --dangerously-run-mcp-servers.",
     )
     parser.add_argument(
-        "--ignore-issues-codes",
+        "--config-file",
         type=str,
         default=None,
-        help="Comma-separated list of issue codes to ignore (e.g. W001,W015)",
+        help=(
+            "Load CLI arguments from a YAML config file. Precedence is "
+            "code defaults < config file < explicit CLI flags: any flag you also "
+            "pass on the command line overrides the file."
+        ),
+        metavar="FILE",
+    )
+
+
+def add_bootstrap_argument(parser):
+    parser.add_argument(
+        "--no-bootstrap",
+        default=False,
+        action="store_true",
+        help="No-op retained for backward compatibility; does not change behavior.",
     )
 
 
@@ -291,7 +623,11 @@ def add_server_arguments(parser):
         "--dangerously-run-mcp-servers",
         default=False,
         action="store_true",
-        help=("Skip the interactive consent prompt and start every stdio MCP server listed in the scanned configs."),
+        help=(
+            "Skip the interactive consent prompt and contact every MCP server "
+            "listed in the scanned configs, including starting stdio subprocesses "
+            "and connecting to remote URLs."
+        ),
     )
 
 
@@ -318,6 +654,20 @@ def add_control_server_arguments(parser):
             "Non-anonymous identifier for that control server (for example: email, hostname, serial number)."
         ),
     )
+    parser.add_argument(
+        "--push-key",
+        type=str,
+        default=None,
+        help="Push key used to authenticate with the analysis server.",
+        metavar="KEY",
+    )
+    parser.add_argument(
+        "--machine-id",
+        type=str,
+        default=None,
+        help="Non-anonymous identifier for this machine (for example: hostname, serial number). ",
+        metavar="ID",
+    )
 
 
 def add_scan_arguments(scan_parser):
@@ -325,13 +675,22 @@ def add_scan_arguments(scan_parser):
         "--checks-per-server",
         type=int,
         default=1,
-        help="Number of times to check each server (default: 1)",
+        help="No-op retained for backward compatibility; does not change behavior.",
         metavar="NUM",
     )
     add_control_server_arguments(scan_parser)
 
 
-def setup_scan_parser(scan_parser, add_files=True):
+def add_ignore_failure_codes_argument(parser) -> None:
+    parser.add_argument(
+        "--ignore-failure-codes",
+        type=str,
+        default=None,
+        help="Comma-separated X-codes to omit from --ci exit evaluation",
+    )
+
+
+def setup_scan_parser(scan_parser, add_files=True, add_ci_ignore_options=True, add_show_full_discovery_option=True):
     if add_files:
         scan_parser.add_argument(
             "files",
@@ -341,8 +700,43 @@ def setup_scan_parser(scan_parser, add_files=True):
             metavar="CONFIG_FILE",
         )
     add_common_arguments(scan_parser)
+    add_bootstrap_argument(scan_parser)
+    if add_ci_ignore_options:
+        scan_parser.add_argument(
+            "--ignore-risks",
+            type=str,
+            default=None,
+            help="Comma-separated risk names to omit from --ci output and exit evaluation",
+        )
+        add_ignore_failure_codes_argument(scan_parser)
+    if add_show_full_discovery_option:
+        scan_parser.add_argument(
+            "--show-full-discovery",
+            action="store_true",
+            default=False,
+            help="Show every MCP entity and skill file in human-readable scan output",
+        )
     add_server_arguments(scan_parser)
     add_scan_arguments(scan_parser)
+
+
+def _effective_push_key(args) -> str | None:
+    """Push key from --push-key, falling back to the deprecated --control-server-H
+    x-client-id header."""
+    push_key = getattr(args, "push_key", None)
+    if push_key is not None:
+        return push_key
+    return get_push_key(getattr(args, "control_servers", []) or [])
+
+
+def _effective_identifier(args) -> str | None:
+    """Machine identifier from --machine-id, falling back to the deprecated
+    --control-identifier on the first control-server block."""
+    machine_id = getattr(args, "machine_id", None)
+    if machine_id is not None:
+        return machine_id
+    control_servers = getattr(args, "control_servers", None) or []
+    return next((s.identifier for s in control_servers), None)
 
 
 def is_interactive_run(args) -> bool:
@@ -354,23 +748,24 @@ def is_interactive_run(args) -> bool:
     if command == "inspect":
         return True
     # If the scan is run with a push key, skip consent prompts.
-    has_push_key = bool(get_push_key(getattr(args, "control_servers", []) or []))
+    has_push_key = bool(_effective_push_key(args))
     return not has_push_key
 
 
 @dataclass(frozen=True)
 class HandshakeDecision:
-    # Whether to start stdio MCP server subprocesses to read their
-    # tool / prompt / resource catalogs.
+    # Whether to start stdio MCP server subprocesses to read their tool /
+    # prompt / resource catalogs. Remote servers are always contacted in
+    # unattended runs, but share the foreground consent prompt.
     do_stdio_handshake: bool
-    # Whether to run the interactive per-server y/n consent prompt
-    # before any subprocess is started.
+    # Whether to run the interactive per-server y/n consent prompt before any
+    # discovered subprocess is started or remote connection is made.
     collect_consent: bool
 
 
 def decide_handshake(args) -> HandshakeDecision:
     """
-    Command logic for stdio handshake + interactive consent.
+    Command logic for stdio handshakes and foreground MCP server consent.
 
         command       push_key  --dangerously  do_stdio_handshake  collect_consent
         ------------  --------  -------------  ------------------  ---------------
@@ -386,8 +781,8 @@ def decide_handshake(args) -> HandshakeDecision:
     command = getattr(args, "command", None)
     dangerously_run_mcp_servers = bool(getattr(args, "dangerously_run_mcp_servers", False))
 
-    # 1. Explicit user opt-in via --dangerously-run-mcp-servers. Spawn
-    # every stdio MCP server and skip consent.
+    # 1. Explicit user opt-in via --dangerously-run-mcp-servers. Contact every
+    # configured MCP server and skip foreground consent.
     if dangerously_run_mcp_servers:
         return HandshakeDecision(do_stdio_handshake=True, collect_consent=False)
 
@@ -395,7 +790,7 @@ def decide_handshake(args) -> HandshakeDecision:
     # inspect always qualifies.
     # scan / no-subcommand qualifies when there is no push key.
     is_attended_scan = command == "inspect" or (
-        (command is None or command == "scan") and not bool(get_push_key(getattr(args, "control_servers", []) or []))
+        (command is None or command == "scan") and not bool(_effective_push_key(args))
     )
     if is_attended_scan:
         return HandshakeDecision(do_stdio_handshake=True, collect_consent=True)
@@ -409,9 +804,9 @@ def _print_dangerous_warning(suppress_io: bool) -> None:
     """Print the dangerous-flag banner. Tip is only relevant when stderr
     is actually being streamed (suppress_io=False)."""
     message = (
-        "[bold red]--dangerously-run-mcp-servers is set: starting every "
-        "stdio MCP server listed in the scanned configs without "
-        "prompting.[/bold red]\n"
+        "[bold red]--dangerously-run-mcp-servers is set: contacting every "
+        "MCP server listed in the scanned configs without prompting. "
+        "This starts stdio subprocesses and connects to remote URLs.[/bold red]\n"
     )
     if not suppress_io:
         message += "Tip: set --suppress-mcpserver-io=true to hide server stderr output.\n"
@@ -429,8 +824,8 @@ def resolve_server_io_default(args) -> None:
 
 def enforce_consent_requirements(args) -> None:
     """
-    --ci must opt into starting subprocesses explicitly, because CI runs
-    cannot answer the interactive per-server consent prompt.
+    --ci must opt into starting stdio subprocesses explicitly, because CI
+    runs cannot answer the interactive per-server consent prompt.
     """
     dangerously_run_mcp_servers = getattr(args, "dangerously_run_mcp_servers", False)
     ci_mode = getattr(args, "ci", False)
@@ -442,7 +837,7 @@ def enforce_consent_requirements(args) -> None:
             "scans, so CI runs must confirm trust explicitly.",
             file=sys.stderr,
         )
-        sys.exit(2)
+        sys.exit(CLI_USAGE_ERROR_EXIT_CODE)
 
 
 def main():
@@ -451,6 +846,11 @@ def main():
     program_name = get_invoking_name()
     parser = argparse.ArgumentParser(
         prog=program_name,
+        # Disable prefix abbreviation (argparse defaults it on). Abbreviations
+        # are undocumented, and the config-file merge detects explicitly-passed
+        # flags by matching full option strings in argv. allow_abbrev is
+        # per-parser and does not inherit, so it is set again on each subparser.
+        allow_abbrev=False,
         description="Open Agent Scan: Security scanner for Model Context Protocol servers, agents, skills and tools",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -481,9 +881,10 @@ def main():
     # SCAN command
     scan_parser = subparsers.add_parser(
         "scan",
+        allow_abbrev=False,
         help="Scan one or more MCP config files [default]",
         description=(
-            "Scan one or more MCP configuration files for security issues. "
+            "Scan one or more MCP configuration files for security risks. "
             "If no files are specified, well-known config locations will be checked."
         ),
     )
@@ -492,10 +893,13 @@ def main():
     # INSPECT command
     inspect_parser = subparsers.add_parser(
         "inspect",
+        allow_abbrev=False,
         help="Print descriptions of tools, prompts, and resources without verification",
         description="Inspect and display MCP tools, prompts, and resources without security verification.",
     )
     add_common_arguments(inspect_parser)
+    add_bootstrap_argument(inspect_parser)
+    add_ignore_failure_codes_argument(inspect_parser)
     add_server_arguments(inspect_parser)
     add_control_server_arguments(inspect_parser)
     inspect_parser.add_argument(
@@ -517,8 +921,9 @@ def main():
     # GUARD command
     guard_parser = subparsers.add_parser(
         "guard",
+        allow_abbrev=False,
         help="Install, uninstall, or check status of Agent Guard hooks",
-        description="Manage Agent Guard hooks for Claude Code, Cursor, and Codex.",
+        description="Manage Agent Guard hooks for Claude Code, Cursor, Codex, and Github Copilot.",
     )
     guard_subparsers = guard_parser.add_subparsers(
         dest="guard_command",
@@ -529,11 +934,12 @@ def main():
 
     guard_install_parser = guard_subparsers.add_parser(
         "install",
+        allow_abbrev=False,
         help="Install Agent Guard hooks for a client",
     )
     guard_install_parser.add_argument(
         "client",
-        choices=["claude", "cursor", "codex", "all"],
+        choices=["claude", "cursor", "codex", "github-copilot", "all"],
         help="Client to install hooks for",
     )
     guard_install_parser.add_argument(
@@ -557,6 +963,14 @@ def main():
         help="Tenant ID to embed in installed hooks when provided",
     )
     guard_install_parser.add_argument(
+        "--machine-id",
+        dest="machine_id",
+        type=str,
+        default=None,
+        metavar="ID",
+        help="Required non-anonymous identifier for this machine, sent as the X-User identifier on hook events",
+    )
+    guard_install_parser.add_argument(
         "--test",
         action="store_true",
         default=False,
@@ -575,13 +989,42 @@ def main():
         help="Install hooks to the managed (admin/MDM) config path instead of the user-level path",
     )
 
+    guard_discover_parser = guard_subparsers.add_parser(
+        "discover",
+        allow_abbrev=False,
+        help=(
+            "Run MCP server discovery and send a sessionStartServerDiscovery event directly to Agent Monitor "
+            "(used by the async session-start hooks that guard install configures)"
+        ),
+    )
+    guard_discover_parser.add_argument(
+        "--url",
+        type=str,
+        default=None,
+        help="Remote hooks base URL (default: REMOTE_HOOKS_BASE_URL)",
+    )
+    guard_discover_parser.add_argument(
+        "--client",
+        type=str,
+        choices=["claude-code", "cursor", "codex", "github-copilot"],
+        required=True,
+        metavar="CLIENT",
+        help=("Required; read the selected agent's hook JSON payload from stdin and include its target folders"),
+    )
+    guard_discover_parser.add_argument(
+        "--scope",
+        choices=[scope.value for scope in DiscoveryScope],
+        default=DiscoveryScope.ALL.value,
+        help="Discovery data to collect (default: all)",
+    )
     guard_uninstall_parser = guard_subparsers.add_parser(
         "uninstall",
+        allow_abbrev=False,
         help="Remove Agent Guard hooks for a client",
     )
     guard_uninstall_parser.add_argument(
         "client",
-        choices=["claude", "cursor", "codex", "all"],
+        choices=["claude", "cursor", "codex", "github-copilot", "all"],
         help="Client to uninstall hooks from",
     )
     guard_uninstall_parser.add_argument(
@@ -604,12 +1047,21 @@ def main():
         sys.argv.insert(1, "scan")
 
     # Parse control servers before argparse to preserve their grouping
-    control_servers = parse_control_servers(sys.argv)
+    try:
+        control_servers = parse_control_servers(sys.argv)
+    except MissingIdentifierError:
+        sys.exit(1)
 
     args = parser.parse_args()
 
     # Attach parsed control servers to args
     args.control_servers = control_servers
+
+    # Merge a --config-file (if any) before resolving defaults, so its values
+    # sit between code defaults and explicit CLI flags in the precedence cascade.
+    apply_config_file(parser, args, sys.argv[1:])
+
+    warn_deprecated_control_flags(args)
 
     # Resolve deferred defaults and enforce safety rules before dispatching.
     resolve_server_io_default(args)
@@ -645,16 +1097,25 @@ def main():
         sys.exit(1)
 
 
-async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[ScanPathResult]:
+def _should_show_analysis_results(args) -> bool:
+    """Show analysis results (force synchronous analysis) for CI or --show-analysis-results."""
+    return getattr(args, "ci", False) or getattr(args, "show_analysis_results", False)
+
+
+async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanResponse | list[InspectedPath]:
     """
-    Run the scan/inspect pipeline and return results.
+    Run the scan or inspect flow through their shared discovery and consent setup.
+
+    ``inspect`` stops after producing the local ``InspectedPath`` results.
+    ``scan`` sends those results to the analysis backend and returns the final,
+    potentially backend-enriched ``ScanResponse``.
 
     Flow:
     1. Build InspectArgs from CLI args.
     2. Discover the clients/configs that would be inspected.
     3. If interactive and --dangerously-run-mcp-servers is not set, prompt
-       the user per stdio server for consent. Declined servers are recorded as
-       user_declined errors and never started.
+       the user per MCP server for consent. Declined servers are recorded as
+       user_declined errors and never contacted.
     4. Run the existing inspect / analyze / push pipeline with the filtered
        plan and optional live stderr streaming.
     """
@@ -675,6 +1136,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
         paths=files,
         all_users=scan_all_users,
         scan_skills=scan_skills,
+        discovery_scope=DiscoveryScope.ALL if scan_skills else DiscoveryScope.SERVERS,
     )
 
     # Resolve the MCP server IO flag and the consent flag.
@@ -687,9 +1149,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
     dangerously_run_mcp_servers: bool = bool(getattr(args, "dangerously_run_mcp_servers", False))
 
     # Step 1: Discover everything we would inspect without starting any server.
-    clients_to_inspect, precomputed_scan_path_results, scanned_usernames = await discover_clients_to_inspect(
-        inspect_args
-    )
+    clients_to_inspect, unresolved_paths, scanned_usernames = await discover_clients_to_inspect(inspect_args)
 
     # Collect consent when applicable; otherwise show the
     # dangerous-flag banner to users at the terminal. Silent
@@ -704,8 +1164,13 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
         skip_ssl_verify: bool = bool(hasattr(args, "skip_ssl_verify") and args.skip_ssl_verify)
 
         control_servers: list[ControlServer] = args.control_servers if hasattr(args, "control_servers") else []
-        # For the analysis backend, pick the first identifier from control_servers
-        identifier: str | None = next((s.identifier for s in control_servers), None)
+        # --machine-id / --push-key take precedence over the deprecated
+        # --control-identifier / --control-server-H equivalents. Resolved once
+        # here so every downstream consumer (PushArgs, the pipeline) sees the
+        # same already-resolved value instead of re-deriving it.
+        identifier: str | None = _effective_identifier(args)
+        push_key: str | None = _effective_push_key(args)
+
         analyze_args = AnalyzeArgs(
             analysis_url=args.analysis_url,
             identifier=identifier,
@@ -714,9 +1179,11 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
             skip_ssl_verify=skip_ssl_verify,
             analysis_mode=getattr(args, "analysis_mode", "auto"),
             analysis_provider=getattr(args, "analysis_provider", "local"),
+            show_analysis_results=_should_show_analysis_results(args),
         )
         push_args = PushArgs(
             control_servers=control_servers,
+            push_key=push_key,
             skip_ssl_verify=skip_ssl_verify,
             version=version_info,
         )
@@ -726,73 +1193,140 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
             push_args,
             verbose=verbose,
             clients_to_inspect=clients_to_inspect,
-            precomputed_scan_path_results=precomputed_scan_path_results,
+            unresolved_paths=unresolved_paths,
             scanned_usernames=scanned_usernames,
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,
             do_stdio_handshake=decision.do_stdio_handshake,
         )
     elif mode == "inspect":
-        scan_path_results, _scanned_usernames = await inspect_pipeline(
+        inspected_paths, _scanned_usernames = await inspect_pipeline(
             inspect_args,
             clients_to_inspect=clients_to_inspect,
-            precomputed_scan_path_results=precomputed_scan_path_results,
+            unresolved_paths=unresolved_paths,
             scanned_usernames=scanned_usernames,
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,
             do_stdio_handshake=decision.do_stdio_handshake,
         )
-        return scan_path_results
+        return inspected_paths
     else:
         raise ValueError(f"Unknown mode: {mode}, expected 'scan' or 'inspect'")
 
 
-def _parse_ignore_codes(args, ci_mode: bool) -> set[str]:
-    """Parse --ignore-issues-codes and validate it is only used with --ci."""
-    ignore_codes_raw = getattr(args, "ignore_issues_codes", None)
-    ignore_codes: set[str] = (
-        {c.strip() for c in ignore_codes_raw.split(",") if c.strip()} if ignore_codes_raw else set()
-    )
-    if ignore_codes and not ci_mode:
-        rich.print(
-            "[bold red]Error: --ignore-issues-codes can only be used with --ci.[/bold red]",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    return ignore_codes
-
-
-def _collect_failure_codes(result: list[ScanPathResult]) -> set[str]:
-    """Collect X00x codes from ScanError failures on paths and servers."""
+def _collect_failure_codes(result: list[InspectedPath]) -> set[str]:
+    """Collect X00x codes from operational failures in inspected paths."""
     codes: set[str] = set()
     for r in result:
         if r.error and r.error.is_failure:
             codes.add(FAILURE_CATEGORY_TO_CODE.get(r.error.category, FAILURE_CATEGORY_TO_CODE[None]))
-        for s in r.servers or []:
+        for s in r.servers:
             if s.error and s.error.is_failure:
                 codes.add(FAILURE_CATEGORY_TO_CODE.get(s.error.category, FAILURE_CATEGORY_TO_CODE[None]))
+        for skill in r.skills:
+            if skill.error and skill.error.is_failure:
+                codes.add(FAILURE_CATEGORY_TO_CODE.get(skill.error.category, FAILURE_CATEGORY_TO_CODE[None]))
     return codes
 
 
-def _apply_ignore_codes(result: list[ScanPathResult], ignore_codes: set[str]) -> None:
-    """Remove issues whose code is in the ignore set from each scan result."""
-    for scan_result in result:
-        scan_result.issues = [i for i in scan_result.issues if i.code not in ignore_codes]
+_VALID_RISK_NAMES = frozenset(McpServerRiskIndexes.model_fields) | frozenset(SkillRiskIndexes.model_fields)
+_VALID_FAILURE_CODES = frozenset(FAILURE_CATEGORY_TO_CODE.values())
 
 
-def _handle_ci_exit(result: list[ScanPathResult], json_output: bool, ignore_codes: set[str]) -> None:
-    """In CI mode, exit with code 1 if any issues or unignored failures remain."""
-    has_issues = any(scan_result.issues for scan_result in result)
-    failure_codes = _collect_failure_codes(result) - ignore_codes
-    if not has_issues and not failure_codes:
+def _parse_comma_separated(raw_value: str | None) -> set[str]:
+    """Parse a comma-separated CLI option into non-empty, stripped values."""
+    return {value.strip() for value in raw_value.split(",") if value.strip()} if raw_value else set()
+
+
+def _parse_ignore_risks(args, ci_mode: bool) -> set[str]:
+    """Parse --ignore-risks, which is valid only for CI scans."""
+    requested = _parse_comma_separated(getattr(args, "ignore_risks", None))
+    if requested and not ci_mode:
+        rich.print(
+            "[bold red]Error: --ignore-risks can only be used with --ci.[/bold red]",
+            file=sys.stderr,
+        )
+        sys.exit(CLI_USAGE_ERROR_EXIT_CODE)
+
+    unknown = requested - _VALID_RISK_NAMES
+    for name in sorted(unknown):
+        rich.print(f"[yellow]Warning: unknown risk name: {name}[/yellow]", file=sys.stderr)
+    return requested - unknown
+
+
+def _parse_ignore_failure_codes(args, ci_mode: bool) -> set[str]:
+    """Parse --ignore-failure-codes, which is valid only for CI scans."""
+    requested = _parse_comma_separated(getattr(args, "ignore_failure_codes", None))
+    if requested and not ci_mode:
+        rich.print(
+            "[bold red]Error: --ignore-failure-codes can only be used with --ci.[/bold red]",
+            file=sys.stderr,
+        )
+        sys.exit(CLI_USAGE_ERROR_EXIT_CODE)
+
+    unknown = requested - _VALID_FAILURE_CODES
+    for code in sorted(unknown):
+        rich.print(f"[yellow]Warning: unknown failure code: {code}[/yellow]", file=sys.stderr)
+    return requested - unknown
+
+
+def _apply_ignore_risks(response: ScanResponse, ignored_risks: set[str]) -> None:
+    """Remove ignored risks before rendering and CI exit evaluation."""
+    for path in response.scan_path_responses:
+        risk_indexes = [server.risk_indexes for server in path.server_risks]
+        risk_indexes.extend(skill.risk_indexes for skill in path.skill_risks)
+        for indexes in risk_indexes:
+            for name in ignored_risks & indexes.__class__.model_fields.keys():
+                setattr(indexes, name, None)
+
+
+def _has_risks(response: ScanResponse) -> bool:
+    for path in response.scan_path_responses:
+        for server in path.server_risks:
+            if any(value is not None for value in server.risk_indexes.model_dump().values()):
+                return True
+        for skill in path.skill_risks:
+            if any(value is not None for value in skill.risk_indexes.model_dump().values()):
+                return True
+    return False
+
+
+def _collect_response_failure_codes(response: ScanResponse) -> set[str]:
+    codes: set[str] = set()
+    for path in response.scan_path_responses:
+        errors = [path.error]
+        errors.extend(server.error for server in path.server_risks)
+        errors.extend(skill.error for skill in path.skill_risks)
+        for error in errors:
+            if error and error.is_failure:
+                codes.add(FAILURE_CATEGORY_TO_CODE.get(error.category, FAILURE_CATEGORY_TO_CODE[None]))
+    return codes
+
+
+def _handle_ci_exit(
+    result: list[InspectedPath] | ScanResponse,
+    json_output: bool,
+    ignored_failure_codes: set[str] | None = None,
+) -> None:
+    """In CI mode, exit with code 1 if any risk or runtime failure remains."""
+    if isinstance(result, ScanResponse):
+        failure_codes = _collect_response_failure_codes(result)
+        has_risks = _has_risks(result)
+    else:
+        failure_codes = _collect_failure_codes(result)
+        has_risks = False
+    failure_codes -= ignored_failure_codes or set()
+    if not has_risks and not failure_codes:
         return
 
     if not json_output:
-        issue_codes = {issue.code for scan_result in result for issue in scan_result.issues if issue.code}
-        all_codes = sorted(issue_codes | failure_codes)
-        codes_part = ", ".join(all_codes) if all_codes else "none"
+        reasons = []
+        if has_risks:
+            reasons.append("risks found")
+        if failure_codes:
+            reasons.append(f"runtime failure codes: {', '.join(sorted(failure_codes))}")
         rich.print(
-            f"[bold red]CI (--ci): exiting with code 1 (issue codes: {codes_part}).[/bold red]",
+            f"[bold red]CI (--ci): exiting with code 1 ({'; '.join(reasons)}).[/bold red]",
             file=sys.stderr,
         )
     sys.exit(1)
@@ -802,9 +1336,9 @@ async def print_scan_inspect(mode="scan", args=None):
     json_output: bool = hasattr(args, "json") and args.json
     print_errors: bool = hasattr(args, "print_errors") and args.print_errors
     full_description: bool = hasattr(args, "print_full_descriptions") and args.print_full_descriptions
-    verbose: bool = hasattr(args, "verbose") and args.verbose
     ci_mode: bool = hasattr(args, "ci") and args.ci
-    ignore_codes = _parse_ignore_codes(args, ci_mode)
+    ignored_risks = _parse_ignore_risks(args, ci_mode)
+    ignored_failure_codes = _parse_ignore_failure_codes(args, ci_mode)
 
     if json_output:
         with suppress_stdout():
@@ -812,24 +1346,32 @@ async def print_scan_inspect(mode="scan", args=None):
     else:
         result = await run_scan(args, mode=mode)
 
-    if ci_mode and ignore_codes:
-        _apply_ignore_codes(result, ignore_codes)
+    if mode == "inspect":
+        inspected_paths = cast("list[InspectedPath]", result)
+        if json_output:
+            print(json.dumps({p.path: p.model_dump(mode="json") for p in inspected_paths}, indent=2))
+        else:
+            print_inspected_machine(inspected_paths, print_errors, full_description, args)
+        if ci_mode:
+            _handle_ci_exit(inspected_paths, json_output, ignored_failure_codes)
+        return
+
+    response = cast("ScanResponse", result)
+    if ignored_risks:
+        _apply_ignore_risks(response, ignored_risks)
 
     if json_output:
-        result_dict = {r.path: r.model_dump(mode="json") for r in result}
-        print(json.dumps(result_dict, indent=2))
+        print(json.dumps(response.model_dump(mode="json", exclude_none=True), indent=2))
     else:
-        print_scan_result(
-            result,
+        print_scan_response(
+            response,
             print_errors,
-            inspect_mode=mode == "inspect",
-            internal_issues=verbose,
-            full_description=full_description,
-            args=args,
+            args,
+            show_all=bool(getattr(args, "show_full_discovery", False)),
         )
 
     if ci_mode:
-        _handle_ci_exit(result, json_output, ignore_codes)
+        _handle_ci_exit(response, json_output, ignored_failure_codes)
 
 
 if __name__ == "__main__":

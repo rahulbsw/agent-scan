@@ -17,7 +17,14 @@ from mcp.types import (
 )
 from pytest_lazy_fixtures import lf
 
-from agent_scan.mcp_client import _check_server_pass, check_server, scan_mcp_config_file
+from agent_scan.mcp_client import (
+    _check_server_pass,
+    _create_mcp_http_client_without_redirects,
+    check_server,
+    get_client,
+    scan_mcp_config_file,
+    streamablehttp_client_without_session,
+)
 from agent_scan.models import RemoteServer, StdioServer
 from agent_scan.utils import resolve_command_and_args
 
@@ -99,6 +106,48 @@ async def test_check_server_mocked(mock_stdio_client):
     assert len(signature.prompts) == 2
     assert len(signature.resources) == 1
     assert len(signature.tools) == 3
+
+
+@pytest.mark.asyncio
+async def test_remote_mcp_http_client_does_not_follow_redirects():
+    client = _create_mcp_http_client_without_redirects()
+    assert client.follow_redirects is False
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sse_client_uses_redirect_safe_http_client_factory():
+    client_cm = AsyncMock()
+    client_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
+    server = RemoteServer(url="https://example.test/sse", type="sse")
+
+    with patch("agent_scan.mcp_client.sse_client", return_value=client_cm) as make_sse_client:
+        async with get_client(server):
+            pass
+
+    assert make_sse_client.call_args.kwargs["httpx_client_factory"] is _create_mcp_http_client_without_redirects
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_client_does_not_follow_redirects():
+    custom_client = Mock()
+    http_client_cm = AsyncMock()
+    http_client_cm.__aenter__.return_value = custom_client
+    stream_cm = AsyncMock()
+    stream_cm.__aenter__.return_value = (AsyncMock(), AsyncMock(), None)
+
+    with (
+        patch("agent_scan.mcp_client.httpx.AsyncClient", return_value=http_client_cm) as make_http_client,
+        patch("agent_scan.mcp_client.streamable_http_client", return_value=stream_cm),
+    ):
+        async with streamablehttp_client_without_session(
+            url="https://example.test/mcp",
+            headers={"X-Test": "value"},
+            timeout=10,
+        ):
+            pass
+
+    assert make_http_client.call_args.kwargs["follow_redirects"] is False
 
 
 @pytest.mark.parametrize(
@@ -240,3 +289,92 @@ class TestResolveCommandAndArgsRegression:
         assert args == []
         assert command == str(script)
         assert params.args == []
+
+
+@pytest.mark.asyncio
+async def test_stdio_client_uses_discoverer_resolved_runtime_context():
+    client_cm = AsyncMock()
+    client_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
+    configured_command = "./Codex Computer Use.app/Contents/MacOS/server"
+    server = StdioServer(command="placeholder", args=["mcp"])
+    server.command = configured_command
+    server.set_runtime_context(
+        "/Users/test/.codex/computer-use/Codex Computer Use.app/Contents/MacOS/server",
+        "/Users/test/.codex/computer-use",
+    )
+
+    with patch("agent_scan.mcp_client.stdio_client", return_value=client_cm) as make_stdio_client:
+        async with get_client(server):
+            pass
+
+    params = make_stdio_client.call_args.args[0]
+    assert params.command == server.runtime_command
+    assert params.args == ["mcp"]
+    assert params.cwd == server.runtime_cwd
+    dumped = server.model_dump(mode="json")
+    assert dumped["command"] == configured_command
+    assert "runtime_command" not in dumped
+    assert "runtime_cwd" not in dumped
+
+
+@pytest.mark.asyncio
+async def test_resolved_stdio_server_keeps_args_when_nested_in_client_to_inspect():
+    from agent_scan.models.inspect import ClientToInspect
+
+    client_cm = AsyncMock()
+    client_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
+    configured_command = "./Codex Computer Use.app/Contents/MacOS/server"
+    server = StdioServer(command="placeholder", args=["mcp"])
+    server.command = configured_command
+    server.set_runtime_context(
+        "/Users/test/.codex/computer-use/Codex Computer Use.app/Contents/MacOS/server",
+        "/Users/test/.codex/computer-use",
+    )
+
+    client = ClientToInspect(
+        name="codex",
+        client_path="~/.codex",
+        mcp_configs={"~/.codex/config.toml": [("computer-use", server)]},
+        skills_dirs={},
+    )
+    nested = client.mcp_configs["~/.codex/config.toml"][0][1]
+    assert isinstance(nested, StdioServer)
+    assert nested.command == configured_command
+    assert nested.args == ["mcp"]
+
+    with patch("agent_scan.mcp_client.stdio_client", return_value=client_cm) as make_stdio_client:
+        async with get_client(nested):
+            pass
+
+    params = make_stdio_client.call_args.args[0]
+    assert params.command == server.runtime_command
+    assert params.args == ["mcp"]
+
+
+@pytest.mark.asyncio
+async def test_config_input_cannot_override_launched_command_or_cwd(tmp_path):
+    client_cm = AsyncMock()
+    client_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
+    declared = tmp_path / "declared-mcp"
+    declared.write_text("#!/bin/sh\nexit 0\n")
+    declared.chmod(0o755)
+    server = StdioServer.model_validate(
+        {
+            "command": str(declared),
+            "runtime_command": str(tmp_path / "different-mcp"),
+            "runtime_cwd": str(tmp_path),
+            "_runtime_command": str(tmp_path / "different-mcp"),
+            "_runtime_cwd": str(tmp_path),
+        }
+    )
+
+    assert server.runtime_command is None
+    assert server.runtime_cwd is None
+
+    with patch("agent_scan.mcp_client.stdio_client", return_value=client_cm) as make_stdio_client:
+        async with get_client(server):
+            pass
+
+    params = make_stdio_client.call_args.args[0]
+    assert params.command == str(declared)
+    assert params.cwd is None

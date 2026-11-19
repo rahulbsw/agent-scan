@@ -1,9 +1,11 @@
 import asyncio
 import logging
 import os
+import socket
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from ipaddress import ip_address, ip_network
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -22,6 +24,7 @@ from agent_scan.models import (
     ConfigWithoutMCP,
     FileTokenStorage,
     MCPConfig,
+    OpenCodeConfigFile,
     PluginMCPConfigFile,
     RemoteServer,
     ServerSignature,
@@ -36,6 +39,57 @@ from agent_scan.utils import resolve_command_and_args
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
+
+
+# Refuse link-local and named metadata endpoints; loopback and private ranges are intentionally permitted.
+_BLOCKED_MCP_NETWORKS = tuple(
+    ip_network(network) for network in ("169.254.0.0/16", "fe80::/10", "fd00:ec2::254/128", "100.100.100.200/32")
+)
+
+
+class UnsafeMCPDestination(httpx.ConnectError):
+    """A remote MCP destination resolved to a prohibited address."""
+
+
+def _find_unsafe_destination(exception: BaseException) -> UnsafeMCPDestination | None:
+    if isinstance(exception, UnsafeMCPDestination):
+        return exception
+    for child in getattr(exception, "exceptions", ()):
+        if refused := _find_unsafe_destination(child):
+            return refused
+    return None
+
+
+async def _guard_mcp_destination(request: httpx.Request) -> None:
+    host = request.url.host
+    addresses = await asyncio.get_running_loop().getaddrinfo(
+        host, request.url.port or (443 if request.url.scheme == "https" else 80), type=socket.SOCK_STREAM
+    )
+    for _, _, _, _, sockaddr in addresses:
+        address = ip_address(sockaddr[0])
+        address = getattr(address, "ipv4_mapped", None) or address
+        if any(address in network for network in _BLOCKED_MCP_NETWORKS):
+            raise UnsafeMCPDestination(
+                f"Connection refused: {host} resolves to blocked link-local or cloud-metadata address {address}. "
+                "Configure this MCP server with a non-metadata, non-link-local destination.",
+                request=request,
+            )
+    # The transport resolves again when connecting, leaving a residual DNS-rebinding window.
+
+
+def _create_mcp_http_client_without_redirects(
+    headers: dict[str, str] | None = None,
+    timeout: httpx.Timeout | float | None = None,
+    auth: httpx.Auth | None = None,
+) -> httpx.AsyncClient:
+    """Create a remote MCP client that never forwards requests across redirects."""
+    return httpx.AsyncClient(
+        auth=auth,
+        follow_redirects=False,
+        event_hooks={"request": [_guard_mcp_destination]},
+        headers=headers,
+        timeout=timeout,
+    )
 
 
 @asynccontextmanager
@@ -66,8 +120,8 @@ async def streamablehttp_client_without_session(
         )
     else:
         oauth_client_provider = None
-    async with httpx.AsyncClient(
-        auth=oauth_client_provider, follow_redirects=True, headers=headers, timeout=timeout
+    async with _create_mcp_http_client_without_redirects(
+        auth=oauth_client_provider, headers=headers, timeout=timeout
     ) as custom_client:
         async with streamable_http_client(url=url, http_client=custom_client) as (read, write, _):
             yield read, write
@@ -100,6 +154,7 @@ async def get_client(
             headers=server_config.headers,
             # env=server_config.env, #Not supported by MCP yet, but present in vscode
             timeout=timeout,
+            httpx_client_factory=_create_mcp_http_client_without_redirects,
         )
     elif isinstance(server_config, RemoteServer) and server_config.type == "http":
         logger.debug(
@@ -114,11 +169,15 @@ async def get_client(
     elif isinstance(server_config, StdioServer):
         logger.debug("Creating stdio client")
 
-        command, args = resolve_command_and_args(server_config)
+        if server_config.runtime_command is not None:
+            command, args = server_config.runtime_command, server_config.args
+        else:
+            command, args = resolve_command_and_args(server_config)
         server_params = StdioServerParameters(
             command=command,
             args=args,
             env=server_config.env,
+            cwd=server_config.runtime_cwd,
         )
         # Create stderr capture with real pipe if traffic capture is enabled.
         # When streaming is requested, the capture also forwards each line to
@@ -310,6 +369,10 @@ async def check_server(
                 exceptions.append(e)
                 continue
             except Exception as e:
+                if refused := _find_unsafe_destination(e):
+                    server_config.url = original_url
+                    server_config.type = original_type
+                    raise refused from e
                 logger.debug("Server check failed")
                 exceptions.append(e)
                 continue
@@ -340,6 +403,16 @@ async def scan_mcp_config_file(path: str) -> MCPConfig:
             VSCodeConfigFile,  # used by vscode settings.json
             VSCodeMCPConfig,  # used by vscode mcp.json
             PluginMCPConfigFile,  # flat {name: serverConfig} in plugin .mcp.json
+        ]
+        # OpenCodeConfigFile matches ANY object with a dict-valued mcp key,
+        # including non-opencode files that merely carry an (often empty) mcp
+        # block.
+        schema = config.get("$schema") if isinstance(config, dict) else None
+        if os.path.basename(path) in ("opencode.json", "opencode.jsonc") or (
+            isinstance(schema, str) and "opencode.ai/config" in schema
+        ):
+            models.append(OpenCodeConfigFile)  # opencode.json{,c}: top-level {"mcp": {name: {type, ...}}}
+        models += [
             UnknownMCPConfig,  # used by unknown config files
             ConfigWithoutMCP,  # used by config files without MCP
         ]
