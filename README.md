@@ -61,6 +61,31 @@ xattr -d com.apple.quarantine open-agent-scan 2>/dev/null || true
 ./open-agent-scan --help
 ```
 
+## Use With AI Tools
+
+Install the [Open Agent Scan skill](skills/open-agent-scan/SKILL.md) into a
+compatible AI coding tool with the skills CLI (requires Node.js/npm):
+
+```bash
+npx skills add rahulbsw/agent-scan --skill open-agent-scan
+```
+
+Select your tool in the installer, then ask it to scan a specific MCP config or
+skill before adoption. For example: "Use open-agent-scan to review
+./my-skill/SKILL.md and explain the findings."
+
+The skill provides instructions; install the scanner separately using the
+options above. Your AI tool needs shell access. The workflow keeps analysis local,
+requires consent before starting MCP servers or contacting their endpoints, and
+reports scan failures as coverage gaps.
+
+Skills are distributed from this GitHub repository. After this change is merged,
+the install command uses the default branch. The
+[skills.sh directory](https://skills.sh/docs/faq) discovers and ranks skills
+through installation telemetry; there is no separate package upload. Directory
+appearance is controlled by skills.sh. To disable installer telemetry, set
+`DISABLE_TELEMETRY=1`.
+
 ## Security Warning
 
 Scanning stdio MCP configurations can execute the commands defined in those
