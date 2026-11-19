@@ -10,7 +10,7 @@ from unittest.mock import patch
 import aiohttp
 import pytest
 
-from agent_scan.hook_events import _HOOK_REQUEST_TIMEOUT_SECONDS, send_hook_event
+from agent_scan.hook_events import _HOOK_REQUEST_TIMEOUT_SECONDS, classify_failure_detail, send_hook_event
 from agent_scan.hook_version import HOOK_VERSION
 from agent_scan.version import version_info
 
@@ -53,7 +53,9 @@ def _patch_session(session: _FakeSession):
 
 
 @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
-def test_sends_existing_hook_wire_contract(client):
+@pytest.mark.parametrize("serial", ["", "C02XYZ123", "control-\x01\b\f\x1f"])
+def test_sends_existing_hook_wire_contract(client, serial, monkeypatch):
+    monkeypatch.setenv("MACHINE_SERIAL", "ambient-serial")
     session = _FakeSession()
     payload = '{"hook_event_name":"hooksConfiguredServerDiscovery"}'
 
@@ -62,7 +64,9 @@ def test_sends_existing_hook_wire_contract(client):
         patch("agent_scan.hook_events.get_username", return_value="user-1"),
         _patch_session(session),
     ):
-        result = send_hook_event("https://api.snyk.io/", client, "push-key", payload, "machine-1")
+        result = send_hook_event(
+            "https://api.snyk.io/", client, "push-key", payload, "machine-1", machine_serial=serial
+        )
 
     assert result == (True, "")
     assert len(session.posts) == 1
@@ -76,6 +80,7 @@ def test_sends_existing_hook_wire_contract(client):
     assert headers["User-Agent"] == f"snyk/agent-scan Agent Scan v{version_info}"
     assert json.loads(headers["X-User"]) == {
         "hostname": "host-1",
+        "machine_serial": serial or None,
         "username": "user-1",
         "identifier": "machine-1",
         "cli_version": version_info,
@@ -108,7 +113,7 @@ def test_reports_the_agent_surface_from_the_environment(env, expected_surface):
         patch("agent_scan.hook_events.get_username", return_value="user-1"),
         _patch_session(session),
     ):
-        send_hook_event("https://api.snyk.io", "github-copilot", "push-key", "{}", "machine-1")
+        send_hook_event("https://api.snyk.io", "github-copilot", "push-key", "{}", "machine-1", machine_serial="")
 
     headers = session.posts[0]["headers"]
     assert headers.get("X-Agent-Surface") == expected_surface
@@ -131,7 +136,7 @@ def test_other_clients_never_claim_a_copilot_surface(client):
         patch("agent_scan.hook_events.get_username", return_value="user-1"),
         _patch_session(session),
     ):
-        send_hook_event("https://api.snyk.io", client, "push-key", "{}", "machine-1")
+        send_hook_event("https://api.snyk.io", client, "push-key", "{}", "machine-1", machine_serial="")
 
     assert "X-Agent-Surface" not in session.posts[0]["headers"]
 
@@ -149,7 +154,7 @@ def test_send_hook_event_defaults_scheme_less_base_url_to_http(base_url, expecte
     session = _FakeSession()
 
     with _patch_session(session):
-        result = send_hook_event(base_url, "claude-code", "push-key", "{}", "machine-1")
+        result = send_hook_event(base_url, "claude-code", "push-key", "{}", "machine-1", machine_serial="")
 
     assert result == (True, "")
     assert session.posts[0]["url"] == (
@@ -162,7 +167,7 @@ def test_uses_the_shared_backend_session_factory():
     session = _FakeSession()
 
     with _patch_session(session) as factory:
-        send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1")
+        send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1", machine_serial="")
 
     factory.assert_called_once()
 
@@ -171,7 +176,7 @@ def test_rejects_missing_machine_identifier_without_request():
     session = _FakeSession()
 
     with _patch_session(session) as factory:
-        result = send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "  ")
+        result = send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "  ", machine_serial="")
 
     assert result == (False, "machine ID is required")
     factory.assert_not_called()
@@ -181,7 +186,7 @@ def test_rejects_unknown_client_without_request():
     session = _FakeSession()
 
     with _patch_session(session) as factory:
-        result = send_hook_event("https://api.snyk.io", "unknown", "push-key", "{}", "machine-1")
+        result = send_hook_event("https://api.snyk.io", "unknown", "push-key", "{}", "machine-1", machine_serial="")
 
     assert result == (False, "unknown client: unknown")
     factory.assert_not_called()
@@ -192,7 +197,7 @@ def test_reports_http_failures(status, expected):
     session = _FakeSession(status=status)
 
     with _patch_session(session):
-        result = send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1")
+        result = send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1", machine_serial="")
 
     assert result == (False, expected)
 
@@ -208,7 +213,9 @@ def test_reports_transport_failures(error, expected):
     session = _FakeSession(error=error)
 
     with _patch_session(session):
-        ok, detail = send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1")
+        ok, detail = send_hook_event(
+            "https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1", machine_serial=""
+        )
 
     assert ok is False
     assert expected in detail
@@ -218,7 +225,9 @@ def test_transport_failures_are_retried_when_requested():
     session = _FakeSession(error=aiohttp.ClientConnectionError("offline"))
 
     with _patch_session(session), patch("agent_scan.hook_events.asyncio.sleep") as sleep:
-        ok, _ = send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1", max_retries=3)
+        ok, _ = send_hook_event(
+            "https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1", max_retries=3, machine_serial=""
+        )
 
     assert ok is False
     assert len(session.posts) == 3
@@ -230,7 +239,7 @@ def test_single_attempt_by_default():
     session = _FakeSession(error=aiohttp.ClientConnectionError("offline"))
 
     with _patch_session(session):
-        send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1")
+        send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1", machine_serial="")
 
     assert len(session.posts) == 1
 
@@ -239,6 +248,68 @@ def test_http_errors_are_not_retried():
     session = _FakeSession(status=403)
 
     with _patch_session(session):
-        send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1", max_retries=3)
+        send_hook_event(
+            "https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1", max_retries=3, machine_serial=""
+        )
 
     assert len(session.posts) == 1
+
+
+def test_http_5xx_is_retried_within_policy():
+    from agent_scan.hook_events import RetryPolicy
+
+    session = _FakeSession(status=503)
+
+    with _patch_session(session), patch("agent_scan.hook_events.asyncio.sleep") as sleep:
+        ok, detail = send_hook_event(
+            "https://api.snyk.io",
+            "claude-code",
+            "push-key",
+            "{}",
+            "machine-1",
+            retry_policy=RetryPolicy(1.0, 2.0, 10.0),
+            machine_serial="",
+        )
+
+    assert ok is False
+    assert detail == "HTTP 503"
+    assert len(session.posts) > 1
+    assert [c.args[0] for c in sleep.call_args_list][:2] == [1.0, 2.0]
+
+
+def test_policy_lets_a_slow_request_use_the_remaining_budget():
+    from agent_scan.hook_events import RetryPolicy
+
+    session = _FakeSession()
+
+    with _patch_session(session):
+        send_hook_event(
+            "https://api.snyk.io",
+            "claude-code",
+            "k",
+            "{}",
+            "m",
+            retry_policy=RetryPolicy(1.0, 2.0, 60.0),
+            machine_serial="",
+        )
+
+    total = session.posts[0]["timeout"].total
+    assert _HOOK_REQUEST_TIMEOUT_SECONDS < total <= 60.0
+
+
+@pytest.mark.parametrize(
+    "detail, expected",
+    [
+        (
+            "The underlying connection was closed: Could not establish trust relationship for the SSL/TLS secure channel.",
+            ("rejected", False),
+        ),
+        ("Could not create SSL/TLS secure channel", ("rejected", False)),
+        (
+            "The underlying connection was closed: An unexpected error occurred on a receive.",
+            ("connection_reset", True),
+        ),
+    ],
+)
+def test_classify_failure_detail_does_not_retry_certificate_failures(detail, expected):
+    assert tuple(classify_failure_detail(detail)) == expected

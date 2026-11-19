@@ -7,6 +7,12 @@
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the hook endpoint.
 #
+# The request is bounded by $TIMEOUT_SECONDS below. Transport and HTTP failures, that timeout
+# included, fail open: exit 0, one line on stderr, and on stdout a systemMessage JSON object
+# for the clients whose hook output defines one (Claude Code, Codex) so the user is told
+# that Agent Guard did not validate the action; nothing on stdout for the others. Usage
+# errors exit 1.
+#
 # Requirements: PowerShell 5.1+ (built-in on Windows 10+)
 #
 param(
@@ -21,7 +27,13 @@ param(
     [string]$RemoteUrl,
 
     [Parameter(Mandatory=$false)]
-    [string]$MachineId
+    [string]$TenantId,
+
+    [Parameter(Mandatory=$false)]
+    [string]$MachineId,
+
+    [Parameter(Mandatory=$false)]
+    [string]$MachineSerial
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,10 +41,36 @@ $ErrorActionPreference = "Stop"
 # --- BEGIN install-time variables ---
 # Open Agent Scan CLI version (replaced at install time).
 $AGENT_SCAN_VERSION = "__AGENT_SCAN_VERSION__"
-# --- END install-time variables ---
 
 # Hook API version.
 $VERSION = "2025-11-11"
+
+# Timeout, in seconds, for the whole request (same reasoning as agent-guard.sh: the
+# agent caps the hook at 65 s and agent-monitor may legitimately take ~50 s to answer).
+$TIMEOUT_SECONDS = 60
+
+# What the user is told when the hook fails open. Embedded in JSON verbatim, so it must stay
+# free of double quotes, backslashes and control characters (pinned by a test).
+$FAIL_OPEN_MESSAGE = "Unable to reach the configured hook service to validate agent behavior. Please check your network and configuration and try again."
+
+# Clients whose hook output schema defines systemMessage, a warning the agent shows the
+# user (see supports_system_message in agent-guard.sh for why Cursor and Copilot must
+# get nothing on stdout).
+$SYSTEM_MESSAGE_CLIENTS = @("claude-code", "codex")
+
+# Transport and HTTP failures must not block the agent (see agent-guard.sh): exit 0,
+# the user-facing sentence plus the technical reason on stderr, and the sentence as a
+# systemMessage on stdout only where the client renders it. [Console]::Error is used
+# instead of Write-Error, which $ErrorActionPreference = "Stop" would turn into a
+# terminating error, a multi-line ErrorRecord and exit code 1. Usage errors below keep
+# Write-Error and exit 1.
+function FailOpen([string]$reason) {
+    [Console]::Error.WriteLine("agent-guard: $FAIL_OPEN_MESSAGE ($reason; failing open)")
+    if ($SYSTEM_MESSAGE_CLIENTS -contains $Client) {
+        [Console]::Out.WriteLine('{"systemMessage":"' + $FAIL_OPEN_MESSAGE + '"}')
+    }
+    exit 0
+}
 
 # ---------------------------------------------------------------------------
 # Main
@@ -99,18 +137,14 @@ $body = "base64:$encoded"
 $hostname = try { [System.Net.Dns]::GetHostName() } catch { "unknown" }
 $username = try { [System.Environment]::UserName } catch { "unknown" }
 
-# Minimal JSON escaping
-function JsonEscape($s) {
-    $s = $s -replace '\\', '\\\\'
-    $s = $s -replace '"', '\"'
-    $s = $s -replace "`t", '\t'
-    $s = $s -replace "`r", '\r'
-    $s = $s -replace "`n", '\n'
-    return $s
-}
-
-$xUser = '{{"hostname":"{0}","username":"{1}","identifier":"{2}","cli_version":"{3}"}}' -f `
-    (JsonEscape $hostname), (JsonEscape $username), (JsonEscape $MachineId), (JsonEscape $cliVersion)
+$serial = if ($MachineSerial) { $MachineSerial } else { $null }
+$xUser = @{
+    hostname = $hostname
+    username = $username
+    identifier = $MachineId
+    cli_version = $cliVersion
+    machine_serial = $serial
+} | ConvertTo-Json -Compress
 
 # Identify whether GitHub Copilot invoked this hook (see get_agent_surface in
 # agent-guard.sh for why the -Client argument cannot answer this: one Copilot hook
@@ -131,7 +165,7 @@ $agentSurface = if ($Client -ne "github-copilot") {
     ""
 }
 
-# Execute request
+# Execute request. Any failure past this point fails open; see FailOpen.
 try {
     $headers = @{
         "User-Agent"   = $userAgent
@@ -143,17 +177,28 @@ try {
         $headers["X-Agent-Surface"] = $agentSurface
     }
     $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
-    $response = Invoke-WebRequest -Uri $url -Method POST -Body $bodyBytes -Headers $headers -UseBasicParsing
-    Write-Output $response.Content
+    $response = Invoke-WebRequest -Uri $url -Method POST -Body $bodyBytes -Headers $headers `
+        -UseBasicParsing -TimeoutSec $TIMEOUT_SECONDS
 } catch {
-    $statusCode = $null
-    if ($_.Exception.Response) {
-        $statusCode = [int]$_.Exception.Response.StatusCode
+    $ex = $_.Exception
+    $statusCode = 0
+    if ($ex.Response) {
+        try { $statusCode = [int]$ex.Response.StatusCode } catch { $statusCode = 0 }
     }
-    if ($statusCode) {
-        Write-Error "Error: $statusCode"
-    } else {
-        Write-Error "Request failed: $_"
+    if ($statusCode -ge 400) {
+        FailOpen "HTTP $statusCode"
     }
-    exit 1
+    # Windows PowerShell 5.1 surfaces -TimeoutSec as a WebException with Status Timeout;
+    # PowerShell 7 raises an OperationCanceledException instead. -TimeoutSec bounds the
+    # connection and the wait for response headers; a body that stalls afterwards is left
+    # to the agent's own hook timeout.
+    $timedOut = (
+        ($ex -is [System.Net.WebException] -and $ex.Status -eq [System.Net.WebExceptionStatus]::Timeout) -or
+        ($ex -is [System.OperationCanceledException])
+    )
+    if ($timedOut) {
+        FailOpen "request timed out after ${TIMEOUT_SECONDS}s"
+    }
+    FailOpen "request failed: $($ex.Message)"
 }
+Write-Output $response.Content

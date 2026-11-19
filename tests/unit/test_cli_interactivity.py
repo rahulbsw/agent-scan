@@ -655,7 +655,7 @@ class TestRunScanConsentAndStreamStderrWiring:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -681,7 +681,7 @@ class TestRunScanConsentAndStreamStderrWiring:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -706,7 +706,7 @@ class TestRunScanConsentAndStreamStderrWiring:
         args = self._scan_args(dangerously_run_mcp_servers=True, suppress_mcpserver_io=False)
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -725,7 +725,7 @@ class TestRunScanConsentAndStreamStderrWiring:
         args = self._scan_args(dangerously_run_mcp_servers=True, suppress_mcpserver_io=True)
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -751,7 +751,7 @@ class TestRunScanConsentAndStreamStderrWiring:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -788,7 +788,7 @@ class TestRunScanConsentAndStreamStderrWiring:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -811,7 +811,7 @@ class TestRunScanConsentAndStreamStderrWiring:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -848,7 +848,7 @@ class TestRunScanConsentAndStreamStderrWiring:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -891,7 +891,7 @@ class TestRunScanConsentAndStreamStderrWiring:
         for args, expected_stream_stderr in ((args_true, False), (args_false, True)):
             with (
                 patch(
-                    "agent_scan.cli.discover_clients_to_inspect",
+                    "agent_scan.pipelines.discover_clients_to_inspect",
                     new_callable=AsyncMock,
                     return_value=([], [], []),
                 ),
@@ -914,7 +914,7 @@ class TestRunScanConsentAndStreamStderrWiring:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -938,7 +938,7 @@ class TestRunScanConsentAndStreamStderrWiring:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -962,7 +962,7 @@ class TestRunScanConsentAndStreamStderrWiring:
         args = self._scan_args()
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -1042,7 +1042,7 @@ class TestStdioHandshakeInvariants:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -1089,7 +1089,7 @@ class TestStdioHandshakeInvariants:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -1141,7 +1141,7 @@ class TestStdioHandshakeInvariants:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -1184,7 +1184,7 @@ class TestStdioHandshakeInvariants:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -1281,7 +1281,7 @@ class TestStdioHandshakeInvariants:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -1316,7 +1316,7 @@ class TestStdioHandshakeInvariants:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -1348,7 +1348,7 @@ class TestStdioHandshakeInvariants:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -1381,7 +1381,7 @@ class TestStdioHandshakeInvariants:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),
@@ -1411,7 +1411,7 @@ class TestStdioHandshakeInvariants:
 
         with (
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new_callable=AsyncMock,
                 return_value=([], [], []),
             ),

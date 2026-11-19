@@ -6,13 +6,15 @@ import os
 import ssl
 import sys
 import traceback
-from typing import Any
+from typing import Any, Literal, get_args
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 import certifi
 import rich
 from mcp.types import Prompt, Resource, ResourceTemplate, Tool
+from pydantic import BaseModel, ValidationError, field_validator
+from rich.markup import escape
 
 from agent_scan.models.api.common import ScanUserInfo
 from agent_scan.models.api.v20260710 import (
@@ -83,6 +85,8 @@ def _force_analysis_api_version(analysis_url: str) -> str:
 
 RETRYABLE_TRANSPORT_EXCEPTIONS = (
     TimeoutError,
+    # A separate class before Python 3.11; aiohttp raises it on request timeouts.
+    asyncio.TimeoutError,
     aiohttp.ClientConnectionError,
     aiohttp.ClientPayloadError,
 )
@@ -100,20 +104,61 @@ def _warn_async_results_not_shown() -> None:
     )
 
 
-async def _async_analysis_enabled(
-    config_url: str,
-    push_key: str,
-    trace_configs: list | None,
-    skip_ssl_verify: bool,
-    max_retries: int = 2,
-) -> bool:
-    """Ask the backend whether this push-key's tenant routes to async analysis.
+def _print_scan_sent_success(user_info: ScanUserInfo) -> None:
+    """Print confirmation that scan was sent with identity details."""
+    parts: list[str] = []
+    if user_info.identifier:
+        parts.append(f"machine id: {escape(user_info.identifier)}")
+    if user_info.hostname:
+        parts.append(f"hostname: {escape(user_info.hostname)}")
+    if user_info.username:
+        username = ", ".join(escape(u) for u in user_info.username)
+        parts.append(f"user: {username}")
+    details = f" ({', '.join(parts)})" if parts else ""
+    rich.print(f"[green]Scan sent successfully[/green]{details}")
 
-    Returns False on any error, non-2xx, or after exhausting retries so the caller
-    falls back to the synchronous path. Transient failures (5xx, connection issues,
-    timeouts) are retried with a short timeout and exponential backoff; deterministic
-    4xx responses are not retried.
+
+RemoteDiscoveryMode = Literal["off", "shadow", "on"]
+
+
+class AgentScanConfig(BaseModel):
+    """Per-tenant runtime toggles from ``/hidden/agent-scan/config``. Every toggle defaults to off."""
+
+    async_analysis_enabled: bool = False
+    # off: local discovery. shadow: local, plus remote for comparison. on: remote only.
+    remote_discovery_mode: RemoteDiscoveryMode = "off"
+
+    @field_validator("remote_discovery_mode", mode="before")
+    @classmethod
+    def _unknown_mode_is_off(cls, value: Any) -> Any:
+        # A newer backend may add modes; an old CLI treats them as off.
+        return value if value in get_args(RemoteDiscoveryMode) else "off"
+
+
+def agent_scan_config_url(analysis_url: str) -> str:
+    return _force_analysis_api_version(analysis_url).replace(_SYNC_ANALYSIS_PATH, _AGENT_SCAN_CONFIG_PATH)
+
+
+def discovery_base_url(analysis_url: str) -> str:
+    """Scheme and host of the analysis URL; the discovery service lives on the same gateway."""
+    parsed = urlsplit(analysis_url)
+    return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+
+
+async def fetch_agent_scan_config(
+    analysis_url: str,
+    push_key: str,
+    trace_configs: list | None = None,
+    skip_ssl_verify: bool = False,
+    max_retries: int = 2,
+) -> AgentScanConfig:
+    """Fetch the push-key tenant's runtime config.
+
+    Returns the all-off default on any error, non-2xx, or after exhausting retries, so
+    callers fall back to legacy discovery and synchronous analysis. Transient failures
+    (5xx, connection issues, timeouts) are retried with exponential backoff; 4xx are not.
     """
+    config_url = agent_scan_config_url(analysis_url)
     for attempt in range(max_retries):
         try:
             async with backend_client_session(trace_configs, skip_ssl_verify) as session:
@@ -123,13 +168,14 @@ async def _async_analysis_enabled(
                     timeout=aiohttp.ClientTimeout(total=_CONFIG_REQUEST_TIMEOUT),
                 ) as response:
                     if response.status == 200:
-                        data = await response.json()
-                        return bool(data.get("async_analysis_enabled", False))
+                        try:
+                            return AgentScanConfig.model_validate(await response.json())
+                        except (ValueError, ValidationError) as e:
+                            logger.warning("Agent Scan config response is invalid (%s); using defaults.", e)
+                            return AgentScanConfig()
                     if response.status < 500:
-                        logger.warning(
-                            "Agent Scan config request returned %s; using synchronous analysis.", response.status
-                        )
-                        return False
+                        logger.warning("Agent Scan config request returned %s; using defaults.", response.status)
+                        return AgentScanConfig()
                     logger.warning(
                         "Agent Scan config request returned %s (attempt %d/%d).",
                         response.status,
@@ -140,14 +186,24 @@ async def _async_analysis_enabled(
             logger.warning("Agent Scan config request failed (attempt %d/%d): %s", attempt + 1, max_retries, e)
         except aiohttp.ClientError as e:
             # Non-transient transport error (e.g. malformed URL): retrying will not help.
-            logger.warning("Agent Scan config request failed (%s); using synchronous analysis.", e)
-            return False
+            logger.warning("Agent Scan config request failed (%s); using defaults.", e)
+            return AgentScanConfig()
 
         if attempt < max_retries - 1:
             await asyncio.sleep(2**attempt)  # 1s, 2s, ...
 
-    logger.warning("Agent Scan config request failed after %d attempt(s); using synchronous analysis.", max_retries)
-    return False
+    logger.warning("Agent Scan config request failed after %d attempt(s); using defaults.", max_retries)
+    return AgentScanConfig()
+
+
+async def _response_detail(response: aiohttp.ClientResponse) -> str | None:
+    """Return the backend's `detail` error message, if any."""
+    try:
+        data = await response.json(content_type=None)
+    except (aiohttp.ClientError, TimeoutError, ValueError):
+        return None
+    detail = data.get("detail") if isinstance(data, dict) else None
+    return detail if isinstance(detail, str) and detail else None
 
 
 async def _submit_async_analysis(
@@ -158,12 +214,15 @@ async def _submit_async_analysis(
     trace_configs: list | None,
     skip_ssl_verify: bool,
     max_retries: int = 3,
-) -> None:
+) -> tuple[bool, str | None, Exception | None]:
     """Stream the gzipped payload to the async accept endpoint.
 
-    Fire-and-forget: never raises. Retries transient transport failures and 5xx
-    responses with exponential backoff, mirroring the synchronous path. 4xx
-    responses are deterministic and are not retried.
+    Retries transient transport failures and 5xx responses with exponential
+    backoff, mirroring the synchronous path. 4xx responses are deterministic
+    and are not retried.
+
+    Returns:
+        (success, error_message, exception) tuple.
     """
     body = gzip.compress(payload.model_dump_json().encode("utf-8"))
     headers = {
@@ -173,6 +232,9 @@ async def _submit_async_analysis(
     }
     if identifier:
         headers["X-Scan-User-Id"] = identifier
+
+    last_error_text: str | None = None
+    last_exc: Exception | None = None
 
     for attempt in range(max_retries):
         try:
@@ -185,12 +247,29 @@ async def _submit_async_analysis(
                 ) as response:
                     if response.status == 202:
                         logger.info("Scan accepted for asynchronous analysis.")
-                        return
+                        return True, None, None
+                    if response.status == 401:
+                        error_text = "Unauthorized. Please check your push key."
+                        logger.error(error_text)
+                        return False, error_text, None
+                    if response.status == 413:
+                        error_text = (
+                            "Analysis scope too large (e.g. too many or very large MCP servers/skills). "
+                            "Please consider scanning individual MCP servers or skill directories."
+                        )
+                        logger.error(error_text)
+                        return False, error_text, None
                     if response.status < 500:
-                        # Deterministic client error (e.g. 400/413/401/403): retrying
-                        # the same body cannot succeed, so give up immediately.
+                        # Deterministic client error (e.g. 400/403): retrying won't help.
+                        detail = await _response_detail(response) or response.reason
+                        error_text = (
+                            f"The analysis server returned an error for your request: {response.status} - {detail}"
+                        )
                         logger.error("Async analysis returned status %s; not retrying.", response.status)
-                        return
+                        return False, error_text, None
+
+                    detail = await _response_detail(response) or response.reason
+                    last_error_text = f"Could not reach analysis server: {response.status} - {detail}"
                     logger.warning(
                         "Async analysis returned status %s (attempt %d/%d).",
                         response.status,
@@ -198,6 +277,11 @@ async def _submit_async_analysis(
                         max_retries,
                     )
         except RETRYABLE_TRANSPORT_EXCEPTIONS as e:
+            last_exc = e
+            if isinstance(e, TimeoutError):
+                last_error_text = f"API timeout while scanning discovered servers: {e}"
+            else:
+                last_error_text = f"Could not reach analysis server: {e}"
             logger.warning(
                 "Async analysis request failed (attempt %d/%d): %s",
                 attempt + 1,
@@ -206,14 +290,19 @@ async def _submit_async_analysis(
             )
         except aiohttp.ClientError as e:
             # Non-transient transport error (e.g. malformed URL): retrying will not help.
+            error_text = f"Could not reach analysis server: {e}"
             logger.error("Async analysis request failed: %s", e)
-            return
+            return False, error_text, e
 
         if attempt < max_retries - 1:
             backoff_time = 2**attempt  # 1s, 2s, 4s
             await asyncio.sleep(backoff_time)
 
+    error_text = f"Tried calling verification api {max_retries} times. Could not reach analysis server."
+    if last_error_text:
+        error_text += f" Last error: {last_error_text}"
     logger.error("Async analysis submission failed after %d attempt(s).", max_retries)
+    return False, error_text, last_exc
 
 
 def _entity_summary(entity: Entity) -> McpEntitySummary:
@@ -441,6 +530,7 @@ async def analyze_machine(
     scan_context: dict | None = None,
     scanned_usernames: list[str] | None = None,
     show_analysis_results: bool = False,
+    agent_scan_config: AgentScanConfig | None = None,
 ) -> ScanResponse:
     """
     Analyze the scan paths with the analysis server.
@@ -457,6 +547,7 @@ async def analyze_machine(
         scan_context: Optional dict containing scan metadata to include in the request
         show_analysis_results: Force synchronous analysis so results are returned instead of
             submitting asynchronously (push-key tenants default to async)
+        agent_scan_config: Config already fetched for this push key; fetched here when omitted
     """
     analysis_url = _force_analysis_api_version(analysis_url)
     logger.debug(f"Analyzing scan path with URL: {analysis_url}")
@@ -464,6 +555,7 @@ async def analyze_machine(
     # for analysis server we never push personal information
     user_info = ScanUserInfo(
         hostname=get_hostname(),
+        machine_serial=os.getenv("MACHINE_SERIAL", "").strip() or None,
         username=scanned_usernames if scanned_usernames else [get_username()],
         identifier=identifier,
         ip_address=None,
@@ -491,14 +583,23 @@ async def analyze_machine(
         # Enterprise MDM mode with push key
         headers["X-Push-Key"] = push_key
         if not show_analysis_results:
-            config_url = analysis_url.replace(_SYNC_ANALYSIS_PATH, _AGENT_SCAN_CONFIG_PATH)
-            if await _async_analysis_enabled(config_url, push_key, trace_configs, skip_ssl_verify):
+            if agent_scan_config is None:
+                agent_scan_config = await fetch_agent_scan_config(
+                    analysis_url, push_key, trace_configs, skip_ssl_verify
+                )
+            if agent_scan_config.async_analysis_enabled:
                 async_url = analysis_url.replace(_SYNC_ANALYSIS_PATH, _ASYNC_ANALYSIS_PATH)
-                await _submit_async_analysis(
+                success, error_text, exc = await _submit_async_analysis(
                     async_url, payload, headers, identifier, trace_configs, skip_ssl_verify, max_retries
                 )
-                _warn_async_results_not_shown()
-                return _accepted_async_response(payload)
+                if success:
+                    _warn_async_results_not_shown()
+                    _print_scan_sent_success(user_info)
+                    return _accepted_async_response(payload)
+                error_text = error_text or "Could not reach analysis server."
+                if raise_on_error:
+                    raise RuntimeError(error_text)
+                return _analysis_error_response(payload, error_text, exc)
     elif os.getenv("SNYK_CLI_USE", "false").lower() == "true":
         # Legacy managed CLI proxy mode.
         # Update the analysis_url to use the use the api gateway authenticated endpoint
@@ -571,6 +672,7 @@ def _analysis_error_response(
     exception: Exception | None = None,
 ) -> ScanResponse:
     """Return one analysis failure response for every inspected path."""
+    rich.print(f"[bold red]Scan failed: {escape(message)}[/bold red]", file=sys.stderr)
     return ScanResponse(
         scan_path_responses=[
             ScanPathResponse(
