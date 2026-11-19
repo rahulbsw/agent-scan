@@ -32,6 +32,21 @@ jobs:
           missing=0
           for commit in $(git rev-list "${rev_list_args[@]}"); do
             if ! git log -1 --format=%B "$commit" | grep -Eiq '^Signed-off-by: .+ <.+@.+>$'; then
+              # Allow the original author to certify an earlier commit without rewriting history.
+              author=$(git log -1 --format='%an <%ae>' "$commit")
+              remediated=0
+              for correction in $(git rev-list "${rev_list_args[@]}"); do
+                if git merge-base --is-ancestor "$commit" "$correction" &&
+                  git log -1 --format=%B "$correction" | grep -Fxq "DCO-Remediation-For: $commit" &&
+                  git log -1 --format=%B "$correction" | grep -Fxq "Signed-off-by: $author"; then
+                  remediated=1
+                  break
+                fi
+              done
+              if [ "$remediated" -eq 1 ]; then
+                echo "Commit $commit has an author-signed remediation."
+                continue
+              fi
               echo "::error::Commit $commit is missing a DCO Signed-off-by line."
               missing=1
             fi
