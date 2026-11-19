@@ -1,10 +1,13 @@
 import os
 import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="DCO runs in Bash on an Ubuntu runner, not Windows WSL")
 def test_dco_accepts_only_unmodified_base_branch_updates(tmp_path):
     workflow = Path(__file__).parents[2] / ".github/workflows/dco.yml"
     script = yaml.safe_load(workflow.read_text())["jobs"]["signoff"]["steps"][1]["run"]
