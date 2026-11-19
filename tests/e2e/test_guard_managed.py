@@ -305,13 +305,14 @@ class TestManagedUninstallE2E:
         assert not _guard_backup(config).exists()
 
     @pytest.mark.parametrize("client", ALL_CLIENTS)
-    def test_uninstall_revokes_push_key(self, agent_scan_cmd, agent_scan_command, fake_hook_server, client):
+    def test_uninstall_leaves_external_key_revocation_to_administrator(
+        self, agent_scan_cmd, agent_scan_command, fake_hook_server, client
+    ):
         _install(agent_scan_cmd, agent_scan_command, client, fake_hook_server)
 
         result = _uninstall(agent_scan_cmd, client, SNYK_TOKEN="e2e-token", TENANT_ID="e2e-tenant")
-        assert "not revoked" not in result.stdout
-        assert len(_FakeHookServer.deletes) == 1
-        assert _FakeHookServer.deletes[0]["path"].startswith("/hidden/tenants/e2e-tenant/mcp-scan/push-key")
+        assert "was removed from local hooks" in result.stdout
+        assert _FakeHookServer.deletes == []
 
     def test_uninstall_when_nothing_installed_is_a_noop(self, agent_scan_cmd):
         result = _uninstall(agent_scan_cmd, "claude")
