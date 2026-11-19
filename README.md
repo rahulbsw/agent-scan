@@ -101,6 +101,11 @@ Recommended practice:
 - Prefer `--analysis-mode local` unless you intentionally configured a remote
   analysis endpoint.
 
+Local analysis can still contact configured MCP servers during discovery.
+Upstream's newer discovery and hook-install safeguards are retained; remote
+discovery configuration is queried only for explicitly configured push-key
+analysis and is skipped with `--analysis-mode local`.
+
 ## What It Detects
 
 Open Agent Scan currently covers:

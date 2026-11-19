@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import sys
@@ -32,7 +33,14 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 lacks stdlib TOML
 
 from agent_scan.agents import DiscoveryScope
 from agent_scan.agents.claude_desktop import ClaudeDesktopDiscoverer
-from agent_scan.hook_events import HOOK_CLIENTS, send_hook_event
+from agent_scan.hook_events import (
+    HOOK_CLIENTS,
+    INSTALL_RETRY_POLICY,
+    RetryPolicy,
+    classify_failure_detail,
+    next_retry_delay,
+    send_hook_event,
+)
 from agent_scan.pushkeys import (
     GuardEnabledAccessDeniedError,
     _is_localhost,
@@ -62,8 +70,22 @@ _DETECTION_RE = re.compile(
     re.DOTALL,
 )
 _PERMISSION_DENIED = "__permission_denied__"
+# Install backs up a config file to ``<file>`` + this suffix. The name is Guard's own
+# (unlike a plain ``<file>.backup``, which other tools also write), so uninstall can
+# delete it without reading it.
+_GUARD_BACKUP_SUFFIX = ".agent-guard.backup"
+# What install adds to a JSON config besides its hooks; see _uninstall_hooks.
+_GUARD_JSON_SCAFFOLDING: dict[str, tuple[dict, ...]] = {
+    "claude": ({}, {"hooks": {}}),
+    "codex": ({}, {"hooks": {}}),
+    "cursor": ({"version": 1}, {"version": 1, "hooks": {}}),
+    "github-copilot": ({"version": 1}, {"version": 1, "hooks": {}}),
+}
 _STDIN_READ_TIMEOUT_SECONDS = 5.0
 _DISCOVERY_TIMEOUT_SECONDS = 60.0
+_HOOK_SCRIPT_TIMEOUT_SECONDS = 15.0
+# Extra time the forwarder subprocess gets beyond the install budget (interpreter startup, teardown).
+_HOOK_SCRIPT_OVERHEAD_SECONDS = 2.0
 
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CURSOR_HOOKS_PATH = Path.home() / ".cursor" / "hooks.json"
@@ -169,6 +191,9 @@ def run_guard(args) -> int:
     except PermissionError as e:
         rich.print(f"[bold red]Error:[/bold red] Permission denied: {e}")
         return 1
+    except CodexRequirementsError as e:
+        rich.print(f"[bold red]Error:[/bold red] {e}")
+        return 1
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +256,7 @@ def _run_install(args) -> None:
     if not tenant_id:
         tenant_id = (os.environ.get("TENANT_ID", "") or "").strip()
     managed: bool = getattr(args, "managed", False)
+    machine_serial = os.environ.get("MACHINE_SERIAL", "").strip()
     machine_id = (getattr(args, "machine_id", None) or os.environ.get("MACHINE_ID", "") or "").strip()
     if not machine_id:
         # Temporary compatibility fallback until ADS Installer supplies MACHINE_ID.
@@ -249,12 +275,20 @@ def _run_install(args) -> None:
         sys.exit(1)
 
     # Filter out clients whose agent is not installed on this machine.
-    # Skipped when --file is explicitly provided (the caller knows where to write), and
-    # when --managed is requested: a managed install writes to a system-wide path that
-    # does not depend on the invoking account's home directory.
-    if not getattr(args, "file", None) and not managed:
-        skipped = [c for c in clients if not _is_client_installed(c)]
-        clients = [c for c in clients if _is_client_installed(c)]
+    # Skipped when --file is explicitly provided (the caller knows where to write).
+    # A managed install writes to a system-wide path, so it is only checked when
+    # --check-installed is set; the agent then counts as installed when any user's home
+    # has it. Non-managed installs always check the invoking user's home.
+    if not getattr(args, "file", None) and (not managed or getattr(args, "check_installed", False)):
+        home_dirs = [home for home, _username in get_readable_home_directories(all_users=managed)]
+        if not home_dirs:
+            # get_readable_home_directories swallows enumeration errors and returns [],
+            # which would otherwise skip every client and silently install nothing.
+            rich.print("[bold red]Error:[/bold red] Could not find any readable user home directory.")
+            sys.exit(1)
+        installed_by_client = {c: _is_client_installed(c, home_dirs) for c in clients}
+        skipped = [c for c in clients if not installed_by_client[c]]
+        clients = [c for c in clients if installed_by_client[c]]
         for c in skipped:
             rich.print(
                 f"[yellow]Warning:[/yellow] {_client_label(c)} is not installed on this machine. "
@@ -278,21 +312,32 @@ def _run_install(args) -> None:
 
     minted = False
     first_installed_client: str | None = None
-
+    failed_clients: list[str] = []
     try:
         for c in clients:
-            _install_hooks(
-                c,
-                _hook_client_name(c),
-                push_key,
-                url,
-                _config_path(c, getattr(args, "file", None), managed=managed),
-                scope,
-                _client_label(c),
-                minted,
-                tenant_id,
-                machine_id,
-            )
+            try:
+                _install_hooks(
+                    c,
+                    _hook_client_name(c),
+                    push_key,
+                    url,
+                    _config_path(c, getattr(args, "file", None), managed=managed),
+                    scope,
+                    _client_label(c),
+                    minted,
+                    tenant_id,
+                    machine_id,
+                    machine_serial,
+                )
+            except (SystemExit, Exception) as e:
+                # With client=all one client's failure must not block the others.
+                if client != "all":
+                    raise
+                failed_clients.append(c)
+                if not isinstance(e, SystemExit):
+                    rich.print(f"[bold red]Error:[/bold red] {_client_label(c)}: {e}")
+                rich.print(f"[yellow]Warning:[/yellow] Installation failed for {_client_label(c)}; continuing.")
+                continue
             if first_installed_client is None:
                 first_installed_client = _hook_client_name(c)
     except (SystemExit, KeyboardInterrupt):
@@ -313,8 +358,14 @@ def _run_install(args) -> None:
             first_installed_client,
             machine_id,
             discovery_scope=DiscoveryScope.SERVERS,
-            max_retries=2,
+            retry_policy=INSTALL_RETRY_POLICY,
+            machine_serial=machine_serial,
         )
+
+    if failed_clients:
+        names = ", ".join(_client_label(c) for c in failed_clients)
+        rich.print(f"[bold red]Error:[/bold red] Installation failed for: {names}.")
+        sys.exit(1)
 
 
 def _run_with_timeout(
@@ -368,6 +419,7 @@ def _run_discover(args) -> int:
     if not hook_client:
         rich.print("[bold red]Error:[/bold red] --client is required to run guard discovery.")
         return 1
+    machine_serial = os.environ.get("MACHINE_SERIAL", "").strip()
     machine_id = (os.environ.get("MACHINE_ID", "") or "").strip()
     if not machine_id:
         rich.print("[bold red]Error:[/bold red] MACHINE_ID is required to run guard discovery.")
@@ -394,6 +446,7 @@ def _run_discover(args) -> int:
         url,
         hook_client,
         machine_id,
+        machine_serial=machine_serial,
         event_name="sessionStartServerDiscovery",
         session_marker=session_id or "session-start-server-discovery",
         target_folders=target_folders,
@@ -484,9 +537,12 @@ def _write_client_config(
         raise ValueError(f"Unknown client: {client}")
     if client == "codex" and _is_codex_requirements_toml(config_path):
         assert prepared_content is not None
-        return _write_codex_managed_config(prepared_content, config_path)
+        changed = _write_codex_managed_config(prepared_content, config_path)
+        _remove_legacy_guard_backup(config_path)
+        return changed
     assert prepared_config is not None
-    changed = _write_config(prepared_config, config_path, preserved)
+    changed = _write_config(prepared_config, config_path, preserved, client=client)
+    _remove_legacy_guard_backup(config_path)
     if _is_copilot_policy_path(config_path):
         # Applied whether or not the config changed: an already-present file may have
         # been written with a permissive umask, in which case Copilot ignores it.
@@ -538,8 +594,12 @@ def _install_hooks(
     minted: bool,
     tenant_id: str,
     machine_id: str,
+    machine_serial: str = "",
 ) -> None:
     """Install hook scripts and client configuration after a push key is supplied."""
+    if client == "codex" and _is_codex_requirements_toml(config_path):
+        # Check the edit before any hook script is written.
+        _preflight_codex_requirements(config_path)
     existing_info = _detect_existing_install(client, config_path)
     old_push_key = existing_info.get("auth_value", "") if existing_info else ""
     push_key_changed = bool(old_push_key) and old_push_key != push_key
@@ -572,6 +632,7 @@ def _install_hooks(
         hook_client,
         tenant_id=tenant_id,
         machine_id=machine_id,
+        machine_serial=machine_serial,
     )
     discover_command = None
     if install_discovery:
@@ -583,6 +644,7 @@ def _install_hooks(
             agent_scan_command=agent_scan_command,
             tenant_id=tenant_id,
             machine_id=machine_id,
+            machine_serial=machine_serial,
             hook_client=hook_client,
         )
     prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
@@ -595,7 +657,7 @@ def _install_hooks(
     first_install = not main_script.existed
     config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
 
-    if not _send_test_event(
+    test_event = _send_test_event(
         push_key,
         url,
         hook_client,
@@ -609,13 +671,20 @@ def _install_hooks(
         discover_current_checksum=discover_script.current_checksum if discover_script else None,
         discover_new_checksum=discover_script.new_checksum if discover_script else None,
         machine_id=machine_id,
-    ):
+        machine_serial=machine_serial,
+    )
+    if test_event.status == "rejected":
         if not main_script.existed:
             dest_path.unlink(missing_ok=True)
         if not discover_script_existed:
             discover_script_path.unlink(missing_ok=True)
         rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
         raise SystemExit(1)
+    if test_event.status == "unconfirmed":
+        _warn_test_event_unconfirmed(test_event)
+        _report_test_event_unconfirmed(
+            push_key, url, hook_client, machine_id, test_event, machine_serial=machine_serial
+        )
 
     config_written = _write_client_config(client, config_path, prepared_config, prepared_content, preserved)
     if not install_discovery and discover_script_path.exists():
@@ -631,6 +700,39 @@ def _install_hooks(
     rich.print(f"   Remote URL: [dim]{url}[/dim]")
     rich.print(f"   Push Key:   [yellow]{_mask_key(push_key)}[/yellow]")
     rich.print()
+
+
+def _warn_test_event_unconfirmed(result: _TestEventResult) -> None:
+    rich.print(
+        f"[yellow]Warning:[/yellow] Test event was not confirmed after {result.attempts} "
+        f"attempt{'s' if result.attempts != 1 else ''} over {result.elapsed:.0f}s. "
+        f"Last error: [bold]{result.error}[/bold] \u2014 {_describe_error(result.error)}. "
+        "Continuing the installation; hooks will report once the service is reachable."
+    )
+
+
+def _report_test_event_unconfirmed(
+    push_key: str,
+    url: str,
+    hook_client: str,
+    machine_id: str,
+    result: _TestEventResult,
+    *,
+    machine_serial: str = "",
+) -> None:
+    """Best-effort telemetry: the install continued although the test event never got through."""
+    payload_dict = {
+        "hook_event_name": "hooksConfiguredTestEventUnconfirmed",
+        HOOK_CLIENTS[hook_client].session_field: "hooks-setup",
+        "test_event_attempts": result.attempts,
+        "test_event_elapsed_ms": round(result.elapsed * 1000),
+        "test_event_last_error": result.error,
+    }
+    ok, detail = send_hook_event(
+        url, hook_client, push_key, json.dumps(payload_dict), machine_id, machine_serial=machine_serial
+    )
+    if not ok:
+        rich.print(f"[dim]Could not report the unconfirmed test event: {detail}[/dim]")
 
 
 def _prepare_claude_config(
@@ -681,9 +783,9 @@ def _prepare_claude_config(
     return settings, diff, preserved
 
 
-def _write_config(config: dict, path: Path, preserved: int) -> bool:
-    """Write a client config to disk. Returns True if the file changed."""
-    if not _write_json_if_changed(path, config):
+def _write_config(config: dict, path: Path, preserved: int, *, client: str) -> bool:
+    """Write *client*'s JSON config to disk. Returns True if the file changed."""
+    if not _write_json_if_changed(path, config, client=client):
         return False
     rich.print(f"[green]\u2713[/green]  Written [dim]{path}[/dim]{_preserved_note(preserved)}")
     return True
@@ -823,43 +925,463 @@ def _codex_managed_dirs(config_path: Path) -> tuple[str, str]:
     return managed_dir, windows_managed_dir
 
 
+class CodexRequirementsError(ValueError):
+    """requirements.toml can't be edited safely. The file is left untouched."""
+
+
+def _codex_guard_hook_blocks(command: str, *, discover_command: str | None = None) -> list[str]:
+    """Guard's ``[[hooks.<Event>]]`` groups, one newline-terminated block each."""
+    blocks = [
+        f'[[hooks.{event}]]\n[[hooks.{event}.hooks]]\ntype = "command"\ncommand = {toml_escape(command)}\n'
+        for event in CODEX_HOOK_EVENTS
+    ]
+    if discover_command:
+        blocks.append(
+            "[[hooks.SessionStart]]\n"
+            "[[hooks.SessionStart.hooks]]\n"
+            'type = "command"\n'
+            f"command = {toml_escape(discover_command)}\n"
+            "async = true\n"
+        )
+    return blocks
+
+
+def _codex_hooks_dir_lines(keys_and_values: Iterable[tuple[str, str]]) -> str:
+    return "".join(f"{key} = {toml_escape(value)}\n" for key, value in keys_and_values)
+
+
 def _render_codex_requirements_toml(
     command: str,
     config_path: Path,
     *,
     discover_command: str | None = None,
 ) -> str:
-    """Generate the requirements.toml content for managed Codex hooks."""
+    """Generate the requirements.toml content for managed Codex hooks (used when no file exists yet)."""
     managed_dir, windows_managed_dir = _codex_managed_dirs(config_path)
-    lines = [
-        "[features]",
-        "hooks = true",
-        "",
-        "[hooks]",
-        f"managed_dir = {toml_escape(managed_dir)}",
-        f"windows_managed_dir = {toml_escape(windows_managed_dir)}",
-        "",
+    chunks = [
+        "[features]\nhooks = true\n",
+        "[hooks]\n"
+        + _codex_hooks_dir_lines([("managed_dir", managed_dir), ("windows_managed_dir", windows_managed_dir)]),
+        *_codex_guard_hook_blocks(command, discover_command=discover_command),
     ]
-    for event in CODEX_HOOK_EVENTS:
-        lines.append(f"[[hooks.{event}]]")
-        lines.append(f"[[hooks.{event}.hooks]]")
-        lines.append('type = "command"')
-        lines.append(f"command = {toml_escape(command)}")
-        lines.append("")
-    if discover_command:
-        lines.append("[[hooks.SessionStart]]")
-        lines.append("[[hooks.SessionStart.hooks]]")
-        lines.append('type = "command"')
-        lines.append(f"command = {toml_escape(discover_command)}")
-        lines.append("async = true")
-        lines.append("")
-    content = "\n".join(lines).rstrip("\n") + "\n"
+    content = "\n".join(chunks)
     if tomllib is not None:  # pragma: no branch - available on supported installs
         try:
             tomllib.loads(content)
         except ValueError as exc:
             raise ValueError("Generated requirements.toml is invalid") from exc
     return content
+
+
+# --- In-place editing of requirements.toml ----------------------------------
+#
+# requirements.toml is the admin's system-wide Codex policy file, so Guard edits
+# it in place: lines it does not own are kept byte for byte (comments, blank
+# lines, key order, quoting, line endings). There is no TOML round-trip library
+# in our dependencies, so the edit is line based: the file is cut into sections
+# at table headers, and only these forms are recognised:
+#
+# - ``[[hooks.<Event>]]`` groups followed by ``[[hooks.<Event>.hooks]]`` entries.
+#   An entry is Guard's when its ``command`` matches _is_agent_scan_command.
+#   A group whose entries are all Guard's is removed whole; from a mixed group
+#   only Guard's entries are removed.
+# - ``managed_dir`` / ``windows_managed_dir`` lines under a ``[hooks]`` header.
+# - a ``hooks`` line under a ``[features]`` header.
+#
+# Anything else (inline tables/arrays, quoted keys, dotted keys) is left alone.
+# Every edit is checked against tomllib: the old file must parse, and the new
+# file must parse to exactly the old data plus/minus Guard's entries. If the
+# line model got the layout wrong, the edit is refused instead of written.
+
+_GUARD_DIR_KEYS = ("managed_dir", "windows_managed_dir")
+_TOML_HEADER_RE = re.compile(r"^\s*(\[\[?)\s*([^\[\]]+?)\s*(\]\]?)\s*(?:#.*)?$")
+_TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+class _TomlHeader(NamedTuple):
+    line: int
+    is_array: bool
+    # Dotted path of bare keys, or None when the header uses quoted keys.
+    path: tuple[str, ...] | None
+
+
+def _split_toml_lines(text: str) -> list[str]:
+    """Split on LF only (TOML's newline), keeping each line's ending (``\\n`` or ``\\r\\n``)."""
+    parts = text.split("\n")
+    lines = [part + "\n" for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
+def _toml_headers(lines: list[str]) -> list[_TomlHeader]:
+    headers = []
+    for index, line in enumerate(lines):
+        m = _TOML_HEADER_RE.match(line)
+        if not m or len(m.group(1)) != len(m.group(3)):
+            continue
+        parts = tuple(part.strip() for part in m.group(2).split("."))
+        path = parts if all(_TOML_BARE_KEY_RE.match(part) for part in parts) else None
+        headers.append(_TomlHeader(index, len(m.group(1)) == 2, path))
+    return headers
+
+
+def _is_toml_content_line(line: str) -> bool:
+    stripped = line.strip()
+    return bool(stripped) and not stripped.startswith("#")
+
+
+def _last_toml_content_line(lines: list[str], start: int, end: int) -> int:
+    """Index of the last key/value line in ``lines[start:end]``, or ``start`` (the header)."""
+    for index in range(end - 1, start, -1):
+        if _is_toml_content_line(lines[index]):
+            return index
+    return start
+
+
+def _find_toml_table(lines: list[str], path: tuple[str, ...]) -> tuple[int, int] | None:
+    """(header line, section end) of the standard table ``[path]``, if it has a header."""
+    headers = _toml_headers(lines)
+    for n, header in enumerate(headers):
+        if not header.is_array and header.path == path:
+            end = headers[n + 1].line if n + 1 < len(headers) else len(lines)
+            return header.line, end
+    return None
+
+
+def _find_toml_key_line(lines: list[str], start: int, end: int, key: str) -> int | None:
+    key_re = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    for index in range(start + 1, end):
+        if key_re.match(lines[index]):
+            return index
+    return None
+
+
+def _toml_key_line_value(line: str, key: str) -> object:
+    """Value of a single-line ``key = value`` (any quoting, unescaped), or None."""
+    try:
+        return tomllib.loads(line.strip()).get(key)
+    except ValueError:
+        return None
+
+
+def _delete_toml_lines(lines: list[str], start: int, end: int) -> None:
+    """Delete ``lines[start:end + 1]`` with one adjacent blank separator.
+
+    Guard appends each block after a blank line, so dropping the blank line in
+    front of a removed block (when the block is followed by a blank line or the
+    end of the file) undoes an install exactly.
+    """
+    after = end + 1
+    next_blank_or_eof = after >= len(lines) or not lines[after].strip()
+    if start > 0 and not lines[start - 1].strip() and next_blank_or_eof:
+        start -= 1
+    elif start == 0 and after < len(lines) and not lines[after].strip():
+        end += 1
+    del lines[start : end + 1]
+
+
+def _is_guard_hook_body(body: list[str]) -> bool:
+    try:
+        entry = tomllib.loads("".join(body))
+    except ValueError:
+        return False
+    command = entry.get("command")
+    return isinstance(command, str) and _is_agent_scan_command(command)
+
+
+def _remove_guard_hook_groups(lines: list[str]) -> list[tuple]:
+    """Delete Guard's hook groups/entries from ``lines`` in place.
+
+    Returns what was removed, as ``("group", event, group_index)`` and
+    ``("entry", event, group_index, entry_index)`` records, indexed the way
+    tomllib sees the arrays, so the edit can be checked against the parsed data.
+    """
+    headers = _toml_headers(lines)
+    spans: list[tuple[int, int]] = []
+    removals: list[tuple] = []
+    group_counts: dict[str, int] = {}
+    n = 0
+    while n < len(headers):
+        header = headers[n]
+        path = header.path
+        if not (header.is_array and path is not None and len(path) == 2 and path[0] == "hooks"):
+            n += 1
+            continue
+        event = path[1]
+        group_index = group_counts.get(event, 0)
+        group_counts[event] = group_index + 1
+        entries: list[int] = []
+        unknown_layout = False
+        m = n + 1
+        while m < len(headers):
+            sub = headers[m]
+            if sub.path is None or len(sub.path) <= 2 or sub.path[:2] != ("hooks", event):
+                break
+            if sub.is_array and sub.path == ("hooks", event, "hooks"):
+                entries.append(m)
+            else:
+                unknown_layout = True
+            m += 1
+        group_end = headers[m].line if m < len(headers) else len(lines)
+        n = m
+        if unknown_layout or not entries:
+            continue
+
+        def _entry_span(k: int) -> tuple[int, int]:
+            start = headers[k].line
+            end = headers[k + 1].line if k + 1 < len(headers) else len(lines)
+            return start, end
+
+        is_guard = [_is_guard_hook_body(lines[s + 1 : e]) for s, e in map(_entry_span, entries)]
+        if all(is_guard):
+            spans.append((header.line, _last_toml_content_line(lines, header.line, group_end)))
+            removals.append(("group", event, group_index))
+            continue
+        for entry_index, (k, guard) in enumerate(zip(entries, is_guard, strict=True)):
+            if guard:
+                start, end = _entry_span(k)
+                spans.append((start, _last_toml_content_line(lines, start, end)))
+                removals.append(("entry", event, group_index, entry_index))
+    for start, end in sorted(spans, reverse=True):
+        _delete_toml_lines(lines, start, end)
+    return removals
+
+
+def _load_codex_requirements(text: str) -> dict:
+    if tomllib is None:  # pragma: no cover - tomli is a dependency on Python 3.10
+        raise CodexRequirementsError("cannot check TOML on this Python (tomllib/tomli missing); not modifying it")
+    try:
+        data = tomllib.loads(text)
+    except ValueError as exc:
+        raise CodexRequirementsError(
+            f"not valid TOML ({exc}); Agent Guard will not modify it. Fix the file and run the command again."
+        ) from exc
+    for table in ("features", "hooks"):
+        if not isinstance(data.get(table, {}), dict):
+            raise CodexRequirementsError(f"'{table}' is not a table; Agent Guard will not modify the file")
+    return data
+
+
+def _apply_guard_removals(data: dict, removals: list[tuple]) -> dict:
+    """The parsed data with the recorded Guard groups/entries removed."""
+    result = copy.deepcopy(data)
+    dropped_groups = {(r[1], r[2]) for r in removals if r[0] == "group"}
+    dropped_entries = {(r[1], r[2], r[3]) for r in removals if r[0] == "entry"}
+    try:
+        hooks = result.get("hooks", {})
+        for event in {r[1] for r in removals}:
+            kept = []
+            for group_index, group in enumerate(hooks[event]):
+                if (event, group_index) in dropped_groups:
+                    continue
+                if any((event, group_index, i) in dropped_entries for i in range(len(group.get("hooks", [])))):
+                    group["hooks"] = [
+                        entry
+                        for i, entry in enumerate(group["hooks"])
+                        if (event, group_index, i) not in dropped_entries
+                    ]
+                kept.append(group)
+            hooks[event] = kept
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise CodexRequirementsError("layout not understood; Agent Guard will not modify it") from exc
+    if _contains_guard_command(result.get("hooks")):
+        # A Guard hook in a layout the line editor skips: re-install would duplicate it
+        # and uninstall would leave it behind.
+        raise CodexRequirementsError(
+            "Agent Guard hooks found in a layout Agent Guard cannot edit; remove them manually"
+        )
+    return result
+
+
+def _contains_guard_command(value: object) -> bool:
+    if isinstance(value, str):
+        return _is_agent_scan_command(value)
+    if isinstance(value, dict):
+        return any(_contains_guard_command(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_guard_command(item) for item in value)
+    return False
+
+
+def _prune_empty(value: object) -> object:
+    """Drop empty tables/arrays, which a removed header may or may not leave behind."""
+    if isinstance(value, dict):
+        pruned = {key: _prune_empty(item) for key, item in value.items()}
+        return {key: item for key, item in pruned.items() if item != {} and item != []}
+    if isinstance(value, list):
+        return [_prune_empty(item) for item in value]
+    return value
+
+
+def _check_codex_requirements_edit(new_text: str, expected: dict) -> None:
+    """Refuse the edit unless ``new_text`` parses to exactly ``expected``."""
+    try:
+        actual = tomllib.loads(new_text)
+    except ValueError as exc:
+        raise CodexRequirementsError(
+            f"layout not supported (the edit would produce invalid TOML: {exc}); "
+            "Agent Guard will not modify it. Edit the file manually."
+        ) from exc
+    if _prune_empty(actual) != _prune_empty(expected):
+        raise CodexRequirementsError(
+            "layout not supported (the edit would change entries Agent Guard does not own); "
+            "Agent Guard will not modify it. Edit the file manually."
+        )
+
+
+def _strip_guard_from_codex_requirements(text: str, config_path: Path = CODEX_MANAGED_HOOKS_PATH) -> str:
+    """Return requirements.toml ``text`` with every Agent Guard entry removed.
+
+    Pure (no I/O). Removes Guard's hook groups/entries, then, if it removed any,
+    ``managed_dir`` / ``windows_managed_dir`` under ``[hooks]`` when they equal the
+    values Guard writes for ``config_path`` and no other hooks remain, then a ``[hooks]``
+    header left with nothing under it. Everything else is kept byte for byte.
+
+    ``[features] hooks = true`` is kept: the admin may have set it before Guard
+    did, and Guard cannot tell. Leaving it on is harmless with no hooks.
+
+    Raises CodexRequirementsError if ``text`` is not valid TOML or the edit
+    cannot be verified; the caller must then leave the file untouched.
+    """
+    data = _load_codex_requirements(text)
+    lines = _split_toml_lines(text)
+    removals = _remove_guard_hook_groups(lines)
+    expected = _apply_guard_removals(data, removals)
+
+    hooks = expected.get("hooks")
+    other_hooks = isinstance(hooks, dict) and any(
+        key not in _GUARD_DIR_KEYS and value not in ({}, []) for key, value in hooks.items()
+    )
+    # Only together with Guard's hooks: a file without them never had Guard's dirs added.
+    if removals and isinstance(hooks, dict) and not other_hooks:
+        table = _find_toml_table(lines, ("hooks",))
+        if table is not None:
+            header, end = table
+            removed_any = False
+            for key, guard_value in zip(_GUARD_DIR_KEYS, _codex_managed_dirs(config_path), strict=True):
+                index = _find_toml_key_line(lines, header, end, key)
+                if index is not None and _toml_key_line_value(lines[index], key) == guard_value == hooks.get(key):
+                    del lines[index]
+                    end -= 1
+                    del hooks[key]
+                    removed_any = True
+            if removed_any and not any(line.strip() for line in lines[header + 1 : end]):
+                _delete_toml_lines(lines, header, header)
+
+    new_text = "".join(lines)
+    if new_text != text:
+        _check_codex_requirements_edit(new_text, expected)
+    return new_text
+
+
+def _merge_guard_into_codex_requirements(
+    text: str,
+    command: str,
+    config_path: Path,
+    *,
+    discover_command: str | None = None,
+) -> tuple[str, list[str]]:
+    """Return (``text`` with Guard's entries merged in, warnings). Pure (no I/O).
+
+    Existing Guard hooks are removed and Guard's blocks appended at the end, in
+    the same shape as _render_codex_requirements_toml. ``[features] hooks`` is
+    set to true and Guard's ``managed_dir`` / ``windows_managed_dir`` are added
+    when missing. Nothing else changes.
+
+    If the file already sets ``managed_dir`` or ``windows_managed_dir``, both are
+    left exactly as they are (none added, none changed), even when they differ
+    from Guard's: Codex only uses it to label where managed
+    hooks come from (hook IDs and messages), not to find or run them, and
+    Guard's hook commands use absolute script paths. Codex allows a single
+    value per platform across all requirement sources, so Guard has no
+    reason to replace the admin's value.
+
+    Raises CodexRequirementsError, before anything is written, if ``text`` is
+    not valid TOML or if the edit cannot be verified.
+    """
+    data = _load_codex_requirements(text)
+    features: dict = data.get("features", {})
+    hooks_data: dict = data.get("hooks", {})
+    guard_dirs = dict(zip(_GUARD_DIR_KEYS, _codex_managed_dirs(config_path), strict=True))
+
+    lines = _split_toml_lines(text)
+    newline = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
+    expected = _apply_guard_removals(data, _remove_guard_hook_groups(lines))
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += newline
+    warnings: list[str] = []
+    appended: list[str] = []
+
+    if features.get("hooks") is not True:
+        table = _find_toml_table(lines, ("features",))
+        index = _find_toml_key_line(lines, *table, "hooks") if table is not None else None
+        if "hooks" in features:
+            warnings.append(
+                f"[features] hooks was {features['hooks']!r}; setting it to true, which Codex needs "
+                "to run Agent Guard's managed hooks. Uninstall leaves it set to true."
+            )
+        if index is not None:
+            line = lines[index]
+            indent = line[: len(line) - len(line.lstrip())]
+            ending = "\r\n" if line.endswith("\r\n") else "\n"
+            lines[index] = f"{indent}hooks = true{ending}"
+        elif table is not None:
+            position = _last_toml_content_line(lines, *table) + 1
+            lines.insert(position, f"hooks = true{newline}")
+        else:
+            appended.append("[features]\nhooks = true\n")
+        expected.setdefault("features", {})["hooks"] = True
+
+    # Guard adds its directory keys only to a file that sets neither; an admin's
+    # value for either platform means the admin owns this setting.
+    has_dirs = any(key in hooks_data for key in _GUARD_DIR_KEYS)
+    missing_dirs = [] if has_dirs else list(guard_dirs.items())
+    if missing_dirs:
+        table = _find_toml_table(lines, ("hooks",))
+        if table is not None:
+            position = _last_toml_content_line(lines, *table) + 1
+            lines[position:position] = _split_toml_lines(_codex_hooks_dir_lines(missing_dirs).replace("\n", newline))
+        else:
+            appended.append("[hooks]\n" + _codex_hooks_dir_lines(missing_dirs))
+        expected.setdefault("hooks", {}).update(missing_dirs)
+
+    blocks = _codex_guard_hook_blocks(command, discover_command=discover_command)
+    for block in blocks:
+        for event, groups in tomllib.loads(block)["hooks"].items():
+            expected.setdefault("hooks", {}).setdefault(event, []).extend(groups)
+    appended.extend(blocks)
+
+    base = "".join(lines)
+    tail = "\n".join(appended)
+    if base:
+        tail = "\n" + tail
+    new_text = base + tail.replace("\n", newline)
+    _check_codex_requirements_edit(new_text, expected)
+    return new_text, warnings
+
+
+def _read_codex_requirements_text(path: Path) -> str:
+    """Read requirements.toml with its line endings exactly as on disk.
+
+    It is written back with ``newline=""`` (no translation), so untouched lines keep
+    their bytes on every platform, including LF-only or mixed files on Windows.
+    """
+    try:
+        return path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CodexRequirementsError(f"{path}: not valid UTF-8; Agent Guard will not modify it") from exc
+
+
+def _preflight_codex_requirements(path: Path) -> None:
+    """Fail before any file is written if Guard cannot merge into an existing requirements.toml."""
+    if not path.exists():
+        return
+    text = _read_codex_requirements_text(path)
+    try:
+        _merge_guard_into_codex_requirements(text, "", path)
+    except CodexRequirementsError as exc:
+        raise CodexRequirementsError(f"{path}: {exc}") from exc
 
 
 def _prepare_codex_managed_config(
@@ -872,26 +1394,32 @@ def _prepare_codex_managed_config(
 
     Returns (new_content, hooks_diff).
 
-    Unlike the JSON clients, this rewrites requirements.toml wholesale: the
-    content is rendered from scratch, so any hooks, features or tables we do
-    not own are dropped on write. They are also absent from the returned diff,
-    because _parse_codex_requirements_toml only reports commands that match
-    _is_agent_scan_command. _write_codex_managed_config backs the old file up
-    first, so the discarded entries stay recoverable on disk.
-    """
-    new_content = _render_codex_requirements_toml(
-        command,
-        path,
-        discover_command=discover_command,
-    )
+    A missing file is rendered from scratch. An existing file is edited in
+    place (see _merge_guard_into_codex_requirements): admin policy, comments,
+    other tables and non-Guard hooks are kept byte for byte, so the content is
+    unchanged when Guard is already installed with the same commands. The diff
+    only covers Guard commands, because _parse_codex_requirements_toml only
+    reports commands that match _is_agent_scan_command.
 
+    Raises CodexRequirementsError if the existing file is not valid TOML or
+    cannot be edited safely.
+    """
     old_events: list[str] = []
     old_guard_command: str | None = None
     old_discover_command: str | None = None
     if path.exists():
-        old_text = path.read_text()
-        with contextlib.suppress(UnicodeDecodeError, ValueError):
-            old_events, old_guard_command, old_discover_command = _parse_codex_requirements_toml(old_text)
+        old_text = _read_codex_requirements_text(path)
+        try:
+            new_content, warnings = _merge_guard_into_codex_requirements(
+                old_text, command, path, discover_command=discover_command
+            )
+        except CodexRequirementsError as exc:
+            raise CodexRequirementsError(f"{path}: {exc}") from exc
+        for warning in warnings:
+            rich.print(f"[yellow]Warning:[/yellow] {path}: {warning}")
+        old_events, old_guard_command, old_discover_command = _parse_codex_requirements_toml(old_text)
+    else:
+        new_content = _render_codex_requirements_toml(command, path, discover_command=discover_command)
 
     old_event_set = set(old_events)
     new_event_set = set(CODEX_HOOK_EVENTS)
@@ -926,14 +1454,20 @@ def _prepare_codex_managed_config(
 
 def _write_codex_managed_config(content: str, path: Path) -> bool:
     """Write Codex managed TOML to disk. Returns True if file changed."""
-    if path.exists() and path.read_text() == content:
+    if path.exists() and _read_codex_requirements_text(path) == content:
         return False
     if path.exists():
-        _backup_file(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+        _backup_file(path, lambda: _codex_requirements_without_guard(path), newline="")
+    _atomic_write_text(path, content, newline="")
     rich.print(f"[green]✓[/green]  Written [dim]{path}[/dim]")
     return True
+
+
+def _codex_requirements_without_guard(path: Path) -> str | None:
+    """requirements.toml at ``path`` without Agent Guard, or None if it has no Guard entries."""
+    text = _read_codex_requirements_text(path)
+    stripped = _strip_guard_from_codex_requirements(text, path)
+    return None if stripped == text else stripped
 
 
 def _is_discover_hook_command(command: str) -> bool:
@@ -981,17 +1515,35 @@ def _detect_codex_managed_install(path: Path) -> dict | None:
 
 
 def _uninstall_codex_managed(path: Path) -> None:
+    """Remove Agent Guard's entries from requirements.toml at ``path``, then Guard's backups of it.
+
+    The backups are removed only once the file is free of Guard entries; if
+    anything raises first, they are left in place.
+    """
     if not path.exists():
         rich.print("[dim]No requirements.toml found. Nothing to uninstall.[/dim]")
+        _remove_guard_backups(path)
         return
-    text = path.read_text()
-    events, _, _ = _parse_codex_requirements_toml(text)
-    if not events:
+    text = _read_codex_requirements_text(path)
+    # Any line, so hooks written with another TOML string form are found too.
+    if not any(_is_agent_scan_command(line) for line in text.splitlines()):
         rich.print("[dim]No Agent Guard hooks found.[/dim]")
+        _remove_guard_backups(path)
         return
-    _backup_file(path)
-    path.unlink()
-    rich.print(f"[green]✓[/green]  Removed {len(events)} Agent Guard hook(s) (deleted [dim]{path}[/dim])")
+    events, _, _ = _parse_codex_requirements_toml(text)
+    try:
+        new_text = _strip_guard_from_codex_requirements(text, path)
+    except CodexRequirementsError as exc:
+        raise CodexRequirementsError(f"{path}: {exc}") from exc
+    if new_text == text:
+        raise CodexRequirementsError(
+            f"{path}: Agent Guard hooks found in a layout Agent Guard cannot edit; remove them manually."
+        )
+    # Edited in place and never deleted: the file is the admin's Codex policy, not ours.
+    _atomic_write_text(path, new_text, newline="")
+    removed = f"{len(events)} Agent Guard hook(s)" if events else "Agent Guard hooks"
+    rich.print(f"[green]✓[/green]  Removed {removed} from [dim]{path}[/dim]")
+    _remove_guard_backups(path)
 
 
 # ---------------------------------------------------------------------------
@@ -1028,11 +1580,7 @@ def _uninstall_single_client(client: str, args, managed: bool) -> None:
     if client == "codex" and _is_codex_requirements_toml(config_path):
         _uninstall_codex_managed(config_path)
     elif client in ALL_CLIENTS:
-        _uninstall_hooks(
-            config_path,
-            filter_hooks=_uninstall_filter_for(client),
-            prune_empty_hooks=client != "cursor",
-        )
+        _uninstall_hooks(config_path, client=client)
 
     # Remove hook script
     _remove_hook_script(client, config_path)
@@ -1051,35 +1599,71 @@ def _try_revoke_push_key(info: dict, label: str) -> None:
     )
 
 
-def _uninstall_hooks(
-    path: Path,
-    *,
-    filter_hooks: Callable[[dict], dict],
-    prune_empty_hooks: bool,
-) -> None:
+def _strip_guard_from_json_config(data: dict, client: str) -> dict:
+    """Return *client*'s JSON config ``data`` with every Agent Guard hook removed.
+
+    Pure: ``data`` is not modified. This is exactly what uninstall leaves in the
+    file, and what the install backup holds when the file already has Guard hooks.
+    Hook entries are matched by _uninstall_filter_for(client). When nothing is
+    removed, the result equals ``data``. When the last hook goes,
+    the ``hooks`` key is dropped, except for Cursor, which keeps ``"hooks": {}``.
+
+    Raises AttributeError/TypeError if ``hooks`` or its entries have an
+    unexpected shape.
+    """
+    hooks = data.get("hooks", {})
+    filtered = _uninstall_filter_for(client)(hooks)
+    if _count_hook_groups(filtered) == _count_hook_groups(hooks):
+        # The filters only drop whole entries (and the event lists they empty),
+        # so equal counts mean no Guard hook was found.
+        return data
+    result = dict(data)
+    if filtered or client == "cursor":
+        result["hooks"] = filtered
+    else:
+        del result["hooks"]
+    return result
+
+
+def _count_hook_groups(hooks: dict) -> int:
+    return sum(len(groups) for groups in hooks.values())
+
+
+def _uninstall_hooks(path: Path, *, client: str) -> None:
+    """Remove Agent Guard's hooks from *client*'s JSON config at ``path``, then Guard's backups of it.
+
+    If removing Guard's hooks leaves nothing but the scaffolding install adds
+    (_GUARD_JSON_SCAFFOLDING, e.g. ``{}`` or Cursor's/Copilot's ``{"version": 1}``), the
+    file is deleted instead of rewritten, so a file that install created does
+    not outlive Guard. The rule looks only at the content: a file that held
+    just ``{}`` before install is deleted too, which every agent treats the
+    same as no file. A symlinked config is always rewritten, never deleted.
+
+    The backups are removed only once the file is free of Guard hooks; if
+    anything raises first (e.g. invalid JSON), they are left in place.
+    """
     if not path.exists():
         rich.print(f"[dim]No {path.name} found. Nothing to uninstall.[/dim]")
+        _remove_guard_backups(path)
         return
 
     data = _read_json_or_empty(path)
-    hooks = data.get("hooks", {})
-
-    total_before = sum(len(groups) for groups in hooks.values())
-    filtered = filter_hooks(hooks)
-    total_after = sum(len(groups) for groups in filtered.values())
-
-    removed = total_before - total_after
-    if removed == 0:
+    stripped = _strip_guard_from_json_config(data, client)
+    if stripped == data:
         rich.print("[dim]No Agent Guard hooks found.[/dim]")
+        _remove_guard_backups(path)
         return
 
-    _backup_file(path)
-    if filtered or not prune_empty_hooks:
-        data["hooks"] = filtered
+    total_after = _count_hook_groups(stripped.get("hooks", {}))
+    removed = _count_hook_groups(data.get("hooks", {})) - total_after
+    if stripped in _GUARD_JSON_SCAFFOLDING.get(client, ()) and not path.is_symlink():
+        path.unlink()
+        rich.print(f"[green]\u2713[/green]  Removed {removed} Agent Guard hook(s)")
+        rich.print(f"[dim]Removed {path} (nothing else was left in it)[/dim]")
     else:
-        data.pop("hooks", None)
-    _write_json(path, data)
-    rich.print(f"[green]\u2713[/green]  Removed {removed} Agent Guard hook(s){_preserved_note(total_after)}")
+        _write_json(path, stripped)
+        rich.print(f"[green]\u2713[/green]  Removed {removed} Agent Guard hook(s){_preserved_note(total_after)}")
+    _remove_guard_backups(path)
 
 
 # ---------------------------------------------------------------------------
@@ -1275,6 +1859,14 @@ def _discover_logged_connectors() -> dict[str, list[dict]]:
     return logged_servers
 
 
+def _has_success_payload(stdout: str | None) -> bool:
+    try:
+        body = json.loads(stdout or "")
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("success") is True
+
+
 def _invoke_hook_script(
     script_path: Path,
     hook_client: str,
@@ -1283,7 +1875,16 @@ def _invoke_hook_script(
     payload: str,
     *,
     machine_id: str,
+    require_success_payload: bool = False,
+    timeout: float = _HOOK_SCRIPT_TIMEOUT_SECONDS,
+    machine_serial: str = "",
 ) -> tuple[bool, str]:
+    """Run the hook script with ``payload`` on stdin. Returns ``(ok, detail)``.
+
+    By default a zero exit code is success. With ``require_success_payload`` the script's
+    stdout must additionally be a JSON object containing ``"success": true``, because the
+    server answers HTTP 200 even when it rejects the request (e.g. an invalid push key).
+    """
     import subprocess
 
     if not machine_id.strip():
@@ -1296,6 +1897,7 @@ def _invoke_hook_script(
             push_key=push_key,
             url=url,
             machine_id=machine_id,
+            machine_serial=machine_serial,
         )
     )
 
@@ -1305,16 +1907,46 @@ def _invoke_hook_script(
             input=payload,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=timeout,
             env=env,
         )
-        if result.returncode == 0:
-            return True, ""
-        return False, result.stderr.strip() or f"exit code {result.returncode}"
+        if result.returncode != 0:
+            return False, result.stderr.strip() or f"exit code {result.returncode}"
+        if require_success_payload and not _has_success_payload(result.stdout):
+            # The forwarders fail open on transport and HTTP errors (exit 0, empty stdout, a
+            # diagnostic on stderr), so when there is a reason it lives on stderr.
+            diagnostic = "; ".join(line.strip() for line in (result.stderr or "").splitlines() if line.strip())
+            if diagnostic:
+                return False, f"response did not confirm success: {diagnostic}"
+            return False, "response did not confirm success (push key may be invalid)"
+        return True, ""
     except subprocess.TimeoutExpired:
         return False, "timeout"
     except Exception as e:
         return False, str(e)
+
+
+# What a failed-to-confirm test event means, keyed by error label, shown in the install warning.
+_ERROR_MEANINGS = {
+    "timeout": "the Agent Guard service did not answer in time",
+    "dns_failure": "the Agent Guard host name could not be resolved (network or DNS problem)",
+    "connection_refused": "the connection to the Agent Guard service was refused",
+    "connection_reset": "the connection to the Agent Guard service was dropped",
+}
+
+
+class _TestEventResult(NamedTuple):
+    status: str  # "sent", "rejected" (persistent, abort) or "unconfirmed" (outage outlasted retries)
+    attempts: int
+    elapsed: float
+    error: str  # short label such as dns_failure, timeout, http_error_503
+    detail: str
+
+
+def _describe_error(error: str) -> str:
+    if error.startswith("http_error_"):
+        return f"the Agent Guard service answered with HTTP {error.removeprefix('http_error_')}, a server-side failure"
+    return _ERROR_MEANINGS.get(error, "the test event could not be delivered")
 
 
 def _send_test_event(
@@ -1332,8 +1964,14 @@ def _send_test_event(
     discover_current_checksum: str | None = None,
     discover_new_checksum: str | None = None,
     machine_id: str,
-) -> bool:
-    """Send a test hooksConfigured event by invoking the hook script. Returns True on success."""
+    machine_serial: str = "",
+) -> _TestEventResult:
+    """Send a test hooksConfigured event by invoking the hook script, retrying outages.
+
+    Timeouts, DNS failures, connection resets and HTTP 5xx are retried with backoff inside
+    ``INSTALL_RETRY_POLICY``'s time limit (the same rule as the install-time discovery event).
+    Anything else (API rejection, HTTP 4xx, a script error) is persistent and returned at once.
+    """
     if not machine_id.strip():
         raise ValueError("machine ID is required")
     payload_dict: dict = {"hook_event_name": "hooksConfigured"}
@@ -1360,19 +1998,39 @@ def _send_test_event(
     redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)
 
-    ok, detail = _invoke_hook_script(
-        script_path,
-        hook_client,
-        push_key,
-        url,
-        payload,
-        machine_id=machine_id,
-    )
-    if ok:
-        rich.print("[green]\u2713[/green]  Test event sent  [green]\u2192 OK[/green]")
-        return True
-    rich.print(f"[red]\u2717[/red]  Test event failed: {detail}")
-    return False
+    policy = INSTALL_RETRY_POLICY
+    started = time.monotonic()
+    attempts = 0
+    while True:
+        attempts += 1
+        ok, detail = _invoke_hook_script(
+            script_path,
+            hook_client,
+            push_key,
+            url,
+            payload,
+            machine_id=machine_id,
+            require_success_payload=True,
+            # A healthy but slow answer (up to the forwarder's own 60 s cap) must be able to finish,
+            # so each attempt gets what is left of the install budget, not the 15 s default.
+            timeout=max(policy.time_limit - (time.monotonic() - started), 0.0) + _HOOK_SCRIPT_OVERHEAD_SECONDS,
+            machine_serial=machine_serial,
+        )
+        elapsed = time.monotonic() - started
+        if ok:
+            rich.print("[green]\u2713[/green]  Test event sent  [green]\u2192 OK[/green]")
+            return _TestEventResult("sent", attempts, elapsed, "", "")
+        failure = classify_failure_detail(detail)
+        if not failure.retryable:
+            rich.print(f"[red]\u2717[/red]  Test event failed: {detail}")
+            return _TestEventResult("rejected", attempts, elapsed, failure.label, detail)
+        delay = next_retry_delay(policy, attempts, started)
+        if delay is None:
+            return _TestEventResult("unconfirmed", attempts, elapsed, failure.label, detail)
+        rich.print(
+            f"[yellow]![/yellow]  Test event attempt {attempts} failed ({failure.label}); retrying in {delay:g}s..."
+        )
+        time.sleep(delay)
 
 
 def _send_servers_discovered_event(
@@ -1385,7 +2043,8 @@ def _send_servers_discovered_event(
     session_marker: str = "hooks-setup",
     target_folders: list[str] | None = None,
     discovery_scope: DiscoveryScope = DiscoveryScope.ALL,
-    max_retries: int = 1,
+    retry_policy: RetryPolicy | None = None,
+    machine_serial: str = "",
 ) -> bool:
     """Discover MCP servers and send an install- or session-scoped discovery event.
 
@@ -1417,7 +2076,9 @@ def _send_servers_discovered_event(
     redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)
 
-    ok, detail = send_hook_event(url, hook_client, push_key, payload, machine_id, max_retries=max_retries)
+    ok, detail = send_hook_event(
+        url, hook_client, push_key, payload, machine_id, retry_policy=retry_policy, machine_serial=machine_serial
+    )
     if ok:
         server_count = sum(len(entry.get("servers", [])) for entry in servers)
         noun = "server" if server_count == 1 else "servers"
@@ -1586,6 +2247,7 @@ def _parse_command_info(cmd: str, events: list[str]) -> dict:
 _PS_PARAM_MAP = {
     "PUSH_KEY": "PushKey",
     "REMOTE_HOOKS_BASE_URL": "RemoteUrl",
+    "TENANT_ID": "TenantId",
 }
 
 
@@ -1626,23 +2288,26 @@ _HOOK_CLIENT_NAMES = {
 }
 
 
-_CLIENT_INSTALL_PATHS = {
-    "claude": Path.home() / ".claude",
-    "cursor": Path.home() / ".cursor",
-    "codex": Path.home() / ".codex",
-    "github-copilot": Path.home() / ".copilot",
+_CLIENT_INSTALL_DIRS = {
+    "claude": ".claude",
+    "cursor": ".cursor",
+    "codex": ".codex",
+    "github-copilot": ".copilot",
 }
 
 
-def _is_client_installed(client: str) -> bool:
-    """Check whether the agent is installed on this machine by looking for its config directory."""
-    path = _CLIENT_INSTALL_PATHS.get(client)
-    if path is None:
+def _is_client_installed(client: str, home_dirs: Iterable[Path]) -> bool:
+    """Check whether the agent is installed under at least one of *home_dirs* by looking for its config directory."""
+    rel_dir = _CLIENT_INSTALL_DIRS.get(client)
+    if rel_dir is None:
         return True
-    try:
-        return path.is_dir()
-    except PermissionError:
-        return False
+    for home in home_dirs:
+        try:
+            if (home / rel_dir).is_dir():
+                return True
+        except PermissionError:
+            continue
+    return False
 
 
 def _client_label(client: str) -> str:
@@ -1708,6 +2373,7 @@ class _HookInvocation(NamedTuple):
     agent_scan_command: str = ""
     scope: str = ""
     quote_client: bool = False
+    machine_serial: str = ""
 
 
 def _render_posix_command(invocation: _HookInvocation) -> str:
@@ -1719,6 +2385,8 @@ def _render_posix_command(invocation: _HookInvocation) -> str:
         parts.append(f"TENANT_ID={_shell_quote(invocation.tenant_id)}")
     if invocation.machine_id:
         parts.append(f"MACHINE_ID={_shell_quote(invocation.machine_id)}")
+    # Preserve an empty captured serial too; later hook environments must not supply a different value.
+    parts.append(f"MACHINE_SERIAL={_shell_quote(invocation.machine_serial)}")
     if invocation.agent_scan_command:
         parts.append(f"AGENT_SCAN_COMMAND={_shell_quote(invocation.agent_scan_command)}")
     parts.append(f"bash {_shell_quote(invocation.script_path.as_posix())}")
@@ -1741,8 +2409,12 @@ def _render_powershell_command(invocation: _HookInvocation) -> str:
         "-RemoteUrl",
         _ps_quote(invocation.url),
     ]
+    if invocation.tenant_id:
+        parts.extend(["-TenantId", _ps_quote(invocation.tenant_id)])
     if invocation.machine_id:
         parts.extend(["-MachineId", _ps_quote(invocation.machine_id)])
+    if invocation.machine_serial:
+        parts.extend(["-MachineSerial", _ps_quote(invocation.machine_serial)])
     if invocation.agent_scan_command:
         parts.extend(["-AgentScanCommand", _ps_quote(invocation.agent_scan_command)])
     if invocation.scope:
@@ -1765,6 +2437,8 @@ def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]
         ]
         if invocation.machine_id:
             argv.extend(["-MachineId", invocation.machine_id])
+        if invocation.machine_serial:
+            argv.extend(["-MachineSerial", invocation.machine_serial])
         if invocation.agent_scan_command:
             argv.extend(["-AgentScanCommand", invocation.agent_scan_command])
         if invocation.scope:
@@ -1775,6 +2449,7 @@ def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]
         **os.environ,
         "PUSH_KEY": invocation.push_key,
         "REMOTE_HOOKS_BASE_URL": invocation.url,
+        "MACHINE_SERIAL": invocation.machine_serial,
     }
     if invocation.tenant_id:
         env["TENANT_ID"] = invocation.tenant_id
@@ -1796,6 +2471,7 @@ def _build_hook_command(
     *,
     tenant_id: str = "",
     machine_id: str = "",
+    machine_serial: str = "",
 ) -> str:
     invocation = _HookInvocation(
         script_path=script_path,
@@ -1803,6 +2479,7 @@ def _build_hook_command(
         push_key=push_key,
         url=url,
         machine_id=machine_id,
+        machine_serial=machine_serial,
         tenant_id=tenant_id,
     )
     if IS_WINDOWS:
@@ -1837,6 +2514,7 @@ def _build_discover_hook_command(
     agent_scan_command: str,
     tenant_id: str = "",
     machine_id: str = "",
+    machine_serial: str = "",
 ) -> str:
     invocation = _HookInvocation(
         script_path=script_path,
@@ -1844,6 +2522,7 @@ def _build_discover_hook_command(
         push_key=push_key,
         url=url,
         machine_id=machine_id,
+        machine_serial=machine_serial,
         agent_scan_command=agent_scan_command,
         scope="servers",
         quote_client=True,
@@ -1861,6 +2540,7 @@ def _build_hook_command_powershell(
     *,
     tenant_id: str = "",
     machine_id: str = "",
+    machine_serial: str = "",
 ) -> str:
     return _render_powershell_command(
         _HookInvocation(
@@ -1869,6 +2549,8 @@ def _build_hook_command_powershell(
             push_key=push_key,
             url=url,
             machine_id=machine_id,
+            machine_serial=machine_serial,
+            tenant_id=tenant_id,
         )
     )
 
@@ -1989,44 +2671,243 @@ def _copy_hook_script(dest: Path) -> _CopiedScript:
 
 
 def _remove_hook_script(client: str, config_path: Path) -> None:
+    """Delete Guard's hook scripts, then their directory if that left it empty."""
+    removed_any = False
     for dest in (_forwarder_script_path(config_path), _discover_script_path(config_path)):
         if dest.exists():
             dest.unlink()
             rich.print(f"[green]\u2713[/green]  Removed hook script [dim]{dest}[/dim]")
+            removed_any = True
+    if removed_any:
+        _remove_dir_if_empty(_hooks_dir(config_path))
 
 
-def _backup_file(path: Path) -> None:
-    if path.exists():
-        backup = Path(str(path) + ".backup")
+def _remove_dir_if_empty(path: Path) -> None:
+    """Remove directory ``path`` if it is empty; leave it (silently) otherwise or on any error."""
+    try:
+        os.rmdir(path)
+    except OSError:
+        return
+    rich.print(f"[dim]Removed empty directory {path}[/dim]")
+
+
+def _guard_backup_path(path: Path) -> Path:
+    """Where install backs up ``path``: ``<path>.agent-guard.backup``."""
+    return Path(str(path) + _GUARD_BACKUP_SUFFIX)
+
+
+def _remove_guard_backups(path: Path) -> None:
+    """Delete Guard's backups of ``path``. Call only once ``path`` is free of Agent Guard config.
+
+    Removes ``<path>.agent-guard.backup`` (Guard's by name) and a legacy
+    ``<path>.backup`` that holds a Guard hook command (see _remove_legacy_guard_backup).
+    """
+    backup = _guard_backup_path(path)
+    if backup.is_file() and _unlink_backup(backup):
+        rich.print(f"[dim]Removed Agent Guard backup {backup}[/dim]")
+    _remove_legacy_guard_backup(path)
+
+
+def _unlink_backup(backup: Path) -> bool:
+    """Delete ``backup``; on failure warn and carry on, since the config itself is already done."""
+    try:
+        backup.unlink()
+    except OSError as exc:
+        rich.print(f"[yellow]Warning:[/yellow] Could not remove {backup} ({exc}); delete it manually.")
+        return False
+    return True
+
+
+def _remove_legacy_guard_backup(path: Path) -> None:
+    """Delete ``<path>.backup`` if it holds an Agent Guard hook command.
+
+    Older Guard versions backed up to ``<path>.backup``, and a copy taken while
+    Guard was installed carries its PUSH_KEY. The name is not Guard's own (other
+    tools and users write it too), so the file is deleted only if a line of it
+    matches _is_agent_scan_command; this works for JSON and TOML alike. Anything
+    else, including a file that cannot be read or decoded as UTF-8, is left alone.
+    """
+    legacy = Path(str(path) + ".backup")
+    if not legacy.is_file():
+        return
+    try:
+        text = legacy.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return
+    if not any(_is_agent_scan_command(line) for line in text.splitlines()):
+        return
+    if _unlink_backup(legacy):
+        rich.print(f"[dim]Removed old Agent Guard backup {legacy} (it contained the Agent Guard hook command)[/dim]")
+
+
+def _backup_file(path: Path, guard_free_content: Callable[[], str | None], *, newline: str | None = None) -> None:
+    """Back up ``path`` to ``<path>.agent-guard.backup`` before install rewrites it.
+
+    The backup never holds Agent Guard config (its PUSH_KEY in particular):
+
+    - ``guard_free_content()`` returns None when the file has no Guard entries:
+      the backup is a byte copy of the file.
+    - It returns the file's content with Guard removed (what uninstall would
+      leave) when the file has Guard entries, e.g. on a re-install: that text is
+      written atomically, with the live file's permission bits (and ``newline``, see
+      _atomic_write_text).
+    - If it raises ValueError (including CodexRequirementsError and JSON/UTF-8
+      decode errors), TypeError or AttributeError, no backup is written, any
+      existing backup is left as is, and a warning is printed.
+    """
+    if not path.exists():
+        return
+    backup = _guard_backup_path(path)
+    try:
+        content = guard_free_content()
+    except (ValueError, TypeError, AttributeError) as exc:
+        rich.print(
+            f"[yellow]Warning:[/yellow] Not backing up {path}: could not remove the Agent Guard "
+            f"config from the copy ({exc}). Any existing {backup.name} is left unchanged."
+        )
+        return
+    if content is None:
         shutil.copy2(path, backup)
-        rich.print(f"[green]\u2713[/green]  Backed up [dim]{path}[/dim] \u2192 [dim]{backup}[/dim]")
+    else:
+        _atomic_write_text(backup, content, mode=stat.S_IMODE(path.stat().st_mode), newline=newline)
+    rich.print(f"[green]\u2713[/green]  Backed up [dim]{path}[/dim] \u2192 [dim]{backup}[/dim]")
+
+
+def _create_sibling_temp_file(target: Path, mode: int) -> tuple[int, Path]:
+    """Exclusively create a hidden temp file next to ``target``; return (fd, path).
+
+    Unlike ``tempfile.mkstemp`` (always 0600), ``mode`` is passed to ``os.open``
+    so the process umask applies, exactly as for ``open(path, "w")``, without
+    the thread-unsafe ``os.umask`` read-and-restore dance.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+    for _ in range(100):
+        tmp = target.with_name(f".{target.name}.{secrets.token_hex(6)}.tmp")
+        try:
+            return os.open(tmp, flags, mode), tmp
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"Could not create a temporary file next to {target}")
+
+
+def _atomic_write_text(path: Path, content: str, *, mode: int | None = None, newline: str | None = None) -> None:
+    """Replace ``path`` with ``content`` (UTF-8) atomically.
+
+    The content goes to a temp file in the target's directory, is fsynced, and
+    is then moved over the target with ``os.replace``, so a crash, kill or full
+    disk leaves either the old file or the new one, never a truncated one.
+
+    - Symlinks are resolved first: a symlinked config stays a symlink and its
+      target is updated.
+    - Missing parent directories are created.
+    - Newlines are written in text mode (``\\n`` becomes ``os.linesep``), the same
+      as the ``open(path, "w")`` / ``Path.write_text`` calls this replaces.
+      ``newline=""`` writes ``content`` as is.
+    - An existing target keeps its permission bits (POSIX) and, when running
+      as root, its owner and group (best effort). A new file gets the usual
+      umask-based permissions. ``mode``, if given, sets the permission bits
+      instead (POSIX); the content is never readable beyond them, even briefly.
+    - Limitation: nothing else carries over, because the target becomes a new
+      file. ACLs, extended attributes (e.g. a hand-set SELinux label) and file
+      flags are lost, the file gets its directory's inherited ACL, and other
+      hard links keep the old content. Copying these differs per OS, so it is
+      documented instead (docs/cli-reference.md, ``guard install``).
+    - On any failure the temp file is removed and the exception re-raised.
+    """
+    target = path.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing: os.stat_result | None = target.stat()
+    except FileNotFoundError:
+        existing = None
+
+    # Start private when replacing an existing file or setting a mode; the chmod below sets the bits.
+    private = existing is not None or mode is not None
+    fd, tmp = _create_sibling_temp_file(target, 0o600 if private else 0o666)
+    try:
+        if not IS_WINDOWS:
+            # On Windows chmod only toggles the read-only flag; copying it would
+            # make the temp file impossible to clean up if os.replace fails.
+            if mode is not None:
+                os.chmod(tmp, mode)
+            elif existing is not None:
+                shutil.copymode(target, tmp)
+            if existing is not None and hasattr(os, "geteuid") and os.geteuid() == 0:
+                with contextlib.suppress(OSError):
+                    os.chown(tmp, existing.st_uid, existing.st_gid)
+        with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as f:
+            fd = -1  # now owned (and closed) by f
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        if fd != -1:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+    if not IS_WINDOWS:
+        # Persist the rename itself; best effort, not all filesystems allow it.
+        with contextlib.suppress(OSError):
+            dir_fd = os.open(target.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+
+
+_LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
+def _dump_config_json(data: dict) -> str:
+    """Serialise a user's agent config for writing back to disk.
+
+    Non-ASCII characters are written as-is, so a user's ``"café ☕"`` stays
+    readable after install/uninstall instead of becoming ``\\u`` escapes.
+
+    The one exception is a lone surrogate: ``json.load`` accepts ``"\\ud800"``,
+    but the resulting character cannot be encoded as UTF-8, so the write would
+    fail. Such characters are re-escaped (they can only occur inside JSON
+    strings), which keeps the file valid UTF-8 and loads back to the same value.
+    """
+    content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    return _LONE_SURROGATE_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", content)
 
 
 def _read_json_or_empty(path: Path) -> dict:
     if not path.exists():
         return {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
-def _write_json_if_changed(path: Path, data: dict) -> bool:
-    """Write JSON to path only if content differs. Backs up before writing. Returns True if written."""
-    new_content = json.dumps(data, indent=2) + "\n"
+def _write_json_if_changed(path: Path, data: dict, *, client: str) -> bool:
+    """Write *client*'s JSON config to path only if content differs. Returns True if written.
+
+    The current file is backed up first, without any Agent Guard hooks (see _backup_file).
+    """
+    new_content = _dump_config_json(data)
     if path.exists():
-        old_content = path.read_text()
+        old_content = path.read_text(encoding="utf-8")
         if old_content == new_content:
             return False
-        _backup_file(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(new_content)
+        _backup_file(path, lambda: _json_config_without_guard(path, client))
+    _atomic_write_text(path, new_content)
     return True
 
 
+def _json_config_without_guard(path: Path, client: str) -> str | None:
+    """*client*'s JSON config at ``path`` without Agent Guard, or None if it has no Guard hooks."""
+    data = _read_json_or_empty(path)
+    stripped = _strip_guard_from_json_config(data, client)
+    return None if stripped == data else _dump_config_json(stripped)
+
+
 def _write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
+    _atomic_write_text(path, _dump_config_json(data))
 
 
 def _preserved_note(count: int) -> str:

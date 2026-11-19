@@ -8,11 +8,12 @@ import json
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -21,9 +22,9 @@ from unittest.mock import call as mock_call
 import pytest
 
 import agent_scan.guard as guard_module
-import agent_scan.version as version_module
 from agent_scan.agents import DiscoveryScope
 from agent_scan.guard import (
+    _CLIENT_INSTALL_DIRS,
     _PERMISSION_DENIED,
     ALL_CLIENTS,
     CLAUDE_HOOK_EVENTS,
@@ -38,6 +39,7 @@ from agent_scan.guard import (
     CURSOR_HOOK_EVENTS,
     CURSOR_HOOKS_PATH,
     CURSOR_MANAGED_HOOKS_PATH,
+    CodexRequirementsError,
     _build_hook_command,
     _build_hook_command_powershell,
     _compact_events,
@@ -70,7 +72,7 @@ from agent_scan.guard import (
     _run_uninstall,
     _send_test_event,
     _shell_quote,
-    _uninstall_filter_for,
+    _strip_guard_from_codex_requirements,
     _uninstall_hooks,
     _write_client_config,
     _write_codex_managed_config,
@@ -79,7 +81,7 @@ from agent_scan.guard import (
 from agent_scan.models import ClientToInspect, InspectedPath, InspectedServer, RemoteServer, StdioServer
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig
 from agent_scan.pushkeys import GuardEnabledAccessDeniedError
-from agent_scan.version import version_info
+from agent_scan.utils import toml_escape
 
 
 @pytest.fixture(autouse=True)
@@ -125,14 +127,19 @@ def _write(path: Path, data) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
+def _guard_backup(path: Path) -> Path:
+    """Where install backs up ``path`` (Guard's own name, unlike a plain ``.backup``)."""
+    return Path(f"{path}.agent-guard.backup")
+
+
 def _setup_claude_hooks(cmd: str, path: Path) -> None:
     settings, _, preserved = _prepare_claude_config(cmd, path)
-    _write_config(settings, path, preserved)
+    _write_config(settings, path, preserved, client="claude")
 
 
 def _setup_cursor_hooks(cmd: str, path: Path) -> None:
     data, _, preserved = _prepare_cursor_config(cmd, path)
-    _write_config(data, path, preserved)
+    _write_config(data, path, preserved, client="cursor")
 
 
 def _flat_hook_command_strings(path: Path) -> list[str]:
@@ -153,12 +160,12 @@ def _flat_hook_command_strings(path: Path) -> list[str]:
 
 def _setup_copilot_hooks(cmd: str, path: Path) -> None:
     data, _, preserved = _prepare_copilot_config(cmd, path)
-    _write_config(data, path, preserved)
+    _write_config(data, path, preserved, client="github-copilot")
 
 
 def _setup_codex_hooks(cmd: str, path: Path) -> None:
     data, _, preserved = _prepare_codex_config(cmd, path)
-    _write_config(data, path, preserved)
+    _write_config(data, path, preserved, client="codex")
 
 
 def _setup_codex_managed_hooks(cmd: str, path: Path) -> None:
@@ -167,11 +174,7 @@ def _setup_codex_managed_hooks(cmd: str, path: Path) -> None:
 
 
 def _uninstall_test_client(client: str, path: Path) -> None:
-    _uninstall_hooks(
-        path,
-        filter_hooks=_uninstall_filter_for(client),
-        prune_empty_hooks=client != "cursor",
-    )
+    _uninstall_hooks(path, client=client)
 
 
 def _detect_test_client(client: str, path: Path) -> dict | None:
@@ -286,18 +289,18 @@ class TestExtractEnvFromCmd:
             "main",
             False,
             "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' TENANT_ID='tenant' "
-            "MACHINE_ID='machine' bash '/x/agent-guard.sh' --client claude-code",
+            "MACHINE_ID='machine' MACHINE_SERIAL='' bash '/x/agent-guard.sh' --client claude-code",
         ),
         (
             "main",
             True,
             "powershell -File 'C:\\hooks\\agent-guard.ps1' -Client claude-code -PushKey 'pk' "
-            "-RemoteUrl 'https://api.snyk.io' -MachineId 'machine'",
+            "-RemoteUrl 'https://api.snyk.io' -TenantId 'tenant' -MachineId 'machine'",
         ),
         (
             "discover",
             False,
-            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_ID='machine' "
+            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_ID='machine' MACHINE_SERIAL='' "
             "AGENT_SCAN_COMMAND='/usr/local/bin/open-agent-scan' bash '/x/agent-guard-discover.sh' "
             "--client 'claude-code' --scope servers",
         ),
@@ -328,6 +331,7 @@ def test_build_hook_command_preserves_exact_output(variant, is_windows, expected
                 "claude-code",
                 tenant_id="tenant",
                 machine_id="machine",
+                machine_serial="",
             )
         else:
             command = guard_module._build_discover_hook_command(
@@ -340,15 +344,34 @@ def test_build_hook_command_preserves_exact_output(variant, is_windows, expected
                 ),
                 tenant_id="tenant",
                 machine_id="machine",
+                machine_serial="",
             )
 
     assert command == expected
 
 
 class TestBuildHookCommand:
+    @pytest.mark.parametrize("windows", [False, True])
+    @pytest.mark.parametrize("discovery", [False, True])
+    @pytest.mark.parametrize("serial", ["", "C02'XYZ123"])
+    def test_persists_serial_for_later_hook_processes(self, monkeypatch, windows, discovery, serial):
+        monkeypatch.setenv("MACHINE_SERIAL", "ambient-serial")
+        monkeypatch.setattr(guard_module, "IS_WINDOWS", windows)
+        build = guard_module._build_discover_hook_command if discovery else _build_hook_command
+        kwargs = {"agent_scan_command": "/bin/agent-scan"} if discovery else {}
+        command = build("pk", "https://api.snyk.io", Path("/x/hook"), "claude-code", machine_serial=serial, **kwargs)
+        assert "ambient-serial" not in command
+        if serial:
+            expected = "-MachineSerial 'C02''XYZ123'" if windows else "MACHINE_SERIAL='C02'\"'\"'XYZ123'"
+            assert expected in command
+        elif windows:
+            assert "-MachineSerial" not in command
+        else:
+            assert "MACHINE_SERIAL=''" in command
+
     @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
     def test_without_tenant_bash(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "claude-code")
+        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "claude-code", machine_serial="")
         assert "PUSH_KEY='pk'" in cmd
         assert "REMOTE_HOOKS_BASE_URL='https://api.snyk.io'" in cmd
         assert "TENANT_ID" not in cmd
@@ -357,32 +380,38 @@ class TestBuildHookCommand:
 
     @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
     def test_with_tenant_bash(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", tenant_id="tid")
+        cmd = _build_hook_command(
+            "pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", tenant_id="tid", machine_serial=""
+        )
         assert "TENANT_ID='tid'" in cmd
 
     @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
     def test_with_machine_id_bash(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", machine_id="machine-42")
+        cmd = _build_hook_command(
+            "pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", machine_id="machine-42", machine_serial=""
+        )
         assert "MACHINE_ID='machine-42'" in cmd
 
     @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
     def test_without_machine_id_bash(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor")
+        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", machine_serial="")
         assert "MACHINE_ID" not in cmd
 
     def test_with_machine_id_powershell(self):
         cmd = _build_hook_command_powershell(
-            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_id="machine-42"
+            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_id="machine-42", machine_serial=""
         )
         assert "-MachineId 'machine-42'" in cmd
 
     def test_without_machine_id_powershell(self):
-        cmd = _build_hook_command_powershell("pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex")
+        cmd = _build_hook_command_powershell(
+            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_serial=""
+        )
         assert "-MachineId" not in cmd
 
     def test_machine_id_powershell_escapes_single_quotes(self):
         cmd = _build_hook_command_powershell(
-            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_id="O'Brien-laptop"
+            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_id="O'Brien-laptop", machine_serial=""
         )
         assert "-MachineId 'O''Brien-laptop'" in cmd
 
@@ -393,6 +422,7 @@ class TestBuildHookCommand:
             "https://example.com/O'Brien",
             script_path,
             "codex",
+            machine_serial="",
         )
 
         expected_path = str(script_path).replace("'", "''")
@@ -402,7 +432,7 @@ class TestBuildHookCommand:
 
     @pytest.mark.skipif(sys.platform != "win32", reason="powershell command format")
     def test_without_tenant_powershell(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code")
+        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code", machine_serial="")
         assert "-PushKey 'pk'" in cmd
         assert "-RemoteUrl 'https://api.snyk.io'" in cmd
         assert "powershell -File" in cmd
@@ -410,18 +440,37 @@ class TestBuildHookCommand:
 
     @pytest.mark.skipif(sys.platform != "win32", reason="powershell command format")
     def test_without_tenant_powershell_no_tenant_id(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code")
+        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code", machine_serial="")
         assert "TENANT_ID" not in cmd
 
     def test_roundtrip_extract(self):
         cmd = _build_hook_command(
-            "my-key", "https://example.com", Path("/x/agent-guard.sh"), "claude-code", tenant_id="t-1"
+            "my-key",
+            "https://example.com",
+            Path("/x/agent-guard.sh"),
+            "claude-code",
+            tenant_id="t-1",
+            machine_serial="",
         )
         assert _extract_env_from_cmd(cmd, "PUSH_KEY") == "my-key"
         assert _extract_env_from_cmd(cmd, "REMOTE_HOOKS_BASE_URL") == "https://example.com"
-        # tenant_id is only in bash commands, not powershell
-        if sys.platform != "win32":
-            assert _extract_env_from_cmd(cmd, "TENANT_ID") == "t-1"
+        assert _extract_env_from_cmd(cmd, "TENANT_ID") == "t-1"
+
+    def test_roundtrip_extract_powershell(self):
+        cmd = _build_hook_command_powershell(
+            "my-key", "https://example.com", Path("C:/x/hook.ps1"), "claude-code", tenant_id="t-1", machine_serial=""
+        )
+        assert "-TenantId 't-1'" in cmd
+        info = _parse_command_info(cmd, ["Stop"])
+        assert info["auth_value"] == "my-key"
+        assert info["url"] == "https://example.com"
+        assert info["tenant_id"] == "t-1"
+
+    def test_without_tenant_powershell_omits_param(self):
+        cmd = _build_hook_command_powershell(
+            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_serial=""
+        )
+        assert "-TenantId" not in cmd
 
 
 class TestAgentScanCommand:
@@ -510,6 +559,7 @@ class TestBuildDiscoverHookCommand:
                 agent_scan_command="/opt/Snyk's bin/open-agent-scan",
                 tenant_id="tenant",
                 machine_id="machine",
+                machine_serial="",
             )
 
         assert "PUSH_KEY='pk'" in command
@@ -531,6 +581,7 @@ class TestBuildDiscoverHookCommand:
                 agent_scan_command=r"C:\Program Files\Snyk\open-agent-scan.exe",
                 tenant_id="ignored",
                 machine_id="machine's-id",
+                machine_serial="",
             )
 
         assert command == (
@@ -547,6 +598,7 @@ class TestBuildDiscoverHookCommand:
                 Path(r"C:\Users\O'Brien\discover.ps1"),
                 "claude-code",
                 agent_scan_command=r"C:\Users\O'Brien\open-agent-scan.exe",
+                machine_serial="",
             )
 
         assert r"-File 'C:\Users\O''Brien\discover.ps1'" in command
@@ -568,6 +620,7 @@ class TestBuildDiscoverHookCommand:
                 script,
                 "claude-code",
                 agent_scan_command="cd /repo; uv run -m src.agent_scan.cli",
+                machine_serial="",
             )
 
         assert expected in command
@@ -582,9 +635,13 @@ class TestHookInvocationRenderers:
             push_key="pk'raw",
             url="https://example.test/hook's",
             machine_id="machine'raw",
+            machine_serial="serial'raw",
         )
 
-        with patch.dict(os.environ, {"EXISTING": "value"}, clear=True), patch(f"{_G}.IS_WINDOWS", False):
+        with (
+            patch.dict(os.environ, {"EXISTING": "value", "MACHINE_SERIAL": "inherited-serial"}, clear=True),
+            patch(f"{_G}.IS_WINDOWS", False),
+        ):
             argv, env = guard_module._render_argv(invocation)
 
         # str(Path) follows the host flavour, so compare against it rather than a hardcoded separator
@@ -594,6 +651,7 @@ class TestHookInvocationRenderers:
             "PUSH_KEY": "pk'raw",
             "REMOTE_HOOKS_BASE_URL": "https://example.test/hook's",
             "MACHINE_ID": "machine'raw",
+            "MACHINE_SERIAL": "serial'raw",
         }
 
     def test_render_argv_windows_returns_unquoted_argv_without_environment(self):
@@ -603,6 +661,7 @@ class TestHookInvocationRenderers:
             push_key="pk'raw",
             url="https://example.test/hook's",
             machine_id="machine'raw",
+            machine_serial="serial'raw",
         )
 
         with patch(f"{_G}.IS_WINDOWS", True):
@@ -620,6 +679,8 @@ class TestHookInvocationRenderers:
             "https://example.test/hook's",
             "-MachineId",
             "machine'raw",
+            "-MachineSerial",
+            "serial'raw",
         ]
         assert env is None
 
@@ -638,7 +699,10 @@ class TestHookInvocationRenderers:
             quote_client=True,
         )
 
-        with patch.dict(os.environ, {"EXISTING": "value"}, clear=True), patch(f"{_G}.IS_WINDOWS", False):
+        with (
+            patch.dict(os.environ, {"EXISTING": "value", "MACHINE_SERIAL": "inherited-serial"}, clear=True),
+            patch(f"{_G}.IS_WINDOWS", False),
+        ):
             argv, env = guard_module._render_argv(invocation)
 
         assert argv == [
@@ -651,6 +715,7 @@ class TestHookInvocationRenderers:
         ]
         assert env == {
             "EXISTING": "value",
+            "MACHINE_SERIAL": "",
             "PUSH_KEY": "pk",
             "REMOTE_HOOKS_BASE_URL": "https://api.snyk.io",
             "TENANT_ID": "tenant",
@@ -692,7 +757,7 @@ class TestHookInvocationRenderers:
         ]
         assert env is None
 
-    def test_render_posix_command_skips_empty_optional_fields(self):
+    def test_render_posix_command_preserves_empty_serial(self):
         invocation = guard_module._HookInvocation(
             script_path=Path("/hooks/agent-guard.sh"),
             hook_client="claude-code",
@@ -703,7 +768,7 @@ class TestHookInvocationRenderers:
         command = guard_module._render_posix_command(invocation)
 
         assert command == (
-            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
+            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_SERIAL='' "
             "bash '/hooks/agent-guard.sh' --client claude-code"
         )
 
@@ -761,7 +826,7 @@ class TestPrepareClaudeDiscoveryHook:
             path,
             discover_command=self.discover_command,
         )
-        _write_config(settings, path, preserved)
+        _write_config(settings, path, preserved, client="claude")
 
         _, diff, _ = _prepare_claude_config(
             AGENT_SCAN_CMD,
@@ -800,7 +865,7 @@ class TestPrepareCursorDiscoveryHook:
             path,
             discover_command=self.discover_command,
         )
-        _write_config(data, path, preserved)
+        _write_config(data, path, preserved, client="cursor")
 
         _, diff, _ = _prepare_cursor_config(
             AGENT_SCAN_CMD,
@@ -812,12 +877,13 @@ class TestPrepareCursorDiscoveryHook:
 
     def test_uninstall_removes_discovery_entry(self, tmp_path):
         path = tmp_path / "hooks.json"
+        _write(path, {"version": 1, "user": True})
         data, _, preserved = _prepare_cursor_config(
             AGENT_SCAN_CMD,
             path,
             discover_command=self.discover_command,
         )
-        _write_config(data, path, preserved)
+        _write_config(data, path, preserved, client="cursor")
 
         _uninstall_test_client("cursor", path)
 
@@ -871,7 +937,7 @@ class TestPrepareGitHubCopilotDiscoveryHook:
             path,
             discover_command=self.discover_command,
         )
-        _write_config(data, path, preserved)
+        _write_config(data, path, preserved, client="github-copilot")
 
         _, diff, _ = _prepare_copilot_config(
             COPILOT_AGENT_SCAN_CMD,
@@ -883,12 +949,13 @@ class TestPrepareGitHubCopilotDiscoveryHook:
 
     def test_uninstall_removes_discovery_entry(self, tmp_path):
         path = tmp_path / "agent-guard.json"
+        _write(path, {"version": 1, "user": True})
         data, _, preserved = _prepare_copilot_config(
             COPILOT_AGENT_SCAN_CMD,
             path,
             discover_command=self.discover_command,
         )
-        _write_config(data, path, preserved)
+        _write_config(data, path, preserved, client="github-copilot")
         # Asserted before as well as after: the entry is written under the platform's
         # script key, so a check that never sees that key would pass on an install that
         # was left in place.
@@ -929,7 +996,7 @@ class TestPrepareCodexDiscoveryHook:
             path,
             discover_command=self.discover_command,
         )
-        _write_config(data, path, preserved)
+        _write_config(data, path, preserved, client="codex")
 
         _, diff, _ = _prepare_codex_config(
             AGENT_SCAN_CMD,
@@ -941,16 +1008,17 @@ class TestPrepareCodexDiscoveryHook:
 
     def test_uninstall_removes_discovery_entry(self, tmp_path):
         path = tmp_path / "hooks.json"
+        _write(path, {"user": True})
         data, _, preserved = _prepare_codex_config(
             AGENT_SCAN_CMD,
             path,
             discover_command=self.discover_command,
         )
-        _write_config(data, path, preserved)
+        _write_config(data, path, preserved, client="codex")
 
         _uninstall_test_client("codex", path)
 
-        assert "hooks" not in json.loads(path.read_text())
+        assert json.loads(path.read_text()) == {"user": True}
 
 
 class TestWriteConfig:
@@ -961,24 +1029,24 @@ class TestWriteConfig:
     def test_returns_false_and_prints_nothing_when_content_unchanged(self, tmp_path, capsys):
         path = tmp_path / "hooks.json"
         config = {"hooks": {}}
-        assert _write_config(config, path, 0) is True
+        assert _write_config(config, path, 0, client="cursor") is True
         capsys.readouterr()
 
-        assert _write_config(config, path, 0) is False
+        assert _write_config(config, path, 0, client="cursor") is False
 
         assert capsys.readouterr().out == ""
-        assert not Path(f"{path}.backup").exists()
+        assert not _guard_backup(path).exists()
 
     def test_returns_true_and_backs_up_when_content_changed(self, tmp_path, capsys):
         path = tmp_path / "hooks.json"
         original = {"version": 1}
         updated = {"version": 1, "hooks": {}}
-        assert _write_config(original, path, 0) is True
+        assert _write_config(original, path, 0, client="cursor") is True
         capsys.readouterr()
 
-        assert _write_config(updated, path, 0) is True
+        assert _write_config(updated, path, 0, client="cursor") is True
 
-        backup = Path(f"{path}.backup")
+        backup = _guard_backup(path)
         assert json.loads(backup.read_text()) == original
         assert json.loads(path.read_text()) == updated
         output = capsys.readouterr().out
@@ -988,19 +1056,19 @@ class TestWriteConfig:
     def test_creates_parent_directory_when_missing(self, tmp_path):
         path = tmp_path / "missing" / "nested" / "hooks.json"
 
-        assert _write_config({"hooks": {}}, path, 0) is True
+        assert _write_config({"hooks": {}}, path, 0, client="cursor") is True
 
         assert json.loads(path.read_text()) == {"hooks": {}}
 
     def test_preserved_note_omitted_when_zero(self, tmp_path, capsys):
-        _write_config({"hooks": {}}, tmp_path / "hooks.json", 0)
+        _write_config({"hooks": {}}, tmp_path / "hooks.json", 0, client="cursor")
 
         output = capsys.readouterr().out
         assert "Written" in output
         assert "other hook(s) preserved" not in output
 
     def test_preserved_note_included_when_nonzero(self, tmp_path, capsys):
-        _write_config({"hooks": {}}, tmp_path / "hooks.json", 2)
+        _write_config({"hooks": {}}, tmp_path / "hooks.json", 2, client="cursor")
 
         # rich soft-wraps the line at the terminal width, so collapse whitespace first
         assert "(2 other hook(s) preserved)" in " ".join(capsys.readouterr().out.split())
@@ -1016,6 +1084,187 @@ class TestWriteConfig:
         assert result is True
         write.assert_not_called()
         write_managed.assert_called_once_with("toml-content", path)
+
+
+class TestAtomicConfigWrites:
+    """Config writers replace files atomically instead of truncating them in place."""
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda path: guard_module._write_json(path, {"hooks": {}}),
+            lambda path: guard_module._write_json_if_changed(path, {"hooks": {}}, client="claude"),
+            lambda path: _write_codex_managed_config("[hooks]\n", path),
+        ],
+        ids=["write_json", "write_json_if_changed", "codex_managed"],
+    )
+    def test_creates_new_file_and_parent_directory(self, tmp_path, write):
+        path = tmp_path / "missing" / "nested" / "config"
+
+        write(path)
+
+        assert path.is_file()
+        assert path.read_text(encoding="utf-8") in ('{\n  "hooks": {}\n}\n', "[hooks]\n")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_new_file_gets_umask_based_permissions(self, tmp_path):
+        path = tmp_path / "settings.json"
+        old_umask = os.umask(0o027)
+        try:
+            guard_module._write_json(path, {"hooks": {}})
+        finally:
+            os.umask(old_umask)
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda path: guard_module._write_json(path, {"hooks": {}}),
+            lambda path: guard_module._write_json_if_changed(path, {"hooks": {}}, client="claude"),
+            lambda path: _write_codex_managed_config("[hooks]\n", path),
+        ],
+        ids=["write_json", "write_json_if_changed", "codex_managed"],
+    )
+    def test_overwrite_preserves_existing_mode(self, tmp_path, write):
+        path = tmp_path / "settings.json"
+        path.write_text('{"old": true}\n', encoding="utf-8")
+        path.chmod(0o600)
+
+        write(path)
+
+        assert path.read_text(encoding="utf-8") != '{"old": true}\n'
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+    def test_symlinked_config_stays_symlink_and_target_is_updated(self, tmp_path):
+        dotfiles = tmp_path / "dotfiles"
+        dotfiles.mkdir()
+        real = dotfiles / "settings.json"
+        real.write_text('{"old": true}\n', encoding="utf-8")
+        link_dir = tmp_path / ".claude"
+        link_dir.mkdir()
+        link = link_dir / "settings.json"
+        link.symlink_to(real)
+
+        assert guard_module._write_json_if_changed(link, {"hooks": {}}, client="claude") is True
+
+        assert link.is_symlink()
+        assert link.resolve() == real.resolve()
+        assert json.loads(real.read_text(encoding="utf-8")) == {"hooks": {}}
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda path: guard_module._write_json(path, {"hooks": {}}),
+            lambda path: guard_module._write_json_if_changed(path, {"hooks": {}}, client="claude"),
+            lambda path: _write_codex_managed_config("[hooks]\n", path),
+        ],
+        ids=["write_json", "write_json_if_changed", "codex_managed"],
+    )
+    def test_failed_replace_leaves_original_intact(self, tmp_path, write):
+        path = tmp_path / "settings.json"
+        original = b'{\n  "keep": "me"\n}\n'
+        path.write_bytes(original)
+
+        with (
+            patch(f"{_G}.os.replace", side_effect=OSError("No space left on device")),
+            pytest.raises(OSError, match="No space left"),
+        ):
+            write(path)
+
+        assert path.read_bytes() == original
+
+    def test_failure_while_writing_content_leaves_original_intact(self, tmp_path):
+        path = tmp_path / "settings.json"
+        original = b'{"keep": "me"}\n'
+        path.write_bytes(original)
+
+        with (
+            patch(f"{_G}.os.fsync", side_effect=KeyboardInterrupt),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            guard_module._write_json(path, {"hooks": {}})
+
+        assert path.read_bytes() == original
+
+    def test_non_ascii_content_round_trips_as_utf8(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        content = "# caf\u00e9 \u2713\n[hooks]\n"
+
+        assert _write_codex_managed_config(content, path) is True
+        assert _write_codex_managed_config(content, path) is False
+
+        assert path.read_bytes().decode("utf-8").replace("\r\n", "\n") == content
+
+
+def _prepare_user_json_config(client: str, path: Path) -> tuple[dict, int]:
+    """Prepare a user-level JSON install for *client*: (new_config, preserved)."""
+    prepare, command = {
+        "claude": (_prepare_claude_config, AGENT_SCAN_CMD),
+        "cursor": (_prepare_cursor_config, CURSOR_AGENT_SCAN_CMD),
+        "codex": (_prepare_codex_config, CODEX_AGENT_SCAN_CMD),
+    }[client]
+    config, _, preserved = prepare(command, path)
+    return config, preserved
+
+
+_NON_ASCII_USER_VALUES = {
+    "theme": "caf\u00e9 \u2615",
+    "\u540d\u524d": "\u30c6\u30b9\u30c8",
+    "emoji": "\U0001f600",
+}
+
+
+class TestNonAsciiConfigRoundTrip:
+    """Rewritten configs keep the user's non-ASCII text literal, not as \\u escapes."""
+
+    @staticmethod
+    def _read_text(path: Path) -> str:
+        return path.read_bytes().decode("utf-8")
+
+    def _assert_user_values_literal(self, path: Path) -> None:
+        text = self._read_text(path)
+        assert "\\u" not in text
+        for key, value in _NON_ASCII_USER_VALUES.items():
+            assert key in text
+            assert value in text
+        data = json.loads(text)
+        for key, value in _NON_ASCII_USER_VALUES.items():
+            assert data[key] == value
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_install_then_uninstall_keeps_non_ascii_literal(self, tmp_path, client):
+        path = tmp_path / "config.json"
+        path.write_bytes((json.dumps(_NON_ASCII_USER_VALUES, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+
+        config, preserved = _prepare_user_json_config(client, path)
+        assert _write_config(config, path, preserved, client=client) is True
+        self._assert_user_values_literal(path)
+
+        # Re-installing compares against the literal text on disk, so it is a no-op.
+        config, preserved = _prepare_user_json_config(client, path)
+        assert _write_config(config, path, preserved, client=client) is False
+
+        _uninstall_test_client(client, path)
+        self._assert_user_values_literal(path)
+        assert not json.loads(self._read_text(path)).get("hooks")
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_lone_surrogate_stays_escaped_and_does_not_crash(self, tmp_path, client):
+        # A lone surrogate cannot be encoded as UTF-8, so it must be written back
+        # as an escape; the rest of the file still keeps its literal characters.
+        path = tmp_path / "config.json"
+        path.write_bytes('{\n  "note": "\\ud800 caf\u00e9"\n}\n'.encode())
+
+        config, preserved = _prepare_user_json_config(client, path)
+        _write_config(config, path, preserved, client=client)
+        _uninstall_test_client(client, path)
+
+        text = self._read_text(path)
+        assert '"note": "\\ud800 caf\u00e9"' in text
+        assert json.loads(text)["note"] == "\ud800 caf\u00e9"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX discovery script")
@@ -1278,7 +1527,7 @@ class TestDiscoveryHookScriptFiles:
             config,
             discover_command=discover_command,
         )
-        _write_config(settings, config, preserved)
+        _write_config(settings, config, preserved, client="claude")
         main_script = guard_module._forwarder_script_path(config)
         discover_script = guard_module._discover_script_path(config)
         guard_module._copy_hook_script(main_script)
@@ -1286,9 +1535,11 @@ class TestDiscoveryHookScriptFiles:
 
         _run_uninstall(SimpleNamespace(client="claude", file=str(config), managed=False))
 
-        assert "hooks" not in json.loads(config.read_text())
+        # Install created the file and the hooks directory; uninstall leaves neither.
+        assert not config.exists()
         assert not main_script.exists()
         assert not discover_script.exists()
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestWindowsDiscoveryHookScriptFiles:
@@ -1398,15 +1649,16 @@ class TestUninstallClaude:
         _write(
             path,
             {
+                "theme": "dark",
                 "hooks": {
                     "PreToolUse": [_claude_group(AGENT_SCAN_CMD, "*")],
-                }
+                },
             },
         )
         _uninstall_test_client("claude", path)
 
         data = json.loads(path.read_text())
-        assert "hooks" not in data
+        assert data == {"theme": "dark"}
 
     def test_preserves_agentguard(self, tmp_path):
         path = tmp_path / "settings.json"
@@ -1426,16 +1678,6 @@ class TestUninstallClaude:
         data = json.loads(path.read_text())
         assert len(data["hooks"]["PreToolUse"]) == 1
         assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == AGENTGUARD_CMD
-
-    def test_backup_created(self, tmp_path):
-        path = tmp_path / "settings.json"
-        original = {"hooks": {"Stop": [_claude_group(AGENT_SCAN_CMD)]}}
-        _write(path, original)
-        _uninstall_test_client("claude", path)
-
-        backup = Path(str(path) + ".backup")
-        assert backup.exists()
-        assert json.loads(backup.read_text()) == original
 
     def test_full_install_then_uninstall(self, tmp_path):
         """Install all events, then uninstall — should leave a clean file."""
@@ -1590,11 +1832,11 @@ class TestUninstallCursor:
 
     def test_leaves_empty_hooks_when_all_removed(self, tmp_path):
         path = tmp_path / "hooks.json"
-        _write(path, {"version": 1, "hooks": {"stop": [_cursor_entry(CURSOR_AGENT_SCAN_CMD)]}})
+        _write(path, {"version": 1, "theme": "dark", "hooks": {"stop": [_cursor_entry(CURSOR_AGENT_SCAN_CMD)]}})
         _uninstall_test_client("cursor", path)
 
         data = json.loads(path.read_text())
-        assert data["hooks"] == {}
+        assert data == {"version": 1, "theme": "dark", "hooks": {}}
 
     def test_preserves_agentguard(self, tmp_path):
         path = tmp_path / "hooks.json"
@@ -1616,24 +1858,12 @@ class TestUninstallCursor:
         assert len(data["hooks"]["stop"]) == 1
         assert data["hooks"]["stop"][0]["command"] == CURSOR_AGENTGUARD_CMD
 
-    def test_backup_created(self, tmp_path):
-        path = tmp_path / "hooks.json"
-        original = {"version": 1, "hooks": {"stop": [_cursor_entry(CURSOR_AGENT_SCAN_CMD)]}}
-        _write(path, original)
-        _uninstall_test_client("cursor", path)
-
-        backup = Path(str(path) + ".backup")
-        assert backup.exists()
-        assert json.loads(backup.read_text()) == original
-
-    def test_full_install_then_uninstall(self, tmp_path):
+    def test_full_install_then_uninstall_removes_file_install_created(self, tmp_path):
         path = tmp_path / "hooks.json"
         _setup_cursor_hooks(CURSOR_AGENT_SCAN_CMD, path)
         _uninstall_test_client("cursor", path)
 
-        data = json.loads(path.read_text())
-        assert data["hooks"] == {}
-        assert data["version"] == 1
+        assert not path.exists()
 
 
 # ===================================================================
@@ -1781,12 +2011,12 @@ class TestUninstallGitHubCopilot:
         assert len(data["hooks"]["Stop"]) == 1
         assert data["hooks"]["Stop"][0]["command"] == COPILOT_AGENTGUARD_CMD
 
-    def test_full_install_then_uninstall(self, tmp_path):
+    def test_full_install_then_uninstall_removes_file_install_created(self, tmp_path):
         path = tmp_path / "agent-guard.json"
         _setup_copilot_hooks(COPILOT_AGENT_SCAN_CMD, path)
         _uninstall_test_client("github-copilot", path)
 
-        assert "hooks" not in json.loads(path.read_text())
+        assert not path.exists()
 
     @pytest.mark.parametrize("key", ["bash", "powershell", "command"])
     def test_removes_agent_scan_hooks_under_any_script_key(self, tmp_path, key):
@@ -2142,8 +2372,7 @@ class TestManagedInstallClaude:
         _setup_claude_hooks(AGENT_SCAN_CMD, path)
         _uninstall_test_client("claude", path)
 
-        data = json.loads(path.read_text())
-        assert "hooks" not in data
+        assert not path.exists()
 
 
 class TestManagedInstallCursor:
@@ -2170,8 +2399,7 @@ class TestManagedInstallCursor:
         _setup_cursor_hooks(CURSOR_AGENT_SCAN_CMD, path)
         _uninstall_test_client("cursor", path)
 
-        data = json.loads(path.read_text())
-        assert data["hooks"] == {}
+        assert not path.exists()
 
 
 # ===================================================================
@@ -2429,6 +2657,67 @@ def hook_server():
     server.shutdown()
 
 
+class _HangingHookHandler(BaseHTTPRequestHandler):
+    """Reads the request and never answers: a proxy that completes the handshake, then stalls."""
+
+    release = threading.Event()
+    received = threading.Event()
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        _HangingHookHandler.received.set()
+        _HangingHookHandler.release.wait(60)  # teardown releases; the cap bounds a leak
+
+    def log_message(self, format, *args):
+        pass
+
+
+class _ErrorHookHandler(BaseHTTPRequestHandler):
+    """Answers every POST with HTTP 500 and a body the forwarder must not pass on."""
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.send_response(500)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"error":"boom"}')
+
+    def log_message(self, format, *args):
+        pass
+
+
+@pytest.fixture()
+def hanging_hook_server():
+    """A server that accepts the hook request and never responds."""
+    _HangingHookHandler.release = threading.Event()
+    _HangingHookHandler.received = threading.Event()
+    # Threaded: the handler blocks, so a single-threaded server could not even shut down.
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _HangingHookHandler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    _HangingHookHandler.release.set()
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.fixture()
+def error_hook_server():
+    """A server that answers every hook request with HTTP 500."""
+    server = HTTPServer(("127.0.0.1", 0), _ErrorHookHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+    server.server_close()
+
+
+def _closed_port_url() -> str:
+    """A loopback URL nothing listens on."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return f"http://127.0.0.1:{sock.getsockname()[1]}"
+
+
 def _get_script_path(name: str) -> Path:
     from importlib import resources as importlib_resources
 
@@ -2494,11 +2783,11 @@ class TestUninstallCodex:
 
     def test_removes_hooks_key_when_empty(self, tmp_path):
         path = tmp_path / "hooks.json"
-        _write(path, {"hooks": {"PreToolUse": [_claude_group(CODEX_AGENT_SCAN_CMD)]}})
+        _write(path, {"theme": "dark", "hooks": {"PreToolUse": [_claude_group(CODEX_AGENT_SCAN_CMD)]}})
         _uninstall_test_client("codex", path)
 
         data = json.loads(path.read_text())
-        assert "hooks" not in data
+        assert data == {"theme": "dark"}
 
     def test_preserves_agentguard(self, tmp_path):
         path = tmp_path / "hooks.json"
@@ -2518,16 +2807,6 @@ class TestUninstallCodex:
         data = json.loads(path.read_text())
         assert len(data["hooks"]["PreToolUse"]) == 1
         assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == AGENTGUARD_CMD
-
-    def test_backup_created(self, tmp_path):
-        path = tmp_path / "hooks.json"
-        original = {"hooks": {"Stop": [_claude_group(CODEX_AGENT_SCAN_CMD)]}}
-        _write(path, original)
-        _uninstall_test_client("codex", path)
-
-        backup = Path(str(path) + ".backup")
-        assert backup.exists()
-        assert json.loads(backup.read_text()) == original
 
     def test_full_install_then_uninstall(self, tmp_path):
         path = tmp_path / "hooks.json"
@@ -2753,7 +3032,7 @@ class TestUninstallHooks:
             "codex": _prepare_codex_config,
         }[client]
         config, _, preserved = prepare(CODEX_AGENT_SCAN_CMD, path, discover_command=CODEX_DISCOVER_CMD)
-        _write_config(config, path, preserved)
+        _write_config(config, path, preserved, client=client)
         capsys.readouterr()
 
         _uninstall_test_client(client, path)
@@ -2775,19 +3054,6 @@ class TestUninstallHooks:
         _uninstall_test_client(client, tmp_path / filename)
 
         assert f"No {filename} found. Nothing to uninstall." in capsys.readouterr().out
-
-    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
-    def test_overwrites_existing_backup(self, tmp_path, client):
-        event, entry = self._event_and_entry(client, CODEX_AGENT_SCAN_CMD)
-        path = tmp_path / ("settings.json" if client == "claude" else "hooks.json")
-        original = {"hooks": {event: [entry]}, "current": True}
-        _write(path, original)
-        backup = Path(f"{path}.backup")
-        backup.write_text("stale backup")
-
-        _uninstall_test_client(client, path)
-
-        assert json.loads(backup.read_text()) == original
 
     @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
     def test_no_backup_when_nothing_matched(self, tmp_path, client):
@@ -3087,7 +3353,7 @@ class TestCodexManagedRequirementsToml:
 
         with (
             patch(f"{_G}.IS_WINDOWS", False),
-            patch(f"{_G}._send_test_event", return_value=True),
+            patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT),
             patch(f"{_G}.rich"),
             patch.dict(os.environ, {"AGENT_SCAN_COMMAND": "/usr/local/bin/open-agent-scan"}),
         ):
@@ -3102,6 +3368,7 @@ class TestCodexManagedRequirementsToml:
                 False,
                 "tid-1",
                 "machine-42",
+                machine_serial="",
             )
 
         assert (tmp_path / "hooks" / "agent-guard.sh").exists()
@@ -3120,7 +3387,7 @@ class TestCodexManagedRequirementsToml:
         with (
             patch(f"{_G}.IS_WINDOWS", False),
             patch(f"{_G}._agent_scan_command", return_value=None),
-            patch(f"{_G}._send_test_event", return_value=True),
+            patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT),
             patch(f"{_G}.rich") as rich,
         ):
             _install_hooks(
@@ -3134,6 +3401,7 @@ class TestCodexManagedRequirementsToml:
                 False,
                 "tid-1",
                 "machine-42",
+                machine_serial="",
             )
 
         assert not discover_script.exists()
@@ -3220,15 +3488,6 @@ class TestCodexManagedRequirementsToml:
         assert info is not None
         assert info["auth_value"] == "pk-codex"
 
-    def test_uninstall_removes_file(self, tmp_path):
-        install, uninstall, _, _ = self._import_managed_helpers()
-        path = tmp_path / "requirements.toml"
-        script = tmp_path / "hooks" / "agent-guard.sh"
-        install(CODEX_AGENT_SCAN_CMD, path, script)
-        assert path.exists()
-        uninstall(path)
-        assert not path.exists()
-
     def test_uninstall_missing_file_is_noop(self, tmp_path):
         _, uninstall, _, _ = self._import_managed_helpers()
         uninstall(tmp_path / "requirements.toml")  # should not raise
@@ -3260,254 +3519,589 @@ class TestCodexManagedRequirementsToml:
 
         assert parsed_discover == discover_command
 
-    def test_prepare_survives_unparseable_existing_toml(self, tmp_path):
+    def test_prepare_refuses_unparseable_existing_toml(self, tmp_path):
         path = tmp_path / "requirements.toml"
         path.write_text('command = "C:\\Users\\bad"\n')
-        content, diff = _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path)
-        assert "[features]" in content
-        assert diff["removed"]
+        before = path.read_bytes()
+        with pytest.raises(CodexRequirementsError, match="not valid TOML"):
+            _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path)
+        assert path.read_bytes() == before
 
 
 # ===================================================================
-# Install-time variables section of the forwarder scripts
+# Codex managed: requirements.toml is edited in place
 # ===================================================================
 
+_CODEX_ADMIN_POLICY = """\
+# Managed by IT. Do not edit by hand.
+allowed_approval_policies = ["never", "on-request"]  # keep in sync with MDM
 
-# agent-monitor accepts a cli_version only in this shape and silently degrades anything
-# else to "unknown" (GuardrailingContext.get_cli_version / _CLI_VERSION_RE in
-# agent-monitor's src/agent_monitor/utils/guardrailing_context.py). Pinned here so a
-# version scheme the platform would drop fails on our side, where it is fixable.
-_AGENT_MONITOR_CLI_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
+[features]
+hooks = true
+
+[sandbox]
+mode = 'read-only'
+
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "python3 /etc/codex/hooks/policy.py"
+"""
+
+
+def _codex_managed_install(path: Path, command: str = CODEX_AGENT_SCAN_CMD, *, discover_command=None) -> bool:
+    content, _ = _prepare_codex_managed_config(command, path, discover_command=discover_command)
+    return _write_codex_managed_config(content, path)
+
+
+def _codex_dirs_toml(path: Path) -> str:
+    managed_dir, windows_managed_dir = guard_module._codex_managed_dirs(path)
+    return f"managed_dir = {toml_escape(managed_dir)}\nwindows_managed_dir = {toml_escape(windows_managed_dir)}\n"
+
+
+def _codex_guard_free(text: str) -> str:
+    """``text`` without the lines Guard writes for its hooks."""
+    data = guard_module.tomllib.loads(text)
+    for groups in data.get("hooks", {}).values():
+        if isinstance(groups, list):
+            for group in groups:
+                for entry in group.get("hooks", []):
+                    assert not _is_agent_scan_command(entry.get("command", "")), text
+    return text
+
+
+class TestCodexRequirementsInPlace:
+    @pytest.fixture(autouse=True)
+    def _posix_paths(self):
+        with patch(f"{_G}.IS_WINDOWS", False), patch(f"{_G}.rich"):
+            yield
+
+    def test_install_keeps_admin_content_byte_for_byte(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+
+        assert _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith(_CODEX_ADMIN_POLICY)
+        appended = text[len(_CODEX_ADMIN_POLICY) :]
+        assert appended.startswith("\n[hooks]\n" + _codex_dirs_toml(path) + "\n")
+        for event in CODEX_HOOK_EVENTS:
+            assert f"[[hooks.{event}]]\n[[hooks.{event}.hooks]]\n" in appended
+        assert appended.endswith(f"command = {toml_escape(CODEX_DISCOVER_CMD)}\nasync = true\n")
+        info = _detect_codex_install(path)
+        assert info is not None and info["auth_value"] == "pk-codex"
+
+    def test_install_into_missing_file_matches_render(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+        expected = guard_module._render_codex_requirements_toml(
+            CODEX_AGENT_SCAN_CMD, path, discover_command=CODEX_DISCOVER_CMD
+        )
+        assert path.read_text(encoding="utf-8") == expected
+
+    def test_install_into_empty_file_matches_render(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("", encoding="utf-8")
+        _codex_managed_install(path)
+        assert path.read_text(encoding="utf-8") == guard_module._render_codex_requirements_toml(
+            CODEX_AGENT_SCAN_CMD, path
+        )
+
+    def test_install_twice_does_not_rewrite(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+        _guard_backup(path).unlink()
+        installed = path.read_bytes()
+
+        content, diff = _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path, discover_command=CODEX_DISCOVER_CMD)
+        with patch(f"{_G}._atomic_write_text") as write:
+            assert _write_codex_managed_config(content, path) is False
+
+        write.assert_not_called()
+        assert diff == {"added": {}, "modified": {}, "removed": {}}
+        assert path.read_bytes() == installed
+        assert not _guard_backup(path).exists()
+
+    def test_reinstall_with_new_push_key_changes_only_guard_command_lines(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+        before = path.read_text(encoding="utf-8").split("\n")
+
+        new_cmd = CODEX_AGENT_SCAN_CMD.replace("pk-codex", "pk-rotated")
+        new_discover = CODEX_DISCOVER_CMD.replace("pk-discover", "pk-rotated")
+        assert _codex_managed_install(path, new_cmd, discover_command=new_discover)
+        after = path.read_text(encoding="utf-8").split("\n")
+
+        assert len(after) == len(before)
+        changed = [(old, new) for old, new in zip(before, after, strict=True) if old != new]
+        assert changed
+        for old, new in changed:
+            assert old.startswith("command = ") and "PUSH_KEY=" in old
+            assert new in (f"command = {toml_escape(new_cmd)}", f"command = {toml_escape(new_discover)}")
+
+    def test_install_then_uninstall_restores_original_bytes(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        original = '# policy\nallowed_approval_policies = ["never"]\n\n[features]\nhooks = true  # pinned\n\n[sandbox]\nmode = "x"\n'
+        path.write_text(original, encoding="utf-8")
+        before = path.read_bytes()
+
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+        guard_module._uninstall_codex_managed(path)
+
+        assert path.read_bytes() == before
+
+    def test_uninstall_keeps_non_guard_content(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+
+        guard_module._uninstall_codex_managed(path)
+
+        assert path.exists()
+        text = _codex_guard_free(path.read_text(encoding="utf-8"))
+        # A non-Guard hook remains and may live in the managed dir, so the dirs stay.
+        assert text == _CODEX_ADMIN_POLICY + "\n[hooks]\n" + _codex_dirs_toml(path)
+        assert _detect_codex_install(path) is None
+
+    def test_install_adds_hooks_flag_to_existing_features_table(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[features]\nother = 1\n\n# trailing comment\n", encoding="utf-8")
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("[features]\nother = 1\nhooks = true\n\n# trailing comment\n\n[hooks]\n")
+
+    def test_install_turns_disabled_hooks_flag_on_and_warns(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[features]\n  hooks = false # off\n", encoding="utf-8")
+        with patch(f"{_G}.rich") as rich:
+            _codex_managed_install(path)
+        assert path.read_text(encoding="utf-8").startswith("[features]\n  hooks = true\n\n[hooks]\n")
+        assert any("hooks was False" in str(c.args[0]) for c in rich.print.call_args_list if c.args)
+
+    def test_install_appends_features_table_when_missing(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text('allowed_approval_policies = ["never"]', encoding="utf-8")  # no final newline
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith(
+            'allowed_approval_policies = ["never"]\n\n[features]\nhooks = true\n\n[hooks]\n' + _codex_dirs_toml(path)
+        )
+
+    def test_install_adds_dirs_to_existing_hooks_table(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[features]\nhooks = true\n\n[hooks]\n# managed below\n\n[other]\nx = 1\n", encoding="utf-8")
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("[features]\nhooks = true\n\n[hooks]\n" + _codex_dirs_toml(path) + "# managed below\n")
+        assert "[other]\nx = 1\n\n[[hooks.PreToolUse]]\n" in text
+
+    def test_install_keeps_existing_identical_managed_dir_written_as_literal(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        managed_dir, _ = guard_module._codex_managed_dirs(path)
+        path.write_text(f"[hooks]\nmanaged_dir = '{managed_dir}'\n", encoding="utf-8")
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.count("managed_dir =") == 1  # only the admin's literal line
+        assert f"[hooks]\nmanaged_dir = '{managed_dir}'\n\n" in text
+
+    def test_install_keeps_admins_managed_dir(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text('[hooks]\nmanaged_dir = "/opt/enterprise/hooks"\n', encoding="utf-8")
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith('[hooks]\nmanaged_dir = "/opt/enterprise/hooks"\n\n')
+        assert guard_module.tomllib.loads(text)["hooks"]["managed_dir"] == "/opt/enterprise/hooks"
+        assert guard_module._parse_codex_requirements_toml(text)[0]  # Guard hooks installed
+
+    def test_install_then_uninstall_with_admins_managed_dir_restores_original_bytes(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        original = (
+            '[features]\nhooks = true\n\n[hooks]\nmanaged_dir = "/opt/enterprise/hooks"\n\n'
+            '[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = "/opt/enterprise/hooks/audit.sh"\n'
+        )
+        path.write_text(original, encoding="utf-8")
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+        guard_module._uninstall_codex_managed(path)
+        assert path.read_text(encoding="utf-8") == original
+
+    def test_install_keeps_other_platform_dir_without_adding_its_own(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[hooks]\nwindows_managed_dir = 'D:\\hooks'\n", encoding="utf-8")
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("[hooks]\nwindows_managed_dir = 'D:\\hooks'\n\n[features]\nhooks = true\n\n[[hooks.")
+        assert text.count("managed_dir =") == 1
+
+    def test_windows_install_keeps_admins_windows_managed_dir(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[hooks]\nwindows_managed_dir = 'D:\\hooks'\n", encoding="utf-8")
+        with patch(f"{_G}.IS_WINDOWS", True):
+            _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("[hooks]\nwindows_managed_dir = 'D:\\hooks'\n")
+        assert guard_module.tomllib.loads(text)["hooks"]["windows_managed_dir"] == "D:\\hooks"
+
+    def test_install_invalid_toml_fails_and_leaves_file(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[features\nhooks = true\n", encoding="utf-8")
+        before = path.read_bytes()
+        with pytest.raises(CodexRequirementsError, match="not valid TOML"):
+            _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path)
+        assert path.read_bytes() == before
+
+    def test_install_refuses_layout_it_cannot_append_to(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text('[hooks]\nPreToolUse = [{ hooks = [{ type = "command", command = "x" }] }]\n', encoding="utf-8")
+        before = path.read_bytes()
+        with pytest.raises(CodexRequirementsError, match="layout not supported"):
+            _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path)
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize(
+        "layout",
+        [
+            '[[hooks.Stop]]\nhooks = [{{ type = "command", command = {command} }}]\n',
+            '[[hooks.Stop]]\n[hooks.Stop.extra]\nnote = "x"\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = {command}\n',
+        ],
+        ids=["inline-entries", "extra-nested-table"],
+    )
+    def test_guard_hook_in_layout_it_cannot_edit_is_refused(self, tmp_path, layout):
+        path = tmp_path / "requirements.toml"
+        path.write_text(
+            _CODEX_ADMIN_POLICY + "\n" + layout.format(command=json.dumps(CODEX_AGENT_SCAN_CMD)), encoding="utf-8"
+        )
+        before = path.read_bytes()
+        for edit in (
+            lambda: _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path),
+            lambda: _strip_guard_from_codex_requirements(path.read_text(encoding="utf-8"), path),
+        ):
+            with pytest.raises(CodexRequirementsError, match="layout Agent Guard cannot edit"):
+                edit()
+        assert path.read_bytes() == before
+
+    def test_uninstall_invalid_toml_fails_and_leaves_file(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(
+            guard_module._render_codex_requirements_toml(CODEX_AGENT_SCAN_CMD, path) + "[broken\n", encoding="utf-8"
+        )
+        before = path.read_bytes()
+        with pytest.raises(CodexRequirementsError, match="not valid TOML"):
+            guard_module._uninstall_codex_managed(path)
+        assert path.read_bytes() == before
+
+    def test_run_guard_reports_requirements_error(self):
+        with (
+            patch(f"{_G}._run_uninstall", side_effect=CodexRequirementsError("/etc/codex/requirements.toml: boom")),
+            patch(f"{_G}.rich") as rich,
+        ):
+            assert guard_module.run_guard(SimpleNamespace(guard_command="uninstall")) == 1
+        assert "boom" in rich.print.call_args.args[0]
+
+    def test_uninstall_removes_only_guard_entry_from_mixed_group(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        mixed = (
+            "[[hooks.PreToolUse]]\n"
+            'matcher = "^Bash$"\n'
+            "\n"
+            "[[hooks.PreToolUse.hooks]]\n"
+            'type = "command"\n'
+            'command = "python3 /etc/codex/hooks/policy.py"\n'
+            "\n"
+            "[[hooks.PreToolUse.hooks]]\n"
+            'type = "command"\n'
+            f"command = {toml_escape(CODEX_AGENT_SCAN_CMD)}\n"
+            "\n"
+            "[sandbox]\n"
+            'mode = "x"\n'
+        )
+        path.write_text(mixed, encoding="utf-8")
+
+        guard_module._uninstall_codex_managed(path)
+
+        assert path.read_text(encoding="utf-8") == (
+            "[[hooks.PreToolUse]]\n"
+            'matcher = "^Bash$"\n'
+            "\n"
+            "[[hooks.PreToolUse.hooks]]\n"
+            'type = "command"\n'
+            'command = "python3 /etc/codex/hooks/policy.py"\n'
+            "\n"
+            "[sandbox]\n"
+            'mode = "x"\n'
+        )
+
+    @pytest.mark.parametrize(
+        "original",
+        [
+            b"# policy\r\n[features]\r\nhooks = true\r\n\r\n[sandbox]\r\nmode = 'x'\r\n",
+            b"# policy\n[features]\nhooks = true\n\n[sandbox]\nmode = 'x'\n",
+            b"# policy\r\n[features]\nhooks = true\r\n\n[sandbox]\nmode = 'x'\r\n",
+        ],
+        ids=["crlf", "lf", "mixed"],
+    )
+    def test_line_endings_survive_install_and_uninstall(self, tmp_path, original):
+        # On every platform, including LF-only and mixed files on Windows.
+        path = tmp_path / "requirements.toml"
+        path.write_bytes(original)
+
+        _codex_managed_install(path)
+        assert path.read_bytes().startswith(original)
+
+        guard_module._uninstall_codex_managed(path)
+        assert path.read_bytes() == original
+
+    def test_crlf_file_gets_crlf_guard_blocks(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_bytes(b"# policy\r\n[features]\r\nhooks = true\r\n")
+
+        _codex_managed_install(path)
+
+        installed = path.read_bytes()
+        assert installed.count(b"\n") == installed.count(b"\r\n")
+
+    def test_uninstall_removes_guard_hook_written_as_literal_string(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        command = CODEX_AGENT_SCAN_CMD.replace("'", "")
+        path.write_text(
+            _CODEX_ADMIN_POLICY + f"\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = 'command'\ncommand = '{command}'\n",
+            encoding="utf-8",
+        )
+
+        guard_module._uninstall_codex_managed(path)
+
+        assert path.read_text(encoding="utf-8") == _CODEX_ADMIN_POLICY
+
+
+class TestStripGuardFromCodexRequirements:
+    PATH = Path("/etc/codex/requirements.toml")
+
+    @pytest.fixture(autouse=True)
+    def _posix(self):
+        with patch(f"{_G}.IS_WINDOWS", False):
+            yield
+
+    def _render(self, **kwargs) -> str:
+        return guard_module._render_codex_requirements_toml(CODEX_AGENT_SCAN_CMD, self.PATH, **kwargs)
+
+    def test_rendered_guard_file_keeps_only_features_flag(self):
+        text = self._render(discover_command=CODEX_DISCOVER_CMD)
+        assert _strip_guard_from_codex_requirements(text, self.PATH) == "[features]\nhooks = true\n"
+
+    def test_default_path_is_codex_managed_path(self):
+        text = guard_module._render_codex_requirements_toml(CODEX_AGENT_SCAN_CMD, CODEX_MANAGED_HOOKS_PATH)
+        assert _strip_guard_from_codex_requirements(text) == "[features]\nhooks = true\n"
+
+    def test_dirs_kept_when_other_hooks_remain(self):
+        text = self._render() + '\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "/bin/true"\n'
+        stripped = _strip_guard_from_codex_requirements(text, self.PATH)
+        assert stripped == (
+            "[features]\nhooks = true\n\n[hooks]\n"
+            + _codex_dirs_toml(self.PATH)
+            + '\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "/bin/true"\n'
+        )
+
+    def _guard_group(self) -> str:
+        return (
+            f'\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = {toml_escape(CODEX_AGENT_SCAN_CMD)}\n'
+        )
+
+    def test_dirs_kept_when_value_differs(self):
+        text = '[hooks]\nmanaged_dir = "/opt/other"\nwindows_managed_dir = "C:\\\\ProgramData\\\\OpenAI\\\\Codex\\\\hooks"\n'
+        text += self._guard_group()
+        assert _strip_guard_from_codex_requirements(text, self.PATH) == '[hooks]\nmanaged_dir = "/opt/other"\n'
+
+    def test_windows_dir_compared_unescaped_in_any_quoting(self):
+        literal = (
+            "[hooks]\nmanaged_dir = '/etc/codex/hooks'\nwindows_managed_dir = 'C:\\ProgramData\\OpenAI\\Codex\\hooks'\n"
+        ) + self._guard_group()
+        assert _strip_guard_from_codex_requirements(literal, self.PATH) == ""
+
+    def test_admins_dirs_equal_to_guards_kept_without_guard_hooks(self):
+        text = "[hooks]\n" + _codex_dirs_toml(self.PATH)
+        assert _strip_guard_from_codex_requirements(text, self.PATH) == text
+
+    def test_hooks_header_with_comment_is_kept(self):
+        text = "[hooks]\n# keep me\n" + _codex_dirs_toml(self.PATH) + self._guard_group()
+        assert _strip_guard_from_codex_requirements(text, self.PATH) == "[hooks]\n# keep me\n"
+
+    def test_guard_group_between_admin_tables(self):
+        guard = (
+            f'[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = {toml_escape(CODEX_AGENT_SCAN_CMD)}\n'
+        )
+        text = f"[a]\nx = 1\n\n{guard}\n# about b\n[b]\ny = 2\n"
+        assert _strip_guard_from_codex_requirements(text, self.PATH) == "[a]\nx = 1\n\n# about b\n[b]\ny = 2\n"
+
+    def test_guard_group_with_literal_command_string(self):
+        guard_literal = f"[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = 'command'\ncommand = '{CODEX_AGENT_SCAN_CMD.replace(chr(39), '')}'\n"
+        assert _is_agent_scan_command(CODEX_AGENT_SCAN_CMD.replace("'", ""))
+        assert _strip_guard_from_codex_requirements("x = 1\n\n" + guard_literal, self.PATH) == "x = 1\n"
+
+    def test_invalid_toml_raises(self):
+        with pytest.raises(CodexRequirementsError, match="not valid TOML"):
+            _strip_guard_from_codex_requirements("[hooks\n", self.PATH)
+
+    def test_header_lookalike_inside_multiline_string_is_refused_not_corrupted(self):
+        tricky = (
+            'note = """\n[[hooks.Stop]]\n"""\n\n'
+            f'[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = {toml_escape(CODEX_AGENT_SCAN_CMD)}\n'
+        )
+        # The line model miscounts the groups here; the edit is refused.
+        with pytest.raises(CodexRequirementsError, match="layout"):
+            _strip_guard_from_codex_requirements(tricky, self.PATH)
+
+
+# ===================================================================
+# Version placeholder of the forwarder scripts
+# ===================================================================
+
 
 _FORWARDER_SCRIPTS = ("agent-guard.sh", "agent-guard.ps1")
 _TRAMPOLINE_SCRIPTS = ("agent-guard-discover.sh", "agent-guard-discover.ps1")
 
-_SECTION_BEGIN = guard_module._SECTION_BEGIN.decode()
-_SECTION_END = guard_module._SECTION_END.decode()
+_VERSION_PLACEHOLDER = b"__AGENT_SCAN_VERSION__"
+# The line the release pipeline stamps: `AGENT_SCAN_VERSION="..."` (sh) or
+# `$AGENT_SCAN_VERSION = "..."` (ps1). The fallback comparison further down is not matched.
+_VERSION_ASSIGNMENT_RE = re.compile(rb'^(\$?AGENT_SCAN_VERSION\s*=\s*")' + _VERSION_PLACEHOLDER + rb'(")', re.MULTILINE)
 
-_PLACEHOLDER_RE = re.compile(r"__[A-Za-z0-9_]+__")
-
-
-def _split_on_section(text: str) -> tuple[str, str, str]:
-    """Split *text* around the install-time variables markers into head, body, tail."""
-    assert _SECTION_BEGIN in text
-    assert _SECTION_END in text
-    head, rest = text.split(_SECTION_BEGIN, 1)
-    section, tail = rest.split(_SECTION_END, 1)
-    return head, section, tail
-
-
-def _variables_section(text: str) -> str:
-    """Return the body between the scripts' install-time variables markers."""
-    return _split_on_section(text)[1]
-
-
-# ``version_info`` is "unknown" wherever the distribution metadata is unresolvable, which
-# is also what the scripts report for a placeholder install never filled in. Asserting a
-# sentinel instead keeps the installed/uninstalled pair apart in such an environment.
+# Anything no fallback could have produced.
 _SENTINEL_VERSION = "9.9.9-test"
 
 
-def _copy_with_sentinel_version(monkeypatch, dest: Path) -> None:
-    """Install *dest* carrying a version no fallback could have produced."""
-    monkeypatch.setattr(
-        guard_module,
-        "_hook_script_variables",
-        lambda: {b"__AGENT_SCAN_VERSION__": _SENTINEL_VERSION.encode()},
-    )
-    guard_module._copy_hook_script(dest)
+def _stamped_script(tmp_path: Path, name: str) -> Path:
+    """A copy of forwarder *name* stamped the way the release pipeline does it."""
+    shipped = _get_script_path(name).read_bytes()
+    stamped, count = _VERSION_ASSIGNMENT_RE.subn(rb"\g<1>" + _SENTINEL_VERSION.encode() + rb"\g<2>", shipped)
+    assert count == 1, f"{name}: expected exactly one version assignment to stamp"
+    dest = tmp_path / "hooks" / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(stamped)
+    return dest
 
 
-class TestHookScriptInstallTimeVariables:
-    """Both forwarder scripts carry a variables section that install fills in."""
+# Matched on bytes, and Windows checks the scripts out with CRLF, so the line end may carry \r.
+_SH_BUDGET_RE = re.compile(rb"^TIMEOUT_SECONDS=(\d+)(?=\r?$)", re.MULTILINE)
+_PS_BUDGET_RE = re.compile(rb"^\$TIMEOUT_SECONDS = (\d+)(?=\r?$)", re.MULTILINE)
+
+
+def _forwarder_with_budget(tmp_path: Path, name: str, seconds: int) -> Path:
+    """A copy of forwarder *name* whose timeout constant is *seconds*.
+
+    Lets a test watch a timeout fire without waiting the shipped budget. Bytes in and out
+    keep the line endings as shipped.
+    """
+    regex = _PS_BUDGET_RE if name.endswith(".ps1") else _SH_BUDGET_RE
+    shipped = _get_script_path(name).read_bytes()
+    patched, count = regex.subn(lambda m: m.group(0)[: m.start(1) - m.start(0)] + str(seconds).encode(), shipped)
+    assert count == 1, f"{name}: expected exactly one TIMEOUT_SECONDS to rewrite"
+    dest = tmp_path / name
+    dest.write_bytes(patched)
+    return dest
+
+
+# A timeout flag followed directly by a number would bypass the one constant.
+_TIMEOUT_LITERAL_RE = re.compile(r"(?:--max-time|-TimeoutSec)\s+\d")
+# How long agent-monitor may legitimately take to answer: it holds a PreToolUse for up to
+# 25 s until the session's discovery arrives, then evaluates within its 25 s session
+# autorelease budget.
+_SERVER_BUDGET_SECONDS = 50
+
+# The sentence both forwarders show the user when they fail open. Claude Code and Codex
+# render it from a `systemMessage` JSON field on stdout; every client gets it on stderr.
+FAIL_OPEN_MESSAGE = "Unable to reach the configured hook service to validate agent behavior. Please check your network and configuration and try again."
+# Clients whose hook output schema defines `systemMessage` (Claude Code and Codex docs);
+# Cursor's permission hooks block on stdout that does not match their schema and Copilot
+# documents no such field, so those two must see nothing on stdout.
+SYSTEM_MESSAGE_CLIENTS = ("claude-code", "codex")
+NO_STDOUT_CLIENTS = ("cursor", "github-copilot")
+_SH_MESSAGE_RE = re.compile(rb'^FAIL_OPEN_MESSAGE="(.*)"(?=\r?$)', re.MULTILINE)
+_PS_MESSAGE_RE = re.compile(rb'^\$FAIL_OPEN_MESSAGE = "(.*)"(?=\r?$)', re.MULTILINE)
+
+
+def _fail_open_message(name: str) -> str:
+    """The fail-open sentence as shipped in forwarder *name*."""
+    regex = _PS_MESSAGE_RE if name.endswith(".ps1") else _SH_MESSAGE_RE
+    matches = regex.findall(_get_script_path(name).read_bytes())
+    assert len(matches) == 1, f"{name}: expected exactly one FAIL_OPEN_MESSAGE, found {matches}"
+    return matches[0].decode()
+
+
+class TestHookScriptFailOpenMessage:
+    """The sentence is embedded in JSON verbatim, so it has to be identical in both scripts
+    and free of anything that would need escaping."""
 
     @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
-    def test_bundled_section_holds_the_version_placeholder(self, name):
-        section = _variables_section(_get_script_path(name).read_text())
+    def test_shipped_sentence_matches_the_pinned_one(self, name):
+        assert _fail_open_message(name) == FAIL_OPEN_MESSAGE
 
-        assert "__AGENT_SCAN_VERSION__" in section
+    def test_sentence_needs_no_json_escaping(self):
+        assert not re.search(r'["\\\x00-\x1f\x7f]', FAIL_OPEN_MESSAGE)
+        assert json.loads('{"systemMessage":"' + FAIL_OPEN_MESSAGE + '"}') == {"systemMessage": FAIL_OPEN_MESSAGE}
 
-    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
-    def test_bundled_section_is_well_formed(self, name):
-        """Substitution trusts these markers, so the committed scripts have to declare them.
+    def test_sentence_is_well_under_claude_codes_cap(self):
+        # Claude Code caps systemMessage at 10,000 characters and drops longer values.
+        assert len(FAIL_OPEN_MESSAGE) < 1000
 
-        One BEGIN ahead of one END. A script declaring them any other way has no section
-        install can find, and would be copied with its placeholders intact.
-        """
-        text = _get_script_path(name).read_text()
 
-        assert text.count(_SECTION_BEGIN) == 1
-        assert text.count(_SECTION_END) == 1
-        assert text.index(_SECTION_BEGIN) < text.index(_SECTION_END)
+class TestHookScriptRequestBudget:
+    """Both forwarders bound the request with one constant that outlasts the server's
+    budget."""
 
-    def test_shipped_variable_names_are_placeholder_shaped(self):
-        """``__NAME__`` is what makes a variable unambiguous inside the section.
-
-        Substitution is a plain replace over the section body, so a name of any other
-        shape could match ordinary script text and rewrite it.
-        """
-        for placeholder in guard_module._hook_script_variables():
-            assert _PLACEHOLDER_RE.fullmatch(placeholder.decode())
+    @staticmethod
+    def _budget(name: str) -> int:
+        text = _get_script_path(name).read_bytes()
+        regex = _PS_BUDGET_RE if name.endswith(".ps1") else _SH_BUDGET_RE
+        matches = regex.findall(text)
+        assert len(matches) == 1, f"{name}: expected exactly one TIMEOUT_SECONDS, found {matches}"
+        return int(matches[0])
 
     @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
-    def test_copy_substitutes_the_whole_section(self, tmp_path, name):
+    def test_budget_outlasts_the_server_budget(self, name):
+        assert self._budget(name) > _SERVER_BUDGET_SECONDS
+
+    def test_both_forwarders_share_one_budget(self):
+        assert self._budget("agent-guard.sh") == self._budget("agent-guard.ps1")
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_no_timeout_literal_bypasses_the_resolved_value(self, name):
+        assert _TIMEOUT_LITERAL_RE.search(_get_script_path(name).read_text()) is None
+
+
+class TestHookScriptVersionPlaceholder:
+    """Install fills the forwarder version and preserves its fallback comparison."""
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_bundled_script_has_one_assignment_to_stamp(self, name):
+        assert len(_VERSION_ASSIGNMENT_RE.findall(_get_script_path(name).read_bytes())) == 1
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_bundled_script_keeps_the_fallback_literal(self, name):
+        """Stamping must only touch the assignment: the comparison against the literal
+        placeholder is what scrubs a script that was never stamped."""
+        assert _get_script_path(name).read_bytes().count(_VERSION_PLACEHOLDER) == 2
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS + _TRAMPOLINE_SCRIPTS)
+    def test_copy_fills_only_install_variables(self, tmp_path, monkeypatch, name):
+        monkeypatch.setattr("agent_scan.version.version_info", _SENTINEL_VERSION)
         dest = tmp_path / "hooks" / name
         guard_module._copy_hook_script(dest)
-
-        section = _variables_section(dest.read_text())
-        assert f'"{version_info}"' in section
-        # A placeholder left unsubstituted travels to the platform as a literal, so the
-        # rendered section must hold no `__NAME__` -- including variables added later.
-        assert not _PLACEHOLDER_RE.search(section)
-
-    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
-    def test_copy_leaves_everything_outside_the_section_untouched(self, tmp_path, name):
-        """Install rewrites the section and nothing else.
-
-        The scripts hold `__NAME__`-shaped literals outside the section -- the fallbacks
-        below, and the sh script's curl status marker. A substitution that reached them
-        would silently change what the script does.
-        """
-        dest = tmp_path / "hooks" / name
-        guard_module._copy_hook_script(dest)
-
-        bundled_head, _, bundled_tail = _split_on_section(_get_script_path(name).read_text())
-        head, _, tail = _split_on_section(dest.read_text())
-
-        assert (head, tail) == (bundled_head, bundled_tail)
-
-    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
-    def test_every_placeholder_in_the_section_has_a_substitution(self, name):
-        section = _variables_section(_get_script_path(name).read_text())
-
-        declared = set(_PLACEHOLDER_RE.findall(section))
-        assert declared == {key.decode() for key in guard_module._hook_script_variables()}
-
-    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
-    def test_every_placeholder_has_a_fallback_outside_the_section(self, name):
-        """Each script scrubs a variable install never filled in.
-
-        The comparison is against the literal placeholder, so it has to sit outside the
-        section: substituting over it would rewrite the very literal it tests for.
-        """
-        head, _, tail = _split_on_section(_get_script_path(name).read_text())
-
-        for placeholder in guard_module._hook_script_variables():
-            assert placeholder.decode() in head + tail
-
-
-class TestHookScriptVariableValues:
-    """What install would write into the section is checked before it is handed out."""
-
-    # Shapes a release can plausibly produce, all inert inside the double-quoted shell
-    # literal they land in.
-    _ACCEPTED = ("0.6.2", "0.6.2+g1234f00", "1.2.3.dev0", "unknown", "1")
-
-    # Values that would break the rendered script, execute at hook time, or reach the
-    # platform as something it drops.
-    _REJECTED = (
-        "",
-        '0.6.2"; id; x="',
-        "$(id)",
-        "`id`",
-        "back\\slash",
-        "two\nlines",
-        "with space",
-        "1!2.0",
-        "_leading",
-        "a" * 65,
-    )
-
-    @pytest.mark.parametrize("value", _ACCEPTED)
-    def test_accepts_a_release_shaped_value(self, monkeypatch, value):
-        monkeypatch.setattr(version_module, "version_info", value)
-
-        assert guard_module._hook_script_variables() == {b"__AGENT_SCAN_VERSION__": value.encode()}
-        # Both consumers have to accept it: the shell that parses the script, and
-        # agent-monitor, which degrades anything outside its shape to "unknown".
-        assert _AGENT_MONITOR_CLI_VERSION_RE.fullmatch(value)
-
-    @pytest.mark.parametrize("value", _REJECTED)
-    def test_rejects_a_value_the_shell_or_the_platform_would_mangle(self, monkeypatch, value):
-        monkeypatch.setattr(version_module, "version_info", value)
-
-        with pytest.raises(ValueError, match="install-time"):
-            guard_module._hook_script_variables()
-
-        assert not _AGENT_MONITOR_CLI_VERSION_RE.fullmatch(value)
-
-    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
-    def test_install_fails_rather_than_writing_an_unusable_value(self, monkeypatch, tmp_path, name):
-        """The check gates the copy, so a rejected value never reaches a hook script."""
-        monkeypatch.setattr(version_module, "version_info", '0.6.2"; id; x="')
-        dest = tmp_path / "hooks" / name
-
-        with pytest.raises(ValueError, match="install-time"):
-            guard_module._copy_hook_script(dest)
-
-        assert not dest.exists()
-
-    def test_the_shipped_variables_are_the_cli_version(self):
-        """The sentinel-driven tests prove the plumbing; this pins what actually ships."""
-        assert guard_module._hook_script_variables() == {b"__AGENT_SCAN_VERSION__": version_info.encode()}
-
-
-class TestHookScriptVariableSubstitution:
-    """Only the section is rewritten, with whatever the variables mapping holds."""
-
-    _SCRIPT = b"".join(
-        (
-            b'head "__X__"\n',
-            guard_module._SECTION_BEGIN,
-            b'\nV="__X__"\n',
-            guard_module._SECTION_END,
-            b'\ntail "__X__"\n',
-        )
-    )
-
-    def test_substitutes_only_inside_the_section(self, monkeypatch):
-        monkeypatch.setattr(guard_module, "_hook_script_variables", lambda: {b"__X__": b"0.6.2"})
-
-        rendered = guard_module._substitute_hook_script_variables(self._SCRIPT)
-
-        assert b'V="0.6.2"' in rendered
-        assert rendered.count(b"__X__") == 2
-        assert rendered.startswith(b'head "__X__"\n')
-        assert rendered.endswith(b'tail "__X__"\n')
-
-    @pytest.mark.parametrize(
-        "content",
-        [
-            _SCRIPT.split(_SECTION_END.encode())[0],
-            guard_module._SECTION_END,
-            guard_module._SECTION_END + guard_module._SECTION_BEGIN,
-        ],
-    )
-    def test_only_a_complete_section_is_rewritten(self, content):
-        """Anything short of a BEGIN-then-END pair leaves the script as it was.
-
-        What the forwarders ship is pinned against the markers elsewhere. One that lost
-        its section keeps its placeholder, which the script's own fallback scrubs at hook
-        time rather than reporting it as a version.
-        """
-        assert guard_module._substitute_hook_script_variables(content) == content
+        source = _get_script_path(name).read_bytes()
+        if name in _FORWARDER_SCRIPTS:
+            expected, count = _VERSION_ASSIGNMENT_RE.subn(rb"\g<1>" + _SENTINEL_VERSION.encode() + rb"\g<2>", source)
+            assert count == 1
+            assert dest.read_bytes() == expected
+            assert dest.read_bytes().count(_VERSION_PLACEHOLDER) == 1
+        else:
+            assert dest.read_bytes() == source
 
     @pytest.mark.parametrize("name", _TRAMPOLINE_SCRIPTS)
-    def test_trampolines_carry_no_install_time_variables(self, tmp_path, name):
-        """The trampolines exec the CLI, which reports its own version directly.
-
-        They declare no section, so install has nothing to fill in and copies them
-        verbatim. A variable one of them ever needs has to be declared here first.
-        """
-        bundled = _get_script_path(name).read_bytes()
-        assert guard_module._SECTION_BEGIN not in bundled
-        assert guard_module._SECTION_END not in bundled
-        assert not _PLACEHOLDER_RE.search(bundled.decode())
-
-        dest = tmp_path / "hooks" / name
-        guard_module._copy_hook_script(dest)
-
-        assert dest.read_bytes() == bundled
+    def test_trampolines_carry_no_placeholder(self, name):
+        """The trampolines exec the CLI, which reports its own version directly."""
+        assert _VERSION_PLACEHOLDER not in _get_script_path(name).read_bytes()
 
 
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")
@@ -3684,28 +4278,44 @@ class TestBashHookScript:
         assert result.returncode == 0
         assert json.loads(result.stdout) == {"ok": True}
 
-    def test_machine_id_sets_x_user_identifier(self, hook_server):
+    @pytest.mark.parametrize("serial", ["", 'C02"XYZ\\123', "control-\x01\b\f\x1f"])
+    @pytest.mark.parametrize("direct", [False, True], ids=["saved-command", "install-test"])
+    def test_machine_id_sets_x_user_identifier(self, hook_server, serial, monkeypatch, direct):
+        monkeypatch.setenv("MACHINE_SERIAL", "ambient-serial")
         script = _get_script_path("agent-guard.sh")
-        result = subprocess.run(
-            ["bash", str(script), "--client", "claude-code"],
-            input='{"hook_event_name":"test","session_id":"s1"}',
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env={
-                "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk",
-                "REMOTE_HOOKS_BASE_URL": hook_server,
-                "MACHINE_ID": "machine-42",
-            },
-        )
-        assert result.returncode == 0, result.stderr
+        payload = '{"hook_event_name":"test","session_id":"s1"}'
+        if direct:
+            ok, detail = guard_module._invoke_hook_script(
+                script,
+                "claude-code",
+                "test-pk",
+                hook_server,
+                payload,
+                machine_id="machine-42",
+                machine_serial=serial,
+            )
+            assert ok, detail
+        else:
+            command = _build_hook_command(
+                "test-pk", hook_server, script, "claude-code", machine_id="machine-42", machine_serial=serial
+            )
+            result = subprocess.run(
+                ["bash", "-c", command],
+                input=payload,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env={**os.environ, "MACHINE_SERIAL": "ambient-serial"},
+            )
+            assert result.returncode == 0, result.stderr
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
+        assert x_user["hostname"]
+        assert x_user["machine_serial"] == (serial or None)
 
     def test_installed_script_reports_its_cli_version(self, monkeypatch, tmp_path, hook_server):
         script = tmp_path / "hooks" / "agent-guard.sh"
-        _copy_with_sentinel_version(monkeypatch, script)
+        script = _stamped_script(tmp_path, "agent-guard.sh")
 
         result = subprocess.run(
             ["bash", str(script), "--client", "claude-code"],
@@ -3799,6 +4409,102 @@ class TestBashHookScript:
         assert result.returncode != 0
         assert "REMOTE_HOOKS_BASE_URL" in result.stderr
 
+    # --- failure handling: transport and HTTP failures fail open -----------------------
+
+    @staticmethod
+    def _failure_env(url: str) -> dict:
+        return {
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "PUSH_KEY": "test-pk-fail",
+            "REMOTE_HOOKS_BASE_URL": url,
+            "MACHINE_ID": "machine-42",
+        }
+
+    def test_hanging_server_fails_open_within_the_request_budget(self, hanging_hook_server, tmp_path):
+        script = _forwarder_with_budget(tmp_path, "agent-guard.sh", 2)
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=self._failure_env(hanging_hook_server),
+        )
+
+        assert _HangingHookHandler.received.is_set(), "server never saw the request: not a hang"
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert FAIL_OPEN_MESSAGE in result.stderr
+        assert "timed out" in result.stderr
+        assert "failing open" in result.stderr
+
+    def test_http_error_fails_open_without_forwarding_the_body(self, error_hook_server):
+        script = _get_script_path("agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=self._failure_env(error_hook_server),
+        )
+
+        assert result.returncode == 0, result.stderr
+        # The server's error body never reaches the agent; the user sees the fixed sentence.
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert "boom" not in result.stdout
+        assert "HTTP 500" in result.stderr
+        assert "failing open" in result.stderr
+
+    def test_connection_refused_fails_open(self):
+        script = _get_script_path("agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=self._failure_env(_closed_port_url()),
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert "curl exit 7" in result.stderr
+        assert "timed out" not in result.stderr
+
+    @pytest.mark.parametrize("client", SYSTEM_MESSAGE_CLIENTS + NO_STDOUT_CLIENTS)
+    def test_system_message_only_for_clients_whose_schema_defines_it(self, error_hook_server, client):
+        script = _get_script_path("agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", client],
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=self._failure_env(error_hook_server),
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert FAIL_OPEN_MESSAGE in result.stderr
+        if client in SYSTEM_MESSAGE_CLIENTS:
+            assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        else:
+            assert result.stdout == ""
+
+    def test_empty_payload_is_still_a_usage_error(self, hook_server):
+        script = _get_script_path("agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=self._failure_env(hook_server),
+        )
+
+        assert result.returncode != 0
+        assert "payload" in result.stderr
+
 
 @pytest.mark.skipif(not IS_WINDOWS, reason="PowerShell script; Windows only")
 class TestPowerShellDiscoveryHookScript:
@@ -3823,6 +4529,9 @@ class TestPowerShellDiscoveryHookScript:
         helper = tmp_path / "record.py"
         helper.write_text(
             "import os, sys\n"
+            "if os.environ.get('SERIAL_MARKER'):\n"
+            "    with open(os.environ['SERIAL_MARKER'], 'w') as fh:\n"
+            "        fh.write(os.environ.get('MACHINE_SERIAL') or '')\n"
             "with open(os.environ['MARKER'], 'w') as fh:\n"
             "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
             "    fh.write(sys.stdin.read())\n"
@@ -3859,6 +4568,25 @@ class TestPowerShellDiscoveryHookScript:
         recorded = marker.read_text().splitlines()
         assert recorded[0] == "guard discover --client claude-code --scope servers"
         assert json.loads("\n".join(recorded[1:])) == json.loads(payload)
+
+    @pytest.mark.parametrize("serial", [None, "", "C02XYZ123"])
+    def test_serial_parameter_replaces_inherited_serial(self, tmp_path, serial):
+        script = _get_script_path("agent-guard-discover.ps1")
+        marker = tmp_path / "invoked"
+        serial_marker = tmp_path / "serial"
+        stub = self._recording_stub(tmp_path, marker)
+        args = ["-AgentScanCommand", str(stub), "-MachineId", "machine-42"]
+        if serial is not None:
+            args.extend(["-MachineSerial", serial])
+        env = {
+            **os.environ,
+            "MARKER": str(marker),
+            "SERIAL_MARKER": str(serial_marker),
+            "MACHINE_SERIAL": "inherited-serial",
+        }
+        result = self._run(script, args, env)
+        assert result.returncode == 0, result.stderr
+        assert serial_marker.read_text() == (serial or "")
 
     def test_nonzero_discovery_exit_is_swallowed(self, tmp_path):
         script = _get_script_path("agent-guard-discover.ps1")
@@ -3997,7 +4725,9 @@ class TestPowerShellHookScript:
         assert result.returncode == 0, result.stderr
         assert "/hidden/agent-monitor/hooks/cursor" in _HookHandler.last_request["path"]
 
-    def test_machine_id_sets_x_user_identifier(self, hook_server):
+    @pytest.mark.parametrize("serial", [None, "", "C02XYZ123", "control-\x01\b\f\x1f"])
+    def test_machine_id_sets_x_user_identifier(self, hook_server, serial, monkeypatch):
+        monkeypatch.setenv("MACHINE_SERIAL", "ignored-env-serial")
         script = _get_script_path("agent-guard.ps1")
         result = subprocess.run(
             [
@@ -4012,6 +4742,7 @@ class TestPowerShellHookScript:
                 hook_server,
                 "-MachineId",
                 "machine-42",
+                *(["-MachineSerial", serial] if serial is not None else []),
             ],
             input='{"hook_event_name":"test","session_id":"s1"}',
             capture_output=True,
@@ -4021,10 +4752,11 @@ class TestPowerShellHookScript:
         assert result.returncode == 0, result.stderr
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
+        assert x_user["machine_serial"] == (serial or None)
 
     def test_installed_script_reports_its_cli_version(self, monkeypatch, tmp_path, hook_server):
         script = tmp_path / "hooks" / "agent-guard.ps1"
-        _copy_with_sentinel_version(monkeypatch, script)
+        script = _stamped_script(tmp_path, "agent-guard.ps1")
 
         result = subprocess.run(
             [
@@ -4120,6 +4852,100 @@ class TestPowerShellHookScript:
         )
         assert result.returncode != 0
 
+    # --- failure handling: transport and HTTP failures fail open -----------------------
+
+    def _failure_argv(self, url: str, script: Path | None = None, client: str = "claude-code") -> list[str]:
+        return [
+            self._ps_cmd(),
+            "-File",
+            str(script or _get_script_path("agent-guard.ps1")),
+            "-Client",
+            client,
+            "-PushKey",
+            "test-pk-fail",
+            "-RemoteUrl",
+            url,
+            "-MachineId",
+            "machine-42",
+        ]
+
+    def test_hanging_server_fails_open_within_the_request_budget(self, hanging_hook_server, tmp_path):
+        script = _forwarder_with_budget(tmp_path, "agent-guard.ps1", 2)
+        result = subprocess.run(
+            self._failure_argv(hanging_hook_server, script),
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert _HangingHookHandler.received.is_set(), "server never saw the request: not a hang"
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert FAIL_OPEN_MESSAGE in result.stderr
+        assert "timed out" in result.stderr
+        assert "failing open" in result.stderr
+
+    def test_http_error_fails_open_without_forwarding_the_body(self, error_hook_server):
+        result = subprocess.run(
+            self._failure_argv(error_hook_server),
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert "boom" not in result.stdout
+        assert "HTTP 500" in result.stderr
+        assert "failing open" in result.stderr
+
+    def test_connection_refused_fails_open(self):
+        # Windows retries the SYN on a refused loopback connect for about two seconds, well
+        # inside the shipped budget, so the refusal is what the script reports.
+        result = subprocess.run(
+            self._failure_argv(_closed_port_url()),
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert "request failed" in result.stderr
+        assert "failing open" in result.stderr
+
+    @pytest.mark.parametrize("client", SYSTEM_MESSAGE_CLIENTS + NO_STDOUT_CLIENTS)
+    def test_system_message_only_for_clients_whose_schema_defines_it(self, error_hook_server, client):
+        result = subprocess.run(
+            self._failure_argv(error_hook_server, client=client),
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert FAIL_OPEN_MESSAGE in result.stderr
+        if client in SYSTEM_MESSAGE_CLIENTS:
+            assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        else:
+            assert result.stdout.strip() == ""
+
+    def test_empty_payload_is_still_a_usage_error(self, hook_server):
+        result = subprocess.run(
+            self._failure_argv(hook_server),
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode != 0
+        assert "payload" in result.stderr
+
 
 # ===================================================================
 # End-to-end: command string invoked the way the client shell does it
@@ -4152,6 +4978,7 @@ class TestCursorStylePowerShellInvocation:
             script,
             "claude-code",
             machine_id="machine-42",
+            machine_serial="",
         )
         payload = '{"hook_event_name":"test","session_id":"cursor-test"}'
         result = subprocess.run(
@@ -4188,6 +5015,7 @@ class TestCursorStyleBashInvocation:
             script,
             "cursor",
             machine_id="machine-42",
+            machine_serial="",
         )
         payload = '{"hook_event_name":"test","conversation_id":"cursor-test"}'
         result = subprocess.run(
@@ -4338,7 +5166,7 @@ class TestRunInstallCallsEnsureGuardEnabled:
         mock_install.assert_called_once()
         call_args = mock_install.call_args
         assert "test" not in (call_args.kwargs or {})
-        assert len(call_args.args) == 10, "args.test must not be forwarded to _install_hooks"
+        assert len(call_args.args) == 11, "args.test must not be forwarded to _install_hooks"
 
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
@@ -4363,6 +5191,9 @@ class TestRunInstallCallsEnsureGuardEnabled:
 # _install_hooks orchestration: detect → test event → write
 # ===================================================================
 
+_TEST_EVENT_SENT = guard_module._TestEventResult("sent", 1, 0.0, "", "")
+_TEST_EVENT_REJECTED = guard_module._TestEventResult("rejected", 1, 0.0, "rejected", "boom")
+_TEST_EVENT_UNCONFIRMED = guard_module._TestEventResult("unconfirmed", 5, 61.0, "dns_failure", "dns")
 _G = "agent_scan.guard"
 _NO_RETURN_VALUE = object()
 
@@ -4420,8 +5251,9 @@ class TestInstallHooksOrchestration:
             "prep_codex": (f"{_G}._prepare_codex_config", (_PREPARED, _DIFF_REMOVED, 0)),
             "prep_codex_managed": (f"{_G}._prepare_codex_managed_config", ("toml-content", _DIFF_REMOVED)),
             "is_toml": (f"{_G}._is_codex_requirements_toml", False),
+            "preflight_codex_managed": (f"{_G}._preflight_codex_requirements", None),
             "detect_existing": (f"{_G}._detect_existing_install", None),
-            "test_event": (f"{_G}._send_test_event", True),
+            "test_event": (f"{_G}._send_test_event", _TEST_EVENT_SENT),
             "write": (f"{_G}._write_config", True),
             "write_codex_managed": (f"{_G}._write_codex_managed_config", True),
             "revoke": (f"{_G}._revoke_after_failure", _NO_RETURN_VALUE),
@@ -4466,6 +5298,7 @@ class TestInstallHooksOrchestration:
         minted=False,
         config_exists=False,
         machine_id="",
+        machine_serial="",
     ):
         config = tmp_path / "config.json"
         if config_exists:
@@ -4481,6 +5314,7 @@ class TestInstallHooksOrchestration:
             minted,
             "tid-1",
             machine_id,
+            machine_serial=machine_serial,
         )
         return config
 
@@ -4512,6 +5346,7 @@ class TestInstallHooksOrchestration:
             "agent_scan_command": "/usr/local/bin/open-agent-scan",
             "tenant_id": "tid-1",
             "machine_id": "machine-42",
+            "machine_serial": "",
             "hook_client": "claude-code",
         }
         assert ctx["prep_claude"].call_args.kwargs["discover_command"] == "discover-cmd"
@@ -4588,7 +5423,7 @@ class TestInstallHooksOrchestration:
         discover_script.parent.mkdir(parents=True)
         discover_script.write_text("stale\n")
 
-        def assert_stale_script_still_exists(*_args):
+        def assert_stale_script_still_exists(*_args, **_kwargs):
             assert discover_script.exists()
             return True
 
@@ -4601,7 +5436,7 @@ class TestInstallHooksOrchestration:
 
     def test_unset_agent_scan_command_keeps_stale_script_when_test_event_fails(self, ctx, tmp_path):
         ctx["agent_scan_command"].return_value = None
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
         discover_script = guard_module._discover_script_path(tmp_path / "config.json")
         discover_script.parent.mkdir(parents=True)
         discover_script.write_text("stale\n")
@@ -4623,6 +5458,7 @@ class TestInstallHooksOrchestration:
             False,
             "tid-1",
             "",
+            machine_serial="",
         )
         assert result is None
 
@@ -4652,6 +5488,7 @@ class TestInstallHooksOrchestration:
     def test_codex_managed_routes_to_toml_functions(self, ctx, tmp_path):
         ctx["is_toml"].return_value = True
         self._call(tmp_path, client="codex", hook_client="codex", config_exists=True)
+        ctx["preflight_codex_managed"].assert_called_once()
         ctx["prep_codex_managed"].assert_called_once()
         ctx["write_codex_managed"].assert_called_once()
         ctx["prep_codex"].assert_not_called()
@@ -4728,6 +5565,7 @@ class TestInstallHooksOrchestration:
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
+            machine_serial="",
         )
 
     def test_test_event_receives_empty_diff(self, ctx, tmp_path):
@@ -4748,6 +5586,7 @@ class TestInstallHooksOrchestration:
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
+            machine_serial="",
         )
 
     def test_test_event_not_first_install(self, ctx, tmp_path):
@@ -4767,6 +5606,7 @@ class TestInstallHooksOrchestration:
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
+            machine_serial="",
         )
 
     def test_test_event_push_key_changed(self, ctx, tmp_path):
@@ -4787,6 +5627,7 @@ class TestInstallHooksOrchestration:
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
+            machine_serial="",
         )
 
     def test_test_event_push_key_unchanged(self, ctx, tmp_path):
@@ -4807,6 +5648,7 @@ class TestInstallHooksOrchestration:
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
+            machine_serial="",
         )
 
     # ---------------------------------------------------------------
@@ -4848,26 +5690,26 @@ class TestInstallHooksOrchestration:
     # ---------------------------------------------------------------
 
     def test_test_event_failure_raises_system_exit(self, ctx, tmp_path):
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
 
     def test_test_event_failure_does_not_revoke_in_install_hooks(self, ctx, tmp_path):
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
         ctx["revoke"].assert_not_called()
 
     def test_test_event_failure_no_revoke_when_not_minted(self, ctx, tmp_path):
         ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=False, config_exists=True)
         ctx["revoke"].assert_not_called()
 
     def test_test_event_failure_cleans_new_script(self, ctx, tmp_path):
         ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
         with pytest.raises(SystemExit):
             self._call(tmp_path)
         ctx["dest"].unlink.assert_called_once_with(missing_ok=True)
@@ -4890,7 +5732,7 @@ class TestInstallHooksOrchestration:
             )
 
         ctx["copy"].side_effect = copy_scripts
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
 
         with pytest.raises(SystemExit):
             self._call(tmp_path)
@@ -4903,7 +5745,7 @@ class TestInstallHooksOrchestration:
         discover_script.parent.mkdir(parents=True)
         discover_script.write_text("existing\n")
         ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
 
         with pytest.raises(SystemExit):
             self._call(tmp_path)
@@ -4918,13 +5760,23 @@ class TestInstallHooksOrchestration:
             _CURRENT_CHECKSUM,
             _NEW_CHECKSUM,
         )
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
         ctx["dest"].unlink.assert_not_called()
 
+    def test_unconfirmed_test_event_continues_and_reports(self, ctx, tmp_path):
+        ctx["test_event"].return_value = _TEST_EVENT_UNCONFIRMED
+        with (
+            patch(f"{_G}._report_test_event_unconfirmed") as report,
+        ):
+            self._call(tmp_path)
+        ctx["write"].assert_called_once()
+        report.assert_called_once()
+        assert any("not confirmed" in m for m in self._print_messages(ctx))
+
     def test_test_event_failure_does_not_write_config(self, ctx, tmp_path):
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
         ctx["write"].assert_not_called()
@@ -4938,19 +5790,19 @@ class TestInstallHooksOrchestration:
         prepared = {"hooks": {"PreToolUse": [{"test": True}]}}
         ctx["prep_claude"].return_value = (prepared, _DIFF_REMOVED, 2)
         config = self._call(tmp_path, config_exists=True)
-        ctx["write"].assert_called_once_with(prepared, config, 2)
+        ctx["write"].assert_called_once_with(prepared, config, 2, client="claude")
 
     def test_write_receives_prepared_cursor_config(self, ctx, tmp_path):
         prepared = {"version": 1, "hooks": {"stop": [{"command": "x"}]}}
         ctx["prep_cursor"].return_value = (prepared, _DIFF_REMOVED, 1)
         config = self._call(tmp_path, client="cursor", hook_client="cursor", config_exists=True)
-        ctx["write"].assert_called_once_with(prepared, config, 1)
+        ctx["write"].assert_called_once_with(prepared, config, 1, client="cursor")
 
     def test_write_receives_prepared_codex_config(self, ctx, tmp_path):
         prepared = {"hooks": {"Stop": [{"hooks": []}]}}
         ctx["prep_codex"].return_value = (prepared, _DIFF_REMOVED, 3)
         config = self._call(tmp_path, client="codex", hook_client="codex", config_exists=True)
-        ctx["write"].assert_called_once_with(prepared, config, 3)
+        ctx["write"].assert_called_once_with(prepared, config, 3, client="codex")
 
     def test_write_receives_prepared_codex_managed_content(self, ctx, tmp_path):
         ctx["is_toml"].return_value = True
@@ -5029,6 +5881,7 @@ class TestSendTestEventHooksScript:
                 Path("/fake/script.sh"),
                 machine_id="machine-42",
                 **kwargs,
+                machine_serial="",
             )
         return captured["payload"]
 
@@ -5329,6 +6182,7 @@ class TestInvokeHookScript:
                 "https://api.snyk.io",
                 "{}",
                 machine_id="machine-42",
+                machine_serial="",
             )
 
         assert result == (True, "")
@@ -5347,6 +6201,7 @@ class TestInvokeHookScript:
                 "https://api.snyk.io",
                 "{}",
                 machine_id="chosen-machine",
+                machine_serial="",
             )
 
         assert result == (True, "")
@@ -5355,7 +6210,7 @@ class TestInvokeHookScript:
     def test_empty_machine_id_is_rejected(self):
         with pytest.raises(ValueError, match="machine ID"):
             guard_module._invoke_hook_script(
-                Path("/hook.sh"), "cursor", "pk", "https://api.snyk.io", "{}", machine_id="  "
+                Path("/hook.sh"), "cursor", "pk", "https://api.snyk.io", "{}", machine_id="  ", machine_serial=""
             )
 
     def test_windows_invocation_machine_id_shape(self):
@@ -5368,6 +6223,7 @@ class TestInvokeHookScript:
                 "https://api.snyk.io",
                 "{}",
                 machine_id="machine-42",
+                machine_serial="",
             )
 
         assert result == (True, "")
@@ -5390,9 +6246,233 @@ class TestInvokeHookScript:
         completed = subprocess.CompletedProcess([], 7, stdout="", stderr="bad request\n")
         with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed):
             result = guard_module._invoke_hook_script(
-                Path("/hook.sh"), "cursor", "pk", "url", "{}", machine_id="machine-42"
+                Path("/hook.sh"), "cursor", "pk", "url", "{}", machine_id="machine-42", machine_serial=""
             )
         assert result == (False, "bad request")
+
+
+class TestInvokeHookScriptSuccessPayload:
+    def _invoke(self, stdout, *, require=True, stderr=""):
+        completed = subprocess.CompletedProcess([], 0, stdout=stdout, stderr=stderr)
+        with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed):
+            return guard_module._invoke_hook_script(
+                Path("/hook.sh"),
+                "cursor",
+                "pk",
+                "url",
+                "{}",
+                machine_id="machine-42",
+                require_success_payload=require,
+                machine_serial="",
+            )
+
+    def test_success_true_payload_is_ok(self):
+        assert self._invoke('{"success": true}') == (True, "")
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "{}",
+            '{"success": false}',
+            '{"success": "true"}',
+            '{"systemMessage": "failing open"}',  # what a forwarder prints when it fails open
+            "[]",
+            "not json",
+            "",
+            None,
+        ],
+    )
+    def test_missing_or_false_success_is_rejected(self, stdout):
+        ok, detail = self._invoke(stdout)
+        assert ok is False
+        assert "did not confirm success" in detail
+
+    def test_payload_not_required_by_default(self):
+        assert self._invoke("{}", require=False) == (True, "")
+
+    def test_missing_success_payload_reports_the_scripts_stderr(self):
+        """The forwarders fail open (exit 0, empty stdout) on transport errors, so the reason
+        for a failed install test event now lives on stderr and must reach the operator."""
+        ok, detail = self._invoke("", stderr="agent-guard: request timed out after 60s; failing open\n")
+
+        assert ok is False
+        assert "did not confirm success" in detail
+        assert "request timed out after 60s" in detail
+        assert "push key may be invalid" not in detail
+
+    def test_multiline_stderr_is_collapsed_into_one_detail_line(self):
+        stderr = "curl: (28) Operation timed out\nagent-guard: request timed out after 60s; failing open\n"
+
+        _, detail = self._invoke("", stderr=stderr)
+
+        assert "\n" not in detail
+        assert "curl: (28)" in detail
+        assert "failing open" in detail
+
+
+class TestSendTestEventRetry:
+    """Outages are retried inside the time limit; API rejections are persistent."""
+
+    @staticmethod
+    def _run(results, *, clock=None):
+        """``results`` are (ok, detail) tuples returned by successive hook-script invocations."""
+        now = [0.0]
+
+        def fake_sleep(seconds):
+            now[0] += seconds
+
+        with (
+            patch(f"{_G}._invoke_hook_script", side_effect=results) as invoke,
+            patch(f"{_G}.time.sleep", side_effect=fake_sleep) as sleep,
+            patch(f"{_G}.time.monotonic", side_effect=lambda: now[0]),
+            patch(f"{_G}.rich"),
+        ):
+            result = _send_test_event(
+                "pk", "https://api.snyk.io", "claude-code", Path("/s.sh"), machine_id="m", machine_serial=""
+            )
+        return result, invoke, sleep
+
+    @pytest.mark.parametrize(
+        "detail",
+        [
+            "timeout",
+            "response did not confirm success: curl: (28) x\nagent-guard: request timed out after 60s; failing open",
+            "response did not confirm success: agent-guard: request failed (curl exit 6); failing open",
+            "response did not confirm success: agent-guard: request failed (curl exit 56); failing open",
+            "response did not confirm success: agent-guard: HTTP 503; failing open",
+            # Windows PowerShell 5.1 WebException DNS failure
+            "response did not confirm success: agent-guard: request failed: "
+            "The remote name could not be resolved: 'api.snyk.io'; failing open",
+        ],
+    )
+    def test_transient_failure_is_retried_until_success(self, detail):
+        result, _invoke, sleep = self._run([(False, detail), (False, detail), (True, "")])
+        assert result.status == "sent"
+        assert result.attempts == 3
+        assert [c.args[0] for c in sleep.call_args_list] == [1.0, 2.0]  # initial delay, then backoff
+
+    @pytest.mark.parametrize(
+        "detail",
+        [
+            "response did not confirm success (push key may be invalid)",
+            "response did not confirm success: agent-guard: HTTP 403; failing open",
+            "response did not confirm success: agent-guard: HTTP 400; failing open",
+            "bad script",
+        ],
+    )
+    def test_rejection_is_not_retried(self, detail):
+        result, invoke, sleep = self._run([(False, detail)])
+        assert result.status == "rejected"
+        assert invoke.call_count == 1
+        sleep.assert_not_called()
+
+    def test_time_limit_exceeded_returns_unconfirmed_with_last_error(self):
+        detail = "response did not confirm success: agent-guard: request failed (curl exit 6); failing open"
+        result, invoke, _ = self._run([(False, detail)] * 20)
+        assert result.status == "unconfirmed"
+        assert result.error == "dns_failure"
+        assert result.attempts == invoke.call_count
+        assert 1 < result.attempts < 20
+        assert result.elapsed < guard_module.INSTALL_RETRY_POLICY.time_limit
+
+    def test_limit_counts_attempt_duration_not_just_sleeps(self):
+        """Slow attempts eat into the same overall budget as the sleeps between them."""
+        now = [0.0]
+        timeouts = []
+        detail = "response did not confirm success: agent-guard: request timed out after 60s; failing open"
+
+        def slow_attempt(*args, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            now[0] += kwargs["timeout"]  # every attempt runs until its timeout
+            return False, detail
+
+        limit = guard_module.INSTALL_RETRY_POLICY.time_limit
+        with (
+            patch(f"{_G}._invoke_hook_script", side_effect=slow_attempt),
+            patch(f"{_G}.time.sleep", side_effect=lambda s: now.__setitem__(0, now[0] + s)),
+            patch(f"{_G}.time.monotonic", side_effect=lambda: now[0]),
+            patch(f"{_G}.rich"),
+        ):
+            result = _send_test_event(
+                "pk", "https://api.snyk.io", "claude-code", Path("/s.sh"), machine_id="m", machine_serial=""
+            )
+
+        assert result.status == "unconfirmed"
+        assert result.error == "timeout"
+        overhead = guard_module._HOOK_SCRIPT_OVERHEAD_SECONDS
+        assert now[0] <= limit + overhead
+        assert all(0 < t <= limit + overhead for t in timeouts)
+
+    def test_slow_healthy_response_between_15_and_60_seconds_confirms(self):
+        """An answer that takes 20 s must not be killed at the old 15 s per-attempt cap."""
+        now = [0.0]
+
+        def slow_healthy(*args, **kwargs):
+            if kwargs["timeout"] < 20:
+                now[0] += kwargs["timeout"]
+                return False, "timeout"
+            now[0] += 20
+            return True, ""
+
+        with (
+            patch(f"{_G}._invoke_hook_script", side_effect=slow_healthy) as invoke,
+            patch(f"{_G}.time.sleep"),
+            patch(f"{_G}.time.monotonic", side_effect=lambda: now[0]),
+            patch(f"{_G}.rich"),
+        ):
+            result = _send_test_event(
+                "pk", "https://api.snyk.io", "claude-code", Path("/s.sh"), machine_id="m", machine_serial=""
+            )
+
+        assert result.status == "sent"
+        assert invoke.call_count == 1
+        assert invoke.call_args.kwargs["timeout"] > 15
+
+    def test_http_5xx_label(self):
+        detail = "response did not confirm success: agent-guard: HTTP 502; failing open"
+        result, _, _ = self._run([(False, detail)] * 20)
+        assert result.error == "http_error_502"
+
+
+class TestUnconfirmedTestEventInstall:
+    def test_warning_names_attempts_error_and_meaning(self):
+        with patch(f"{_G}.rich") as rich_mock:
+            guard_module._warn_test_event_unconfirmed(_TEST_EVENT_UNCONFIRMED)
+        text = rich_mock.print.call_args.args[0]
+        assert "5 attempts" in text
+        assert "dns_failure" in text
+        assert "resolved" in text
+
+    def test_report_sends_attributes(self):
+        with patch(f"{_G}.send_hook_event", return_value=(True, "")) as send:
+            guard_module._report_test_event_unconfirmed(
+                "pk", "https://api.snyk.io", "claude-code", "m", _TEST_EVENT_UNCONFIRMED, machine_serial=""
+            )
+        payload = json.loads(send.call_args.args[3])
+        assert payload["hook_event_name"] == "hooksConfiguredTestEventUnconfirmed"
+        assert payload["test_event_attempts"] == 5
+        assert payload["test_event_elapsed_ms"] == 61000
+        assert payload["test_event_last_error"] == "dns_failure"
+
+
+class TestSendTestEventSuccessPayload:
+    def _send(self, stdout):
+        completed = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+        with patch("subprocess.run", return_value=completed), patch(f"{_G}.rich"):
+            return _send_test_event(
+                "pk-test",
+                "https://api.snyk.io",
+                "claude-code",
+                Path("/fake/script.sh"),
+                machine_id="machine-42",
+                machine_serial="",
+            )
+
+    def test_http_200_with_empty_body_fails(self):
+        assert self._send("{}").status == "rejected"
+
+    def test_success_payload_passes(self):
+        assert self._send('{"success": true}').status == "sent"
 
 
 def test_run_with_timeout_raises_when_worker_exceeds_deadline():
@@ -5520,7 +6600,12 @@ class TestSendServersDiscoveredEvent:
             patch(f"{_G}.rich") if patch_rich else contextlib.nullcontext(),
         ):
             ok = guard_module._send_servers_discovered_event(
-                "pk-test", "https://api.snyk.io", hook_client, machine_id, discovery_scope=discovery_scope
+                "pk-test",
+                "https://api.snyk.io",
+                hook_client,
+                machine_id,
+                discovery_scope=discovery_scope,
+                machine_serial="",
             )
         return ok, captured
 
@@ -5571,6 +6656,7 @@ class TestSendServersDiscoveredEvent:
                 "machine-42",
                 event_name="sessionStartServerDiscovery",
                 session_marker="session-start-server-discovery",
+                machine_serial="",
             )
 
         assert ok is True
@@ -5591,7 +6677,7 @@ class TestSendServersDiscoveredEvent:
             patch(f"{_G}.rich"),
         ):
             ok = guard_module._send_servers_discovered_event(
-                "pk-test", "https://api.snyk.io", "claude-code", "machine-42"
+                "pk-test", "https://api.snyk.io", "claude-code", "machine-42", machine_serial=""
             )
 
         assert ok is True
@@ -5604,7 +6690,7 @@ class TestSendServersDiscoveredEvent:
             patch(f"{_G}.send_hook_event", return_value=(False, "HTTP 500")),
             patch(f"{_G}.rich") as rich_mock,
         ):
-            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", "")
+            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", "", machine_serial="")
         assert result is False
         assert "HTTP 500" in rich_mock.print.call_args.args[0]
 
@@ -5614,7 +6700,7 @@ class TestSendServersDiscoveredEvent:
             patch(f"{_G}.send_hook_event") as send,
             patch(f"{_G}.rich") as rich_mock,
         ):
-            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", "")
+            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", "", machine_serial="")
         assert result is False
         send.assert_not_called()
         assert "discovery failed" in rich_mock.print.call_args.args[0]
@@ -5634,7 +6720,7 @@ class TestSendServersDiscoveredEvent:
             patch(f"{_G}.rich") as rich_mock,
         ):
             started = test_time.monotonic()
-            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", "")
+            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", "", machine_serial="")
             elapsed = test_time.monotonic() - started
 
         assert result is False
@@ -6095,7 +7181,40 @@ class TestRunDiscover:
         assert send.call_args.args[4] == "env-machine"
 
 
+def _fake_homes(tmp_path, installed_clients, *, users=("tester",)):
+    """Patch get_readable_home_directories to one home per user under tmp_path.
+
+    *installed_clients* get their config dir created in the first user's home.
+    """
+    homes = []
+    for user in users:
+        home = tmp_path / "homes" / user
+        home.mkdir(parents=True, exist_ok=True)
+        homes.append((home, user))
+    for client in installed_clients:
+        (homes[0][0] / _CLIENT_INSTALL_DIRS[client]).mkdir(exist_ok=True)
+    return patch(f"{_G}.get_readable_home_directories", return_value=homes)
+
+
 class TestRunInstallSendsServersDiscovered:
+    @pytest.mark.parametrize("serial,expected", [(None, ""), ("   ", ""), (" C02XYZ123 ", "C02XYZ123")])
+    def test_serial_is_captured_once_before_install_and_discovery(self, tmp_path, monkeypatch, serial, expected):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        monkeypatch.delenv("MACHINE_SERIAL", raising=False)
+        if serial is not None:
+            monkeypatch.setenv("MACHINE_SERIAL", serial)
+
+        def install(*args, **kwargs):
+            assert args[10] == expected
+            monkeypatch.setenv("MACHINE_SERIAL", "changed-during-install")
+
+        with (
+            patch(f"{_G}._install_hooks", side_effect=install),
+            patch(f"{_G}._send_servers_discovered_event", return_value=True) as send,
+        ):
+            _run_install(self._args(tmp_path))
+        assert send.call_args.kwargs["machine_serial"] == expected
+
     @staticmethod
     def _args(tmp_path, *, client="claude", file_override=True, managed=False, machine_id="machine-42"):
         return SimpleNamespace(
@@ -6106,16 +7225,6 @@ class TestRunInstallSendsServersDiscovered:
             managed=managed,
             machine_id=machine_id,
         )
-
-    @staticmethod
-    def _fake_paths(tmp_path, installed):
-        paths = {}
-        for client in ALL_CLIENTS:
-            path = tmp_path / client
-            if client in installed:
-                path.mkdir(exist_ok=True)
-            paths[client] = path
-        return paths
 
     def test_single_client_sends_once_directly(self, tmp_path, monkeypatch):
         from agent_scan.agents import DiscoveryScope
@@ -6128,14 +7237,15 @@ class TestRunInstallSendsServersDiscovered:
         ):
             _run_install(self._args(tmp_path, machine_id="machine-42"))
 
-        assert install.call_args.args[-1] == "machine-42"
+        assert install.call_args.args[9] == "machine-42"
         send.assert_called_once_with(
             "headless-pk",
             "https://api.snyk.io",
             "claude-code",
             "machine-42",
             discovery_scope=DiscoveryScope.SERVERS,
-            max_retries=2,
+            retry_policy=guard_module.INSTALL_RETRY_POLICY,
+            machine_serial="",
         )
 
     def test_install_does_not_request_skills_discovery(self, tmp_path, monkeypatch):
@@ -6160,7 +7270,7 @@ class TestRunInstallSendsServersDiscovered:
         ):
             _run_install(self._args(tmp_path, machine_id="machine-42"))
 
-        assert send.call_args.kwargs["max_retries"] == 2
+        assert send.call_args.kwargs["retry_policy"] is guard_module.INSTALL_RETRY_POLICY
 
     def test_cursor_install_uses_cursor_endpoint(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
@@ -6178,7 +7288,7 @@ class TestRunInstallSendsServersDiscovered:
         scripts = [Path(f"/installed/{client}/hook.sh") for client in ALL_CLIENTS]
         order = []
 
-        def install(*args):
+        def install(*args, **kwargs):
             order.append(f"install:{args[0]}")
             return scripts[len(order) - 1]
 
@@ -6187,7 +7297,7 @@ class TestRunInstallSendsServersDiscovered:
             return True
 
         with (
-            patch(f"{_G}._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ALL_CLIENTS)),
+            _fake_homes(tmp_path, ALL_CLIENTS),
             patch(f"{_G}._install_hooks", side_effect=install) as install_mock,
             patch(f"{_G}._send_servers_discovered_event", side_effect=send) as send_mock,
         ):
@@ -6201,12 +7311,26 @@ class TestRunInstallSendsServersDiscovered:
     def test_nothing_installed_does_not_send(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
         with (
-            patch(f"{_G}._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])),
+            _fake_homes(tmp_path, []),
             patch(f"{_G}._install_hooks") as install,
             patch(f"{_G}._send_servers_discovered_event") as send,
         ):
             _run_install(self._args(tmp_path, file_override=False))
 
+        install.assert_not_called()
+        send.assert_not_called()
+
+    def test_no_readable_home_directories_exits_with_error(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        with (
+            patch(f"{_G}.get_readable_home_directories", return_value=[]),
+            patch(f"{_G}._install_hooks") as install,
+            patch(f"{_G}._send_servers_discovered_event") as send,
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                _run_install(self._args(tmp_path, file_override=False))
+
+        assert exc_info.value.code == 1
         install.assert_not_called()
         send.assert_not_called()
 
@@ -6253,7 +7377,7 @@ class TestRunInstallSendsServersDiscovered:
         ):
             _run_install(self._args(tmp_path, machine_id=arg_machine_id))
 
-        assert install.call_args.args[-1] == expected
+        assert install.call_args.args[9] == expected
         assert send.call_args.args[-1] == expected
 
     @pytest.mark.parametrize("arg_machine_id, env_machine_id", [(None, None), ("   ", "   ")])
@@ -6273,7 +7397,7 @@ class TestRunInstallSendsServersDiscovered:
         ):
             _run_install(self._args(tmp_path, machine_id=arg_machine_id))
 
-        assert install.call_args.args[-1] == "fallback-host"
+        assert install.call_args.args[9] == "fallback-host"
         assert send.call_args.args[-1] == "fallback-host"
         assert any(
             "MACHINE_ID will become mandatory once ADS Installer is updated" in call.args[0]
@@ -6284,7 +7408,7 @@ class TestRunInstallSendsServersDiscovered:
     def test_managed_install_sends(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
         with (
-            patch(f"{_G}._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ["claude"])),
+            _fake_homes(tmp_path, ["claude"]),
             patch(f"{_G}._install_hooks", return_value=Path("/managed/hook.sh")),
             patch(f"{_G}._send_servers_discovered_event", return_value=True) as send,
         ):
@@ -6807,12 +7931,7 @@ class TestRunInstallAll:
 
     @pytest.fixture(autouse=True)
     def _all_clients_installed(self, tmp_path):
-        fake_paths = {}
-        for client in ALL_CLIENTS:
-            d = tmp_path / f".{client}"
-            d.mkdir()
-            fake_paths[client] = d
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", fake_paths):
+        with _fake_homes(tmp_path, ALL_CLIENTS):
             yield
 
     @pytest.fixture(autouse=True)
@@ -6906,8 +8025,10 @@ class TestRunInstallAll:
             file=None,
             managed=False,
         )
-        with pytest.raises(RuntimeError, match="config write failed"):
+        with pytest.raises(SystemExit) as exc:
             _run_install(args)
+        assert exc.value.code == 1
+        assert call_count == len(ALL_CLIENTS)  # a failing client does not block the rest
         mock_revoke.assert_not_called()
 
     @patch("agent_scan.guard._revoke_after_failure")
@@ -6923,8 +8044,9 @@ class TestRunInstallAll:
             file=None,
             managed=False,
         )
-        with pytest.raises(RuntimeError, match="first client failed"):
+        with pytest.raises(SystemExit) as exc:
             _run_install(args)
+        assert exc.value.code == 1
         mock_revoke.assert_not_called()
 
 
@@ -6960,27 +8082,34 @@ class TestRunUninstallAll:
 
 class TestIsClientInstalled:
     def test_installed_when_config_dir_exists(self, tmp_path):
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": tmp_path / ".claude"}):
-            (tmp_path / ".claude").mkdir()
-            assert _is_client_installed("claude") is True
+        (tmp_path / ".claude").mkdir()
+        assert _is_client_installed("claude", [tmp_path]) is True
 
     def test_not_installed_when_config_dir_missing(self, tmp_path):
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": tmp_path / ".claude"}):
-            assert _is_client_installed("claude") is False
+        assert _is_client_installed("claude", [tmp_path]) is False
 
     def test_not_installed_when_path_is_file_not_dir(self, tmp_path):
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": tmp_path / ".claude"}):
-            (tmp_path / ".claude").write_text("")
-            assert _is_client_installed("claude") is False
+        (tmp_path / ".claude").write_text("")
+        assert _is_client_installed("claude", [tmp_path]) is False
+
+    def test_not_installed_without_home_dirs(self):
+        assert _is_client_installed("claude", []) is False
+
+    def test_installed_when_present_in_any_home(self, tmp_path):
+        empty, other = tmp_path / "a", tmp_path / "b"
+        empty.mkdir()
+        (other / ".cursor").mkdir(parents=True)
+        assert _is_client_installed("cursor", [empty, other]) is True
 
     def test_unknown_client_returns_true(self):
-        assert _is_client_installed("unknown-client") is True
+        assert _is_client_installed("unknown-client", []) is True
 
-    def test_permission_error_returns_false(self, tmp_path):
-        path = MagicMock()
-        path.is_dir.side_effect = PermissionError("denied")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": path}):
-            assert _is_client_installed("claude") is False
+    def test_permission_error_in_one_home_does_not_hide_another(self, tmp_path):
+        denied = MagicMock()
+        denied.__truediv__.return_value.is_dir.side_effect = PermissionError("denied")
+        (tmp_path / ".claude").mkdir()
+        assert _is_client_installed("claude", [denied]) is False
+        assert _is_client_installed("claude", [denied, tmp_path]) is True
 
 
 # ===================================================================
@@ -7001,21 +8130,10 @@ class TestRunInstallSkipsUninstalledClients:
         ):
             yield
 
-    @staticmethod
-    def _fake_paths(tmp_path, installed_clients):
-        """Build a _CLIENT_INSTALL_PATHS dict where only *installed_clients* have real dirs."""
-        paths = {}
-        for client in ALL_CLIENTS:
-            d = tmp_path / f".{client}"
-            if client in installed_clients:
-                d.mkdir(exist_ok=True)
-            paths[client] = d
-        return paths
-
     @patch("agent_scan.guard._install_hooks")
     def test_single_client_not_installed_returns_gracefully(self, mock_install, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+        with _fake_homes(tmp_path, []):
             _run_install(
                 SimpleNamespace(
                     client="claude",
@@ -7029,12 +8147,42 @@ class TestRunInstallSkipsUninstalledClients:
         out = capsys.readouterr().out
         assert "not installed" in out.lower()
 
+    @staticmethod
+    def _managed_args(client, check_installed=True):
+        return SimpleNamespace(
+            client=client,
+            url="https://api.snyk.io",
+            tenant_id="tid-1",
+            file=None,
+            managed=True,
+            check_installed=check_installed,
+        )
+
+    @patch("agent_scan.guard._install_hooks")
+    def test_managed_install_proceeds_when_installed_for_any_user(self, mock_install, tmp_path, monkeypatch, capsys):
+        """Managed installs check every user's home; one user having the agent is enough."""
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        homes = []
+        for user in ("alice", "bob"):
+            home = tmp_path / user
+            home.mkdir()
+            homes.append((home, user))
+        (homes[1][0] / ".claude").mkdir()
+        with (
+            patch("agent_scan.guard.get_readable_home_directories", return_value=homes) as get_homes,
+            patch("agent_scan.guard._preflight_writable"),
+        ):
+            _run_install(self._managed_args("all"))
+        get_homes.assert_called_once_with(all_users=True)
+        assert [c.args[0] for c in mock_install.call_args_list] == ["claude"]
+        assert "not installed" in capsys.readouterr().out.lower()
+
     @pytest.mark.parametrize("client", ["claude", "codex", "all"])
     @patch("agent_scan.guard._install_hooks")
     def test_managed_install_ignores_the_invoking_users_home(self, mock_install, tmp_path, monkeypatch, capsys, client):
         """A managed destination is system-wide, so the invoking account's home is irrelevant."""
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+        with _fake_homes(tmp_path, []):
             _run_install(
                 SimpleNamespace(
                     client=client,
@@ -7045,14 +8193,22 @@ class TestRunInstallSkipsUninstalledClients:
                 )
             )
         assert mock_install.called, "managed install was skipped"
-        out = capsys.readouterr().out
-        assert "not installed" not in out.lower()
-        assert "nothing to install" not in out.lower()
+        assert "not installed" not in capsys.readouterr().out.lower()
+
+    @patch("agent_scan.guard._install_hooks")
+    def test_non_managed_install_checks_only_the_invoking_user(self, mock_install, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        with _fake_homes(tmp_path, ["claude"]) as get_homes:
+            _run_install(
+                SimpleNamespace(client="claude", url="https://api.snyk.io", tenant_id="tid-1", file=None, managed=False)
+            )
+        get_homes.assert_called_once_with(all_users=False)
+        mock_install.assert_called_once()
 
     @patch("agent_scan.guard._install_hooks")
     def test_all_clients_none_installed_returns_gracefully(self, mock_install, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+        with _fake_homes(tmp_path, []):
             _run_install(
                 SimpleNamespace(
                     client="all",
@@ -7069,7 +8225,7 @@ class TestRunInstallSkipsUninstalledClients:
     @patch("agent_scan.guard._install_hooks")
     def test_all_clients_some_installed_skips_missing(self, mock_install, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ["claude"])):
+        with _fake_homes(tmp_path, ["claude"]):
             _run_install(
                 SimpleNamespace(
                     client="all",
@@ -7089,7 +8245,7 @@ class TestRunInstallSkipsUninstalledClients:
     def test_headless_skips_uninstalled_client(self, mock_install, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
         monkeypatch.setenv("TENANT_ID", "tid-hl")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+        with _fake_homes(tmp_path, []):
             _run_install(
                 SimpleNamespace(
                     client="cursor",
@@ -7106,7 +8262,7 @@ class TestRunInstallSkipsUninstalledClients:
     @patch("agent_scan.guard._install_hooks")
     def test_all_clients_all_installed_installs_all(self, mock_install, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ALL_CLIENTS)):
+        with _fake_homes(tmp_path, ALL_CLIENTS):
             _run_install(
                 SimpleNamespace(
                     client="all",
@@ -7119,3 +8275,775 @@ class TestRunInstallSkipsUninstalledClients:
         assert mock_install.call_count == len(ALL_CLIENTS)
         called_clients = [c.args[0] for c in mock_install.call_args_list]
         assert called_clients == ALL_CLIENTS
+
+
+@pytest.mark.parametrize("serial,expected", [(None, ""), ("   ", ""), (" C02XYZ123 ", "C02XYZ123")])
+def test_discovery_captures_serial_before_running_discovery(monkeypatch, serial, expected):
+    monkeypatch.setenv("PUSH_KEY", "pk")
+    monkeypatch.setenv("MACHINE_ID", "machine")
+    monkeypatch.delenv("MACHINE_SERIAL", raising=False)
+    if serial is not None:
+        monkeypatch.setenv("MACHINE_SERIAL", serial)
+
+    def discover(*args, **kwargs):
+        monkeypatch.setenv("MACHINE_SERIAL", "changed-during-discovery")
+        return []
+
+    with (
+        patch(f"{_G}._read_hook_payload", return_value="{}"),
+        patch(f"{_G}._discover_servers_payload", side_effect=discover),
+        patch(f"{_G}.send_hook_event", return_value=(True, "")) as send,
+    ):
+        assert guard_module._run_discover(SimpleNamespace(client="cursor", url="https://api.snyk.io")) == 0
+    assert send.call_args.kwargs["machine_serial"] == expected
+
+
+# ===================================================================
+# Install backup never keeps Agent Guard config
+# ===================================================================
+
+_USER_GROUPED_HOOK = {"matcher": "", "hooks": [{"type": "command", "command": "echo user-hook"}]}
+
+# client: (config path relative to tmp_path, prepare, guard command, user config)
+_BACKUP_JSON_CASES = {
+    "claude": (
+        "settings.json",
+        _prepare_claude_config,
+        AGENT_SCAN_CMD,
+        {"theme": "café", "hooks": {"PreToolUse": [_USER_GROUPED_HOOK]}},
+    ),
+    "cursor": (
+        "hooks.json",
+        _prepare_cursor_config,
+        CURSOR_AGENT_SCAN_CMD,
+        {"version": 1, "hooks": {"preToolUse": [{"command": "echo user-hook"}]}, "theme": "dark"},
+    ),
+    "codex": (
+        "hooks.json",
+        _prepare_codex_config,
+        CODEX_AGENT_SCAN_CMD,
+        {"hooks": {"PreToolUse": [_USER_GROUPED_HOOK]}, "theme": "dark"},
+    ),
+    "github-copilot": (
+        "hooks/agent-guard.json",
+        _prepare_copilot_config,
+        COPILOT_AGENT_SCAN_CMD,
+        {"version": 1, "hooks": {"PreToolUse": [{"type": "command", "bash": "echo user-hook"}]}, "theme": "dark"},
+    ),
+}
+_BACKUP_JSON_CLIENTS = list(_BACKUP_JSON_CASES)
+
+
+def _with_push_key(command: str, push_key: str) -> str:
+    return re.sub(r"PUSH_KEY='[^']*'", f"PUSH_KEY='{push_key}'", command)
+
+
+class TestStripGuardFromJsonConfig:
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_removes_guard_hooks_and_keeps_user_content(self, tmp_path, client):
+        name, prepare, command, user_config = _BACKUP_JSON_CASES[client]
+        path = tmp_path / name
+        _write(path, user_config)
+        installed, _, _ = prepare(command, path)
+
+        assert guard_module._strip_guard_from_json_config(installed, client) == user_config
+
+    @pytest.mark.parametrize(("client", "expected"), [("claude", {"a": 1}), ("cursor", {"a": 1, "hooks": {}})])
+    def test_last_hook_removed_drops_hooks_except_for_cursor(self, client, expected):
+        entry = _claude_group(AGENT_SCAN_CMD) if client == "claude" else _cursor_entry(CURSOR_AGENT_SCAN_CMD)
+        assert guard_module._strip_guard_from_json_config({"a": 1, "hooks": {"Stop": [entry]}}, client) == expected
+
+
+class TestInstallBackupWithoutGuard:
+    """A re-install may overwrite the backup, but the backup never holds Agent Guard config."""
+
+    @staticmethod
+    def _install(client: str, path: Path, push_key: str = "pk-first") -> bool:
+        _, prepare, command, _ = _BACKUP_JSON_CASES[client]
+        config, _, preserved = prepare(_with_push_key(command, push_key), path)
+        return _write_client_config(client, path, config, None, preserved)
+
+    @staticmethod
+    def _seed(client: str, tmp_path: Path) -> Path:
+        name, _, _, user_config = _BACKUP_JSON_CASES[client]
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Unusual formatting: a byte copy is the only way to reproduce it.
+        path.write_bytes(json.dumps(user_config, indent=4, ensure_ascii=False).encode("utf-8"))
+        return path
+
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_first_install_backup_is_byte_copy(self, tmp_path, client):
+        path = self._seed(client, tmp_path)
+        original = path.read_bytes()
+
+        assert self._install(client, path)
+
+        assert _guard_backup(path).read_bytes() == original
+        assert "PUSH_KEY" in path.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_reinstall_backup_holds_what_uninstall_would_leave(self, tmp_path, client):
+        path = self._seed(client, tmp_path)
+        user_config = _BACKUP_JSON_CASES[client][3]
+        self._install(client, path, "pk-first")
+        previous = path.read_text(encoding="utf-8")
+
+        assert self._install(client, path, "pk-second")
+
+        backup_text = _guard_backup(path).read_text(encoding="utf-8")
+        assert json.loads(backup_text) == user_config
+        assert "pk-second" in path.read_text(encoding="utf-8")
+        # Invariant: the backup is exactly what uninstall leaves in the previous file.
+        uninstalled = tmp_path / "uninstalled" / path.name
+        uninstalled.parent.mkdir()
+        uninstalled.write_text(previous, encoding="utf-8")
+        _uninstall_test_client(client, uninstalled)
+        assert json.loads(backup_text) == json.loads(uninstalled.read_text(encoding="utf-8"))
+        assert backup_text == guard_module._dump_config_json(
+            guard_module._strip_guard_from_json_config(json.loads(previous), client)
+        )
+
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_reinstall_over_guard_only_file_backs_up_guard_free_config(self, tmp_path, client):
+        path = tmp_path / _BACKUP_JSON_CASES[client][0]
+        self._install(client, path, "pk-first")
+
+        assert self._install(client, path, "pk-second")
+
+        backup = json.loads(_guard_backup(path).read_text(encoding="utf-8"))
+        assert backup == guard_module._strip_guard_from_json_config(backup, client)
+        assert not backup.get("hooks")
+
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_identical_reinstall_writes_nothing(self, tmp_path, client):
+        path = self._seed(client, tmp_path)
+        self._install(client, path)
+        backup = _guard_backup(path)
+        backup_bytes = backup.read_bytes()
+        live_bytes = path.read_bytes()
+
+        with patch(f"{_G}._backup_file") as backup_file, patch(f"{_G}._atomic_write_text") as write:
+            assert self._install(client, path) is False
+
+        backup_file.assert_not_called()
+        write.assert_not_called()
+        assert backup.read_bytes() == backup_bytes
+        assert path.read_bytes() == live_bytes
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    @pytest.mark.parametrize("existing_backup_mode", [None, 0o644])
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_backup_mode_matches_private_live_file(self, tmp_path, client, existing_backup_mode):
+        path = self._seed(client, tmp_path)
+        path.chmod(0o600)
+        self._install(client, path, "pk-first")
+        backup = _guard_backup(path)
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+        if existing_backup_mode is None:
+            backup.unlink()
+        else:
+            backup.chmod(existing_backup_mode)
+
+        old_umask = os.umask(0o022)
+        try:
+            assert self._install(client, path, "pk-second")
+        finally:
+            os.umask(old_umask)
+
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+_CODEX_POLICY_WITHOUT_HOOKS = """\
+# Managed by IT.
+allowed_approval_policies = ["never"]
+
+[sandbox]
+mode = 'read-only'
+"""
+
+
+class TestCodexRequirementsInstallBackup:
+    @pytest.fixture(autouse=True)
+    def _posix_paths(self):
+        with patch(f"{_G}.IS_WINDOWS", False):
+            yield
+
+    @staticmethod
+    def _install(path: Path, push_key: str = "pk-first") -> bool:
+        return _codex_managed_install(
+            path,
+            _with_push_key(CODEX_AGENT_SCAN_CMD, push_key),
+            discover_command=_with_push_key(CODEX_DISCOVER_CMD, push_key),
+        )
+
+    @pytest.mark.parametrize(
+        "policy", [_CODEX_ADMIN_POLICY, _CODEX_POLICY_WITHOUT_HOOKS], ids=["with-hooks", "without-hooks"]
+    )
+    def test_first_install_backup_is_byte_copy(self, tmp_path, policy):
+        path = tmp_path / "requirements.toml"
+        path.write_bytes(policy.replace("\n", "\r\n").encode("utf-8"))
+        original = path.read_bytes()
+
+        with patch(f"{_G}.rich"):
+            assert self._install(path)
+
+        assert _guard_backup(path).read_bytes() == original
+
+    def test_first_install_backup_keeps_admins_dirs_equal_to_guards(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_POLICY_WITHOUT_HOOKS + "\n[hooks]\n" + _codex_dirs_toml(path), encoding="utf-8")
+        original = path.read_bytes()
+
+        with patch(f"{_G}.rich"):
+            assert self._install(path)
+
+        assert _guard_backup(path).read_bytes() == original
+
+    @pytest.mark.parametrize(
+        "policy", [_CODEX_ADMIN_POLICY, _CODEX_POLICY_WITHOUT_HOOKS], ids=["with-hooks", "without-hooks"]
+    )
+    def test_reinstall_backup_is_stripped_previous_text(self, tmp_path, policy):
+        # A --file path: Guard's managed_dir is derived from it, so passing the
+        # real path is what lets the strip remove it.
+        path = tmp_path / "custom" / "requirements.toml"
+        path.parent.mkdir()
+        path.write_text(policy, encoding="utf-8", newline="")  # LF on Windows too
+        with patch(f"{_G}.rich"):
+            self._install(path, "pk-first")
+            previous = guard_module._read_codex_requirements_text(path)
+
+            assert self._install(path, "pk-second")
+
+        backup_text = _guard_backup(path).read_text(encoding="utf-8")
+        assert backup_text == _strip_guard_from_codex_requirements(previous, path)
+        assert backup_text.startswith(policy)
+        if policy == _CODEX_POLICY_WITHOUT_HOOKS:
+            # Only Guard's [features] flag is left behind (see _strip_guard_from_codex_requirements).
+            assert backup_text == policy + "\n[features]\nhooks = true\n"
+        assert "pk-second" in path.read_text(encoding="utf-8")
+
+    def test_identical_reinstall_writes_nothing(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        with patch(f"{_G}.rich"):
+            self._install(path)
+        backup = _guard_backup(path)
+        backup_bytes = backup.read_bytes()
+
+        with patch(f"{_G}._backup_file") as backup_file, patch(f"{_G}._atomic_write_text") as write:
+            assert self._install(path) is False
+
+        backup_file.assert_not_called()
+        write.assert_not_called()
+        assert backup.read_bytes() == backup_bytes
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    @pytest.mark.parametrize("existing_backup_mode", [None, 0o644])
+    def test_backup_mode_matches_private_live_file(self, tmp_path, existing_backup_mode):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        path.chmod(0o600)
+        backup = _guard_backup(path)
+        with patch(f"{_G}.rich"):
+            self._install(path, "pk-first")
+            if existing_backup_mode is None:
+                backup.unlink()
+            else:
+                backup.chmod(existing_backup_mode)
+            old_umask = os.umask(0o022)
+            try:
+                assert self._install(path, "pk-second")
+            finally:
+                os.umask(old_umask)
+
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+
+
+class TestReinstallBackupRepro:
+    """ADS-1612: install, re-install with another MACHINE_ID, then uninstall."""
+
+    @staticmethod
+    def _install(client: str, path: Path, machine_id: str) -> None:
+        hook_client = {"claude": "claude-code"}.get(client, client)
+        _install_hooks(
+            client,
+            hook_client,
+            "pk-test",
+            "https://api.snyk.io",
+            path,
+            "user",
+            client,
+            False,
+            "tid-1",
+            machine_id,
+            "",
+        )
+
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_reinstall_with_new_machine_id_then_uninstall(self, tmp_path, monkeypatch, client):
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        name, _, _, user_config = _BACKUP_JSON_CASES[client]
+        path = tmp_path / name
+        _write(path, user_config)
+        user_bytes = path.read_bytes()
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT),
+            patch(f"{_G}.rich"),
+        ):
+            self._install(client, path, "machine-1")
+            assert _guard_backup(path).read_bytes() == user_bytes
+            self._install(client, path, "machine-2")
+            assert "MACHINE_ID='machine-2'" in path.read_text(encoding="utf-8")
+            assert json.loads(_guard_backup(path).read_text(encoding="utf-8")) == user_config
+            guard_module._uninstall_single_client(client, SimpleNamespace(file=str(path)), managed=False)
+
+        assert not _guard_backup(path).exists()
+        assert json.loads(path.read_text(encoding="utf-8")) == user_config
+
+    def test_codex_requirements_reinstall_with_new_machine_id_then_uninstall(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT),
+            patch(f"{_G}.rich"),
+        ):
+            self._install("codex", path, "machine-1")
+            self._install("codex", path, "machine-2")
+            assert "MACHINE_ID='machine-2'" in path.read_text(encoding="utf-8")
+            backup_text = _guard_backup(path).read_text(encoding="utf-8")
+            assert backup_text.startswith(_CODEX_ADMIN_POLICY)
+            guard_module._uninstall_single_client("codex", SimpleNamespace(file=str(path)), managed=True)
+
+        assert not _guard_backup(path).exists()
+        assert path.read_text(encoding="utf-8").startswith(_CODEX_ADMIN_POLICY)
+
+
+# ===================================================================
+# Install backups have Guard's own name; uninstall removes only Guard's backups
+# ===================================================================
+
+_FOREIGN_BACKUP = b'{"written by": "another tool"}\r\n'
+_CODEX_TOML_CASE = "codex-requirements"
+_BACKUP_ALL_CASES = [*_BACKUP_JSON_CLIENTS, _CODEX_TOML_CASE]
+
+
+def _legacy_guard_backup_text(client: str, path: Path) -> str:
+    """What an older Guard version left in ``<path>.backup``: a copy of the file with Guard's hooks."""
+    if client == _CODEX_TOML_CASE:
+        return guard_module._render_codex_requirements_toml(CODEX_AGENT_SCAN_CMD, path)
+    _, prepare, command, user_config = _BACKUP_JSON_CASES[client]
+    scratch = path.parent / "legacy-scratch" / path.name
+    _write(scratch, user_config)
+    config, _, _ = prepare(command, scratch)
+    shutil.rmtree(scratch.parent)
+    return guard_module._dump_config_json(config)
+
+
+class TestGuardOwnedBackups:
+    @pytest.fixture(autouse=True)
+    def _quiet_posix(self):
+        with patch(f"{_G}.IS_WINDOWS", False), patch(f"{_G}.rich"):
+            yield
+
+    @staticmethod
+    def _seed(case: str, tmp_path: Path) -> Path:
+        if case == _CODEX_TOML_CASE:
+            path = tmp_path / "requirements.toml"
+            path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+            return path
+        return TestInstallBackupWithoutGuard._seed(case, tmp_path)
+
+    @staticmethod
+    def _install(case: str, path: Path, push_key: str = "pk-first") -> None:
+        if case == _CODEX_TOML_CASE:
+            content, _ = _prepare_codex_managed_config(_with_push_key(CODEX_AGENT_SCAN_CMD, push_key), path)
+            _write_client_config("codex", path, None, content, 0)
+        else:
+            TestInstallBackupWithoutGuard._install(case, path, push_key)
+
+    @staticmethod
+    def _uninstall(case: str, path: Path) -> None:
+        if case == _CODEX_TOML_CASE:
+            guard_module._uninstall_codex_managed(path)
+        else:
+            _uninstall_test_client(case, path)
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_install_writes_the_guard_named_backup(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        original = path.read_bytes()
+
+        self._install(case, path)
+
+        assert _guard_backup(path).read_bytes() == original
+        assert guard_module._guard_backup_path(path) == _guard_backup(path)
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_foreign_plain_backup_survives_install_reinstall_and_uninstall(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        foreign = Path(f"{path}.backup")
+        foreign.write_bytes(_FOREIGN_BACKUP)
+
+        self._install(case, path, "pk-first")
+        self._install(case, path, "pk-second")
+        assert foreign.read_bytes() == _FOREIGN_BACKUP
+        self._uninstall(case, path)
+
+        assert foreign.read_bytes() == _FOREIGN_BACKUP
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_uninstall_removes_guard_backup(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        self._install(case, path)
+        assert _guard_backup(path).exists()
+
+        with patch(f"{_G}.rich") as mock_rich:
+            self._uninstall(case, path)
+
+        assert not _guard_backup(path).exists()
+        assert not _is_agent_scan_command(path.read_text(encoding="utf-8"))
+        printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list)
+        assert f"[dim]Removed Agent Guard backup {_guard_backup(path)}[/dim]" in printed
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_uninstall_finishes_and_warns_when_backup_cannot_be_deleted(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        self._install(case, path)
+        backup = _guard_backup(path)
+        real_unlink = Path.unlink
+
+        def unlink(self, *args, **kwargs):
+            if self == backup:
+                raise PermissionError("denied")
+            return real_unlink(self, *args, **kwargs)
+
+        with patch.object(Path, "unlink", unlink), patch(f"{_G}.rich") as mock_rich:
+            self._uninstall(case, path)
+
+        assert not _is_agent_scan_command(path.read_text(encoding="utf-8"))
+        printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list)
+        assert f"Could not remove {backup} (denied); delete it manually." in printed
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_uninstall_without_guard_hooks_removes_leftover_guard_backup(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        before = path.read_bytes()
+        _guard_backup(path).write_bytes(before)
+
+        self._uninstall(case, path)
+
+        assert not _guard_backup(path).exists()
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_uninstall_with_missing_config_removes_leftover_guard_backup(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        _guard_backup(path).write_bytes(path.read_bytes())
+        path.unlink()
+
+        self._uninstall(case, path)
+
+        assert not _guard_backup(path).exists()
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_legacy_backup_with_guard_command_removed_on_install(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        legacy = Path(f"{path}.backup")
+        legacy.write_text(_legacy_guard_backup_text(case, path), encoding="utf-8")
+        assert "PUSH_KEY" in legacy.read_text(encoding="utf-8")
+
+        with patch(f"{_G}.rich") as mock_rich:
+            self._install(case, path)
+
+        assert not legacy.exists()
+        printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list)
+        assert f"Removed old Agent Guard backup {legacy}" in printed
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_legacy_backup_with_guard_command_removed_on_up_to_date_install(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        self._install(case, path)
+        legacy = Path(f"{path}.backup")
+        legacy.write_text(_legacy_guard_backup_text(case, path), encoding="utf-8")
+
+        self._install(case, path)
+
+        assert not legacy.exists()
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_legacy_backup_with_guard_command_removed_on_uninstall(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        self._install(case, path)
+        legacy = Path(f"{path}.backup")
+        legacy.write_text(_legacy_guard_backup_text(case, path), encoding="utf-8")
+
+        self._uninstall(case, path)
+
+        assert not legacy.exists()
+        assert not _guard_backup(path).exists()
+
+    def test_legacy_backup_with_powershell_command_removed(self, tmp_path):
+        path = tmp_path / "settings.json"
+        _write(path, {"theme": "dark"})
+        command = guard_module._build_hook_command_powershell(
+            "pk-legacy",
+            "https://api.snyk.io",
+            Path(r"C:\Users\me\.claude\hooks\agent-guard.ps1"),
+            "claude-code",
+            machine_serial="",
+        )
+        legacy = Path(f"{path}.backup")
+        _write(legacy, {"hooks": {"Stop": [_claude_group(command)]}})
+
+        _uninstall_test_client("claude", path)
+
+        assert not legacy.exists()
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    @pytest.mark.parametrize(
+        "content",
+        [
+            _FOREIGN_BACKUP,
+            # Mentions Guard but holds no Guard hook command (no PUSH_KEY).
+            b'{"note": "uninstalled agent-guard last week"}\n',
+            # Holds the command but is not UTF-8: cannot be checked, so it stays.
+            b"\xff\xfe PUSH_KEY='pk' bash '/h/agent-guard.sh'\n",
+        ],
+        ids=["foreign", "mentions-guard", "not-utf8"],
+    )
+    def test_legacy_backup_without_readable_guard_command_kept(self, tmp_path, case, content):
+        path = self._seed(case, tmp_path)
+        legacy = Path(f"{path}.backup")
+        legacy.write_bytes(content)
+
+        self._install(case, path)
+        assert legacy.read_bytes() == content
+        self._uninstall(case, path)
+
+        assert legacy.read_bytes() == content
+
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_install_uninstall_cycle_leaves_only_the_original_files(self, tmp_path, monkeypatch, client):
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        path = TestInstallBackupWithoutGuard._seed(client, tmp_path)
+        original_bytes = path.read_bytes()
+        original_files = sorted(p for p in tmp_path.rglob("*") if p.is_file())
+
+        with patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT):
+            TestReinstallBackupRepro._install(client, path, "machine-1")
+            TestReinstallBackupRepro._install(client, path, "machine-2")
+            assert _guard_backup(path).exists()
+            guard_module._uninstall_single_client(client, SimpleNamespace(file=str(path)), managed=False)
+
+        assert sorted(p for p in tmp_path.rglob("*") if p.is_file()) == original_files
+        assert json.loads(path.read_bytes()) == json.loads(original_bytes)
+
+    def test_codex_requirements_install_uninstall_cycle_leaves_only_the_original_files(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        original_files = sorted(p for p in tmp_path.rglob("*") if p.is_file())
+
+        with patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT):
+            TestReinstallBackupRepro._install("codex", path, "machine-1")
+            TestReinstallBackupRepro._install("codex", path, "machine-2")
+            assert _guard_backup(path).exists()
+            guard_module._uninstall_single_client("codex", SimpleNamespace(file=str(path)), managed=True)
+
+        assert sorted(p for p in tmp_path.rglob("*") if p.is_file()) == original_files
+        # Guard's managed_dir stays while other hooks remain (see _strip_guard_from_codex_requirements).
+        assert path.read_text(encoding="utf-8").startswith(_CODEX_ADMIN_POLICY)
+
+
+# ===================================================================
+# Uninstall leaves no Guard scaffolding behind
+# ===================================================================
+
+# client: (config file name, Guard command, user hook entry, event)
+_LEFTOVER_JSON_CASES = {
+    "claude": ("settings.json", AGENT_SCAN_CMD, _USER_GROUPED_HOOK, "PreToolUse"),
+    "cursor": ("hooks.json", CURSOR_AGENT_SCAN_CMD, {"command": "echo user-hook"}, "preToolUse"),
+    "codex": ("hooks.json", CODEX_AGENT_SCAN_CMD, _USER_GROUPED_HOOK, "PreToolUse"),
+}
+_LEFTOVER_JSON_CLIENTS = list(_LEFTOVER_JSON_CASES)
+
+
+def _guard_entry(client: str) -> dict:
+    command = _LEFTOVER_JSON_CASES[client][1]
+    return _cursor_entry(command) if client == "cursor" else _claude_group(command)
+
+
+class TestUninstallRemovesEmptyHooksDir:
+    def _install_scripts(self, config: Path) -> Path:
+        guard_module._copy_hook_script(guard_module._forwarder_script_path(config))
+        guard_module._copy_hook_script(guard_module._discover_script_path(config))
+        return guard_module._hooks_dir(config)
+
+    def test_removes_hooks_dir_left_empty(self, tmp_path):
+        config = tmp_path / "settings.json"
+        hooks_dir = self._install_scripts(config)
+
+        with patch(f"{_G}.rich") as mock_rich:
+            guard_module._remove_hook_script("claude", config)
+
+        assert not hooks_dir.exists()
+        printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list)
+        assert f"Removed empty directory {hooks_dir}" in printed
+
+    def test_keeps_hooks_dir_with_other_files(self, tmp_path):
+        config = tmp_path / "settings.json"
+        hooks_dir = self._install_scripts(config)
+        user_script = hooks_dir / "my-hook.sh"
+        user_script.write_bytes(b"#!/bin/sh\necho mine\n")
+
+        guard_module._remove_hook_script("claude", config)
+
+        assert sorted(hooks_dir.iterdir()) == [user_script]
+        assert user_script.read_bytes() == b"#!/bin/sh\necho mine\n"
+
+    def test_keeps_hooks_dir_with_other_subdirectory(self, tmp_path):
+        config = tmp_path / "settings.json"
+        hooks_dir = self._install_scripts(config)
+        (hooks_dir / "user").mkdir()
+
+        guard_module._remove_hook_script("claude", config)
+
+        assert sorted(hooks_dir.iterdir()) == [hooks_dir / "user"]
+
+
+class TestUninstallRemovesGuardOnlyJsonConfig:
+    @pytest.mark.parametrize("client", _LEFTOVER_JSON_CLIENTS)
+    def test_file_with_only_guard_hooks_is_deleted(self, tmp_path, client):
+        name, _, _, event = _LEFTOVER_JSON_CASES[client]
+        path = tmp_path / name
+        _write(path, {**({"version": 1} if client == "cursor" else {}), "hooks": {event: [_guard_entry(client)]}})
+
+        with patch(f"{_G}.rich") as mock_rich:
+            _uninstall_test_client(client, path)
+
+        assert not path.exists()
+        printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list)
+        assert "Removed 1 Agent Guard hook(s)" in printed
+        assert f"Removed {path}" in printed
+
+    @pytest.mark.parametrize("client", _LEFTOVER_JSON_CLIENTS)
+    def test_file_with_other_keys_is_kept(self, tmp_path, client):
+        name, _, _, event = _LEFTOVER_JSON_CASES[client]
+        path = tmp_path / name
+        _write(path, {"theme": "dark", "hooks": {event: [_guard_entry(client)]}})
+
+        _uninstall_test_client(client, path)
+
+        expected = {"theme": "dark", "hooks": {}} if client == "cursor" else {"theme": "dark"}
+        assert json.loads(path.read_text()) == expected
+
+    @pytest.mark.parametrize("client", _LEFTOVER_JSON_CLIENTS)
+    def test_file_with_other_hooks_is_kept(self, tmp_path, client):
+        name, _, user_hook, event = _LEFTOVER_JSON_CASES[client]
+        path = tmp_path / name
+        base = {"version": 1} if client == "cursor" else {}
+        _write(path, {**base, "hooks": {event: [user_hook, _guard_entry(client)]}})
+
+        _uninstall_test_client(client, path)
+
+        assert json.loads(path.read_text()) == {**base, "hooks": {event: [user_hook]}}
+
+    @pytest.mark.parametrize("scope_dir", ["hooks", "policy.d"], ids=["user", "managed"])
+    def test_github_copilot_config_with_only_guard_hooks_is_deleted(self, tmp_path, scope_dir):
+        path = tmp_path / scope_dir / "agent-guard.json"
+        _write(path, {"version": 1, "hooks": {"Stop": [{"type": "command", "command": COPILOT_AGENT_SCAN_CMD}]}})
+
+        _uninstall_test_client("github-copilot", path)
+
+        assert not path.exists()
+
+    def test_github_copilot_config_with_user_hook_is_kept(self, tmp_path):
+        path = tmp_path / "hooks" / "agent-guard.json"
+        user_hook = {"type": "command", "bash": "echo user-hook"}
+        guard_hook = {"type": "command", "bash": COPILOT_AGENT_SCAN_CMD}
+        _write(path, {"version": 1, "hooks": {"Stop": [user_hook, guard_hook]}})
+
+        _uninstall_test_client("github-copilot", path)
+
+        assert json.loads(path.read_text()) == {"version": 1, "hooks": {"Stop": [user_hook]}}
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+    def test_symlinked_config_target_is_stripped(self, tmp_path):
+        target = tmp_path / "dotfiles" / "settings.json"
+        _write(target, {"hooks": {"Stop": [_guard_entry("claude")]}})
+        link = tmp_path / "settings.json"
+        link.symlink_to(target)
+
+        _uninstall_test_client("claude", link)
+
+        assert link.is_symlink()
+        assert link.resolve() == target.resolve()
+        assert json.loads(target.read_text()) == {}
+
+
+class TestUninstallLeavesNothingBehind:
+    @pytest.fixture(autouse=True)
+    def _quiet_posix(self, monkeypatch):
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT),
+            patch(f"{_G}.rich"),
+        ):
+            yield
+
+    @staticmethod
+    def _cycle(client: str, path: Path, *, managed: bool = False) -> None:
+        TestReinstallBackupRepro._install(client, path, "machine-1")
+        TestReinstallBackupRepro._install(client, path, "machine-2")
+        assert guard_module._forwarder_script_path(path).exists()
+        guard_module._uninstall_single_client(client, SimpleNamespace(file=str(path)), managed=managed)
+
+    @pytest.mark.parametrize("client", _LEFTOVER_JSON_CLIENTS)
+    def test_cycle_from_no_file_and_no_hooks_dir_leaves_neither(self, tmp_path, client):
+        path = tmp_path / _LEFTOVER_JSON_CASES[client][0]
+
+        self._cycle(client, path)
+
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("client", _LEFTOVER_JSON_CLIENTS)
+    def test_cycle_keeps_user_files_in_hooks_dir(self, tmp_path, client):
+        path = tmp_path / _LEFTOVER_JSON_CASES[client][0]
+        user_script = tmp_path / "hooks" / "my-hook.sh"
+        user_script.parent.mkdir()
+        user_script.write_bytes(b"echo mine\n")
+
+        self._cycle(client, path)
+
+        assert sorted(p for p in tmp_path.rglob("*")) == [user_script.parent, user_script]
+        assert user_script.read_bytes() == b"echo mine\n"
+
+    @pytest.mark.parametrize("scope_dir", ["hooks", "policy.d"], ids=["user", "managed"])
+    def test_github_copilot_cycle_leaves_nothing_behind(self, tmp_path, scope_dir):
+        path = tmp_path / scope_dir / "agent-guard.json"
+
+        self._cycle("github-copilot", path, managed=scope_dir == "policy.d")
+
+        # User scope: the config sits in the hooks dir, which is then empty and removed.
+        # Managed scope: the scripts' policy.d/hooks dir goes; policy.d itself is not Guard's.
+        expected = [path.parent] if scope_dir == "policy.d" else []
+        assert sorted(tmp_path.rglob("*")) == expected
+
+    def test_github_copilot_cycle_keeps_user_files_in_hooks_dir(self, tmp_path):
+        path = tmp_path / "hooks" / "agent-guard.json"
+        user_file = path.parent / "my-hooks.json"
+        user_file.parent.mkdir()
+        user_file.write_bytes(b'{"version": 1}\n')
+
+        self._cycle("github-copilot", path)
+
+        assert sorted(tmp_path.rglob("*")) == [user_file.parent, user_file]
+        assert user_file.read_bytes() == b'{"version": 1}\n'

@@ -104,6 +104,7 @@ Remote MCP servers and skills can still be scanned without starting stdio MCP su
 
 ## CI Mode
 
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--ci` | boolean | `false` | Exit with code `1` if any analysis issues or runtime failure codes remain after the scan. Requires `--dangerously-run-mcp-servers` in non-interactive environments. |
@@ -181,6 +182,19 @@ open-agent-scan guard
 ```bash
 open-agent-scan guard install {claude,cursor,codex,all} [OPTIONS]
 ```
+
+The installed hook scripts wait at most 60 seconds for the Agent Guard response. On a timeout, and on any transport
+or HTTP failure, they fail open: exit 0 with one line on stderr. On Claude Code and Codex they also return a
+`systemMessage` that the agent shows as a warning ("Unable to reach the configured hook service to validate agent behavior. Please check
+your network and configuration and try again."); Cursor and GitHub Copilot, whose hook output has no such field,
+receive nothing on stdout.
+
+Install and uninstall replace a client configuration file by writing a new file and moving it over the old one, so an
+agent never reads a half-written file. The new file keeps the old file's permission bits and, when the command runs as
+root, its owner and group; a symlinked configuration stays a symlink and its target is updated. Nothing else carries
+over: ACLs, extended attributes (such as a SELinux label set by hand) and file flags are lost, the new file gets its
+directory's inherited ACL, and other hard links to the old file keep the old content. If you set any of these on a
+configuration file, set them again after installing or uninstalling.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |

@@ -24,6 +24,7 @@ dependencies = [
     "detect-secrets>=1.5.0",
     # Keep requests' charset detector available in PyInstaller standalone binaries.
     "chardet>=5.2.0,<6",
+    "certifi>=2026.10.19",
     # TOML decoder for the Codex discoverer on Python 3.10 (stdlib ``tomllib`` is
     # 3.11+). Declared directly so the ``tomli`` fallback in ``agents/codex.py`` is
     # guaranteed under ``requires-python>=3.10`` rather than relying on a transitive.
@@ -81,6 +82,9 @@ testpaths = ["tests"]
 # tests/ subdirs (unit, e2e, skills, mcp_servers, ...) onto sys.path. The specs deliberately live under
 # tests/ and are not part of the shipped agent_scan wheel.
 pythonpath = ["tests/canary_specs"]
+markers = [
+    "managed: e2e tests that write to system-wide managed config paths and need root/Administrator (opt-in via AGENT_SCAN_E2E_MANAGED=1)",
+]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"

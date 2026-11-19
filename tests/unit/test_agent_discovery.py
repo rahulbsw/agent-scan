@@ -2979,15 +2979,20 @@ def test_kiro_discoverer_detects_installation(tmp_path):
     assert KiroDiscoverer(tmp_path).client_exists() is not None
 
 
-def test_antigravity_discoverer_requires_antigravity_subdir(tmp_path):
-    """``~/.gemini`` alone is the Gemini CLI — only ``~/.gemini/antigravity`` proves the Antigravity IDE is installed."""
+@pytest.mark.parametrize("install_dir", ["antigravity", "antigravity-cli"])
+def test_antigravity_discoverer_requires_product_specific_subdir(tmp_path, install_dir):
+    """``~/.gemini`` alone is the Gemini CLI; either Antigravity product marker
+    identifies an IDE or standalone CLI installation."""
     from agent_scan.agents import AntigravityDiscoverer
 
     (tmp_path / ".gemini").mkdir()
     assert AntigravityDiscoverer(tmp_path).client_exists() is None
 
-    (tmp_path / ".gemini" / "antigravity").mkdir()
-    assert AntigravityDiscoverer(tmp_path).client_exists() is not None
+    (tmp_path / ".gemini" / install_dir).mkdir()
+    result = AntigravityDiscoverer(tmp_path).client_exists()
+
+    assert result is not None
+    assert result.endswith(f"/.gemini/{install_dir}")
 
 
 # --- user-scope MCP file parsing ---
@@ -5377,7 +5382,39 @@ def test_antigravity_shared_gemini_config_mcp_discovered(tmp_path):
     assert isinstance(server, StdioServer)
 
 
-# --- Antigravity: shared skills under ``~/.gemini/skills/`` ---
+# --- Antigravity: global and bundled skills ---
+
+
+def test_antigravity_current_global_skills_discovered(tmp_path):
+    """Antigravity 2.0's canonical global skills live under
+    ``~/.gemini/config/skills``."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    (tmp_path / ".gemini" / "antigravity-cli").mkdir(parents=True)
+    _write_skill(tmp_path / ".gemini" / "config" / "skills", "global-skill")
+
+    skills_dirs = AntigravityDiscoverer(tmp_path).discover_skills()
+
+    path = (tmp_path / ".gemini" / "config" / "skills").as_posix()
+    assert path in skills_dirs
+    assert {skill.name for skill in skills_dirs[path]} == {"global-skill"}
+
+
+def test_antigravity_cli_builtin_skills_discovered(tmp_path):
+    """The standalone Antigravity CLI's bundled skills live under
+    ``~/.gemini/antigravity-cli/builtin/skills``."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    builtin_skills = tmp_path / ".gemini" / "antigravity-cli" / "builtin" / "skills"
+    _write_skill(builtin_skills, "antigravity-guide")
+
+    skills_dirs = AntigravityDiscoverer(tmp_path).discover_skills()
+
+    assert builtin_skills.as_posix() in skills_dirs
+    assert {skill.name for skill in skills_dirs[builtin_skills.as_posix()]} == {"antigravity-guide"}
+
+
+# Legacy shared skills path under ``~/.gemini/skills/``.
 
 
 def test_antigravity_user_shared_skills_discovered(tmp_path):
@@ -11339,3 +11376,360 @@ def test_github_copilot_discoverer_name_matches_well_known_client():
 
     for clients in (MACOS_WELL_KNOWN_CLIENTS, LINUX_WELL_KNOWN_CLIENTS, WINDOWS_WELL_KNOWN_CLIENTS):
         assert GitHubCopilotDiscoverer.name in {client.name for client in clients}
+
+
+# --- VSCode-family extension MCP providers registered in code (no mcp.json) ---
+
+
+def _install_extension(home: Path, ext_id: str, manifest: dict, bundle: str | None = None) -> Path:
+    """Lay out one installed ``~/.vscode/extensions/<ext_id>/`` with its manifest."""
+    exts = home / ".vscode" / "extensions"
+    ext_dir = exts / ext_id
+    ext_dir.mkdir(parents=True, exist_ok=True)
+    (ext_dir / "package.json").write_text(json.dumps(manifest))
+    if bundle is not None:
+        dist = ext_dir / "dist"
+        dist.mkdir(exist_ok=True)
+        (dist / "extension.bundle.js").write_text(bundle)
+    (exts / "extensions.json").write_text(json.dumps([{"relativeLocation": ext_id}]))
+    return ext_dir
+
+
+_PYLANCE_MANIFEST = {
+    "main": "./dist/extension.bundle.js",
+    "contributes": {"mcpServerDefinitionProviders": [{"id": "pylanceMcp", "label": "pylance mcp server"}]},
+}
+
+
+def test_vscode_extension_provider_mcp_discovers_http_definition(tmp_path):
+    """The Pylance shape: an extension registers its server in code, ships no
+    ``mcp.json``, and is still inventoried from its minified bundle."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    _install_extension(
+        tmp_path,
+        "ms-python.vscode-pylance-2026.4.1",
+        _PYLANCE_MANIFEST,
+        'let s=new n$.McpHttpServerDefinition("pylance mcp server",n$.Uri.parse(`http://localhost:${n}/stream`));',
+    )
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/ms-python.vscode-pylance-2026.4.1/dist/extension.bundle.js")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "pylance mcp server"
+    assert isinstance(server, RemoteServer)
+    # The port is chosen at activation; the hole is kept rather than guessed.
+    assert server.url == "http://localhost:${n}/stream"
+    assert server.type == "http"
+
+
+def test_vscode_extension_provider_mcp_discovers_stdio_definition(tmp_path):
+    from agent_scan.agents import VSCodeDiscoverer
+
+    _install_extension(
+        tmp_path,
+        "pub.stdio-1.0.0",
+        {
+            "main": "./dist/extension.bundle.js",
+            "contributes": {"mcpServerDefinitionProviders": [{"id": "p", "label": "l"}]},
+        },
+        'new vscode.McpStdioServerDefinition("my server","node",["server.js"],{"TOKEN":"t"});',
+    )
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if "/pub.stdio-1.0.0/" in k]
+    assert len(matching) == 1
+    name, server = mcp_configs[matching[0]][0]
+    assert name == "my server"
+    assert isinstance(server, StdioServer)
+    assert (server.command, server.args, server.env) == ("node", ["server.js"], {"TOKEN": "t"})
+
+
+def test_vscode_extension_provider_mcp_skips_extension_without_declaration(tmp_path):
+    """The manifest declaration is the gate: VS Code refuses to register an
+    undeclared provider, so a bundle mentioning the class is not scanned at all.
+    This is what keeps multi-MiB bundles out of the common path."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    _install_extension(
+        tmp_path,
+        "pub.undeclared-1.0.0",
+        {"main": "./dist/extension.bundle.js", "contributes": {"commands": []}},
+        'new vscode.McpStdioServerDefinition("srv","node");',
+    )
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert not any("/pub.undeclared-1.0.0/" in k for k in mcp_configs)
+
+
+def test_vscode_extension_provider_mcp_declared_but_fully_dynamic_yields_nothing(tmp_path):
+    """A declared provider whose command is computed at runtime contributes no
+    entry rather than a guessed one."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    _install_extension(
+        tmp_path,
+        "pub.dynamic-1.0.0",
+        {
+            "main": "./dist/extension.bundle.js",
+            "contributes": {"mcpServerDefinitionProviders": [{"id": "p", "label": "l"}]},
+        },
+        "new vscode.McpStdioServerDefinition(t.label, resolveInterpreter(), []);",
+    )
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert not any("/pub.dynamic-1.0.0/" in k for k in mcp_configs)
+
+
+def test_vscode_extension_provider_mcp_finds_definition_outside_the_main_bundle(tmp_path):
+    """Larger extensions split activation code into lazily-imported chunks, so the
+    whole extension tree is scanned — not just the ``main`` entry point."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    ext_dir = _install_extension(
+        tmp_path,
+        "pub.chunked-1.0.0",
+        {
+            "main": "./dist/extension.bundle.js",
+            "contributes": {"mcpServerDefinitionProviders": [{"id": "p", "label": "l"}]},
+        },
+        "require('./chunk.js');",
+    )
+    (ext_dir / "dist" / "chunk.js").write_text('new v.McpStdioServerDefinition("chunked","node");')
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/pub.chunked-1.0.0/dist/chunk.js")]
+    assert len(matching) == 1
+    assert mcp_configs[matching[0]][0][0] == "chunked"
+
+
+def test_vscode_extension_provider_mcp_skips_uninstalled_extension(tmp_path):
+    """An upgraded-away version left on disk is absent from ``extensions.json`` and
+    must not be scanned — same install gating as the ``mcp.json`` walk."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    _install_extension(
+        tmp_path,
+        "pub.current-2.0.0",
+        {"contributes": {"mcpServerDefinitionProviders": [{"id": "p"}]}},
+    )
+    stale = tmp_path / ".vscode" / "extensions" / "pub.stale-1.0.0"
+    stale.mkdir(parents=True)
+    (stale / "package.json").write_text(json.dumps(_PYLANCE_MANIFEST))
+    (stale / "extension.js").write_text('new v.McpStdioServerDefinition("stale","node");')
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert not any("pub.stale-1.0.0" in k for k in mcp_configs)
+
+
+def test_vscode_extension_provider_mcp_dedupes_repeated_server_names(tmp_path):
+    """Two definitions sharing a label would otherwise collapse into one entry."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    _install_extension(
+        tmp_path,
+        "pub.twin-1.0.0",
+        {
+            "main": "./dist/extension.bundle.js",
+            "contributes": {"mcpServerDefinitionProviders": [{"id": "p", "label": "l"}]},
+        },
+        'new v.McpStdioServerDefinition("srv","node",["a.js"]);new v.McpStdioServerDefinition("srv","node",["b.js"]);',
+    )
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    entries = mcp_configs[next(k for k in mcp_configs if "/pub.twin-1.0.0/" in k)]
+    assert [name for name, _ in entries] == ["srv", "srv-2"]
+    assert [server.args for _, server in entries] == [["a.js"], ["b.js"]]
+
+
+def test_vscode_extension_provider_mcp_is_opt_in_per_fork(tmp_path, monkeypatch):
+    """The provider scan is gated: a fork whose extension host doesn't implement
+    ``registerMcpServerDefinitionProvider`` must report nothing, even though the
+    extension on disk is byte-identical to the VS Code case."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    _install_extension(
+        tmp_path,
+        "pub.gated-1.0.0",
+        {
+            "main": "./dist/extension.bundle.js",
+            "contributes": {"mcpServerDefinitionProviders": [{"id": "p", "label": "l"}]},
+        },
+        'new v.McpStdioServerDefinition("srv","node");',
+    )
+    monkeypatch.setattr(VSCodeDiscoverer, "_extension_mcp_providers_enabled", False)
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert not any(k.endswith(".js") for k in mcp_configs)
+
+
+def test_cursor_does_not_scan_extension_mcp_providers(tmp_path):
+    """Cursor stubs the API out despite tracking a recent VS Code, so an extension
+    declaring a provider is a false positive there. See the flag's rationale in
+    ``cursor.py``."""
+    from agent_scan.agents import CursorDiscoverer
+
+    exts = tmp_path / ".cursor" / "extensions"
+    ext_dir = exts / "pub.provider-1.0.0"
+    (ext_dir / "dist").mkdir(parents=True)
+    (ext_dir / "package.json").write_text(
+        json.dumps(
+            {
+                "main": "./dist/extension.bundle.js",
+                "contributes": {"mcpServerDefinitionProviders": [{"id": "p", "label": "l"}]},
+            }
+        )
+    )
+    (ext_dir / "dist" / "extension.bundle.js").write_text('new v.McpStdioServerDefinition("srv","node");')
+    (exts / "extensions.json").write_text(json.dumps([{"relativeLocation": "pub.provider-1.0.0"}]))
+
+    mcp_configs = CursorDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert not any(k.endswith(".js") for k in mcp_configs)
+
+
+def test_only_vscode_opts_into_extension_mcp_providers():
+    """Drift guard: opting a fork in is a claim about that fork's extension host,
+    so it must be a deliberate edit with evidence, not an inherited default."""
+    from agent_scan.agents import (
+        AntigravityDiscoverer,
+        CursorDiscoverer,
+        KiroDiscoverer,
+        VSCodeDiscoverer,
+        WindsurfDiscoverer,
+    )
+
+    assert VSCodeDiscoverer._extension_mcp_providers_enabled is True
+    for fork in (CursorDiscoverer, WindsurfDiscoverer, KiroDiscoverer, AntigravityDiscoverer):
+        assert fork._extension_mcp_providers_enabled is False, fork.__name__
+
+
+# --- discover_local_only: sources backend discovery can't read yet ---
+
+
+def test_discover_local_only_is_empty_by_default(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {"srv": {"command": "echo"}}}')
+
+    cti = ClaudeCodeDiscoverer(tmp_path).discover_local_only()
+
+    assert cti is not None
+    assert (cti.mcp_configs, cti.skills_dirs) == ({}, {})
+
+
+def test_discover_local_only_none_when_not_installed(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    assert OpenCodeDiscoverer(tmp_path).discover_local_only() is None
+
+
+def test_vscode_discover_local_only_returns_only_extension_providers(tmp_path):
+    from agent_scan.agents import VSCodeDiscoverer
+
+    _install_extension(
+        tmp_path,
+        "ms-python.vscode-pylance-2026.4.1",
+        _PYLANCE_MANIFEST,
+        'new n$.McpHttpServerDefinition("pylance mcp server",n$.Uri.parse("http://localhost:1/stream"));',
+    )
+    (tmp_path / ".vscode" / "mcp.json").write_text('{"servers": {"user-srv": {"command": "echo"}}}')
+
+    cti = VSCodeDiscoverer(tmp_path).discover_local_only()
+
+    assert cti is not None
+    assert [key.rsplit("/", 1)[-1] for key in cti.mcp_configs] == ["extension.bundle.js"]
+    assert cti.skills_dirs == {}
+
+
+def test_cursor_discover_local_only_is_empty(tmp_path):
+    from agent_scan.agents import CursorDiscoverer
+
+    (tmp_path / ".cursor").mkdir()
+    exts = tmp_path / ".cursor" / "extensions"
+    ext_dir = exts / "ms-python.vscode-pylance-2026.4.1"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "package.json").write_text(json.dumps(_PYLANCE_MANIFEST))
+    (ext_dir / "dist").mkdir()
+    (ext_dir / "dist" / "extension.bundle.js").write_text(
+        'new n$.McpHttpServerDefinition("pylance mcp server",n$.Uri.parse("http://localhost:1/stream"));'
+    )
+    (exts / "extensions.json").write_text(json.dumps([{"relativeLocation": ext_dir.name}]))
+
+    cti = CursorDiscoverer(tmp_path).discover_local_only()
+
+    assert cti is not None
+    assert cti.mcp_configs == {}
+
+
+def test_opencode_discover_local_only_returns_only_project_history(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    project = tmp_path / "work" / "repo"
+    project.mkdir(parents=True)
+    _seed_opencode_db(tmp_path / ".local" / "share" / "opencode" / "opencode.db", [project.as_posix()])
+    (install / "opencode.json").write_text(
+        json.dumps(
+            {
+                "mcp": {"global-srv": {"type": "local", "command": ["echo"]}},
+                "skills": {"paths": ["rel-skills", (tmp_path / "abs-skills").as_posix()]},
+            }
+        )
+    )
+    _write_skill(install / "skills", "global-skill")
+    _write_skill(tmp_path / "abs-skills", "abs-skill")
+    (project / "opencode.json").write_text(json.dumps({"mcp": {"proj-srv": {"type": "local", "command": ["echo"]}}}))
+    _write_skill(project / ".opencode" / "skills", "proj-skill")
+    _write_skill(project / "rel-skills", "rel-skill")
+
+    cti = OpenCodeDiscoverer(tmp_path).discover_local_only()
+
+    assert cti is not None
+    assert list(cti.mcp_configs) == [(project / "opencode.json").as_posix()]
+    assert set(cti.skills_dirs) == {
+        (project / ".opencode" / "skills").as_posix(),
+        (project / "rel-skills").as_posix(),
+    }
+
+
+def test_opencode_discover_local_only_keeps_absolute_paths_from_project_configs(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    project = tmp_path / "work" / "repo"
+    project.mkdir(parents=True)
+    _seed_opencode_db(tmp_path / ".local" / "share" / "opencode" / "opencode.db", [project.as_posix()])
+    abs_skills = tmp_path / "team" / "abs-skills"
+    (project / "opencode.json").write_text(json.dumps({"skills": {"paths": [abs_skills.as_posix(), "~/home-skills"]}}))
+    _write_skill(abs_skills, "abs-skill")
+    _write_skill(tmp_path / "home-skills", "home-skill")
+
+    cti = OpenCodeDiscoverer(tmp_path).discover_local_only()
+
+    assert cti is not None
+    assert set(cti.skills_dirs) == {abs_skills.as_posix(), (tmp_path / "home-skills").as_posix()}
+
+
+def test_opencode_discover_local_only_without_projects_is_empty(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text(json.dumps({"mcp": {"srv": {"type": "local", "command": ["echo"]}}}))
+
+    cti = OpenCodeDiscoverer(tmp_path).discover_local_only()
+
+    assert cti is not None
+    assert (cti.mcp_configs, cti.skills_dirs) == ({}, {})
