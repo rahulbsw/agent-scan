@@ -4072,7 +4072,7 @@ class TestHookScriptRequestBudget:
 
 
 class TestHookScriptVersionPlaceholder:
-    """The release pipeline stamps the forwarders' version; install copies them verbatim."""
+    """Install fills the forwarder version and preserves its fallback comparison."""
 
     @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
     def test_bundled_script_has_one_assignment_to_stamp(self, name):
@@ -4085,11 +4085,18 @@ class TestHookScriptVersionPlaceholder:
         assert _get_script_path(name).read_bytes().count(_VERSION_PLACEHOLDER) == 2
 
     @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS + _TRAMPOLINE_SCRIPTS)
-    def test_copy_is_verbatim(self, tmp_path, name):
+    def test_copy_fills_only_install_variables(self, tmp_path, monkeypatch, name):
+        monkeypatch.setattr("agent_scan.version.version_info", _SENTINEL_VERSION)
         dest = tmp_path / "hooks" / name
         guard_module._copy_hook_script(dest)
-
-        assert dest.read_bytes() == _get_script_path(name).read_bytes()
+        source = _get_script_path(name).read_bytes()
+        if name in _FORWARDER_SCRIPTS:
+            expected, count = _VERSION_ASSIGNMENT_RE.subn(rb"\g<1>" + _SENTINEL_VERSION.encode() + rb"\g<2>", source)
+            assert count == 1
+            assert dest.read_bytes() == expected
+            assert dest.read_bytes().count(_VERSION_PLACEHOLDER) == 1
+        else:
+            assert dest.read_bytes() == source
 
     @pytest.mark.parametrize("name", _TRAMPOLINE_SCRIPTS)
     def test_trampolines_carry_no_placeholder(self, name):

@@ -24,6 +24,7 @@ set -euo pipefail
 # --- BEGIN install-time variables ---
 # Open Agent Scan CLI version (replaced at install time).
 AGENT_SCAN_VERSION="__AGENT_SCAN_VERSION__"
+# --- END install-time variables ---
 
 # Hook API version.
 VERSION="2025-11-11"

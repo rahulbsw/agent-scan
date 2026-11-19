@@ -2654,7 +2654,7 @@ def _copy_hook_script(dest: Path) -> _CopiedScript:
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     source = importlib_resources.files("agent_scan.hooks").joinpath(dest.name)
-    new_content = source.read_bytes()
+    new_content = _substitute_hook_script_variables(source.read_bytes())
     new_checksum = hashlib.sha256(new_content).hexdigest()
 
     current_content = dest.read_bytes() if dest.exists() else None

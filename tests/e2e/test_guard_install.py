@@ -28,6 +28,16 @@ CLIENT_CASES = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _isolated_guard_home(tmp_path_factory, monkeypatch):
+    # Hook discovery must not enumerate the developer's real installed agents.
+    home = str(tmp_path_factory.mktemp("guard-home"))
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
+    for variable in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME"):
+        monkeypatch.delenv(variable, raising=False)
+
+
 def _guard_env(**extra: str) -> dict[str, str]:
     """Environment isolated from the developer's own Snyk/guard settings.
 
