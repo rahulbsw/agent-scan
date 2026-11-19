@@ -14,3 +14,6 @@ e320031684ba5dd9b6e0178b3cfdd7feb51af3a9:tests/unit/test_redact.py:generic-api-k
 da4306c3cb67208d4f00e95518a0b72b9fe6c13a:tests/unit/test_bootstrap_payload.py:generic-api-key:175
 05c46385e4676117155a600ed65b3fe77fd720ea:tests/unit/test_redact.py:generic-api-key:16
 a692f7c4591b2eb6ba7dc51215997d08ed127f1a:tests/unit/test_guard.py:generic-api-key:1210
+# Dummy pk-1234567890 values in upstream guard status tests (Security run 42629402768).
+bf1cde991e3835eba3c65f5ee79f2c3ea5a2a737:tests/unit/test_guard.py:generic-api-key:1858
+bf1cde991e3835eba3c65f5ee79f2c3ea5a2a737:tests/unit/test_guard.py:generic-api-key:1874
