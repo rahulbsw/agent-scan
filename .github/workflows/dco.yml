@@ -32,6 +32,15 @@ jobs:
           missing=0
           for commit in $(git rev-list "${rev_list_args[@]}"); do
             if ! git log -1 --format=%B "$commit" | grep -Eiq '^Signed-off-by: .+ <.+@.+>$'; then
+              # A clean base-branch merge introduces no new authored changes.
+              read -ra parents <<< "$(git log -1 --format=%P "$commit")"
+              if [ "${#parents[@]}" -eq 2 ] &&
+                git merge-base --is-ancestor "${parents[1]}" "$BASE_SHA" &&
+                merge_tree=$(git merge-tree --write-tree "${parents[@]}") &&
+                [ "$merge_tree" = "$(git rev-parse "$commit^{tree}")" ]; then
+                echo "Commit $commit is a clean base-branch update."
+                continue
+              fi
               # Allow the original author to certify an earlier commit without rewriting history.
               author=$(git log -1 --format='%an <%ae>' "$commit")
               remediated=0
