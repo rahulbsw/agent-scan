@@ -324,7 +324,7 @@ class TestGuardUninstallE2E:
         _assert_scripts_removed(config_file)
         # Uninstall removes Guard's backup once the file is Guard-free.
         assert not Path(f"{config_file}.agent-guard.backup").exists()
-        assert "was not revoked" in result.stdout
+        assert "was removed from local hooks" in result.stdout
         assert _FakeHookServer.deletes == []
 
         # A second uninstall is a no-op that leaves the file untouched.
@@ -371,22 +371,16 @@ class TestGuardUninstallE2E:
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(("client", "config_name", "user_hook", "event"), CLIENT_CASES)
-    def test_uninstall_revokes_push_key(
+    def test_uninstall_leaves_external_push_key_revocation_to_administrator(
         self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server, client, config_name, user_hook, event
     ):
         config_file = tmp_path / config_name
         _install(agent_scan_cmd, agent_scan_command, client, config_file, fake_hook_server)
 
         result = _uninstall(agent_scan_cmd, client, config_file, SNYK_TOKEN="e2e-token", TENANT_ID="e2e-tenant")
-        assert "revoked" in result.stdout
-        assert "not revoked" not in result.stdout
-        assert len(_FakeHookServer.deletes) == 1
-        delete = _FakeHookServer.deletes[0]
-        assert delete["path"].startswith("/hidden/tenants/e2e-tenant/mcp-scan/push-key")
-        headers = {k.lower(): v for k, v in delete["headers"].items()}
-        assert headers["x-client-id"] == "test-pk-e2e"
-        # Localhost targets never receive the Snyk token.
-        assert "authorization" not in headers
+        assert "was removed from local hooks" in result.stdout
+        assert "Revoke it in your provisioning" in result.stdout
+        assert _FakeHookServer.deletes == []
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     def test_uninstall_all_rejects_file(self, agent_scan_cmd, tmp_path):
