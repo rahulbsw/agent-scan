@@ -18,7 +18,7 @@ def test_project_metadata_uses_open_agent_scan_identity():
         project = tomllib.load(f)["project"]
 
     assert project["name"] == "open-agent-scan"
-    assert project["version"] == "0.1.2"
+    assert project["version"] == "0.2.0"
     assert "Open Agent Scan" in project["description"] or "Community-led" in project["description"]
 
 

@@ -1,5 +1,6 @@
 # Open Agent Scan
 
+- `0.2.0` sync upstream discovery and hook safeguards, adopt risk-based scan responses, update vulnerable dependencies, and add the installable AI-tool skill. Analysis remains local-first with no mandatory account or token. See [release notes](docs/releases/v0.2.0.md) for output compatibility and migration details.
 - `0.1.2` include an explicit `requests` charset detector in standalone binaries to avoid visible dependency warnings on startup.
 - `0.1.1` package standalone release binaries as platform archives (`.tar.gz` for macOS/Linux, `.zip` for Windows) and add release-page install guidance.
 - `0.1.0` first independent Open Agent Scan release. Renamed the package and primary CLI to `open-agent-scan`, kept `agent-scan` as a temporary compatibility alias, added community governance and attribution documents, added local rule metadata, added suspicious MCP startup command and cross-server influence checks, and renamed release assets to `open-agent-scan-*`.
