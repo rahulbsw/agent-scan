@@ -10,6 +10,9 @@ environment with `uv run --offline --frozen`, for an offline invocation.
 
 ## Usage
 
+For pull-request scanning of repository skills and agent instructions, use the
+[GitHub Actions integration guide](github-actions.md).
+
 ```bash
 uv run open-agent-scan skills ./my-skill
 uv run open-agent-scan skills ./my-skill --format json

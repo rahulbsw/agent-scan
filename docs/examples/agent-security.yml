@@ -1,0 +1,107 @@
+name: Agent security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  passive-scan:
+    name: Passive skills and agent instructions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository to inspect
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: repository
+          persist-credentials: false
+
+      - name: Check out a trusted scanner revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: rahulbsw/agent-scan
+          ref: 2140da75c0dfb999b4f650a829eb7e32a51c64a1
+          path: scanner
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          python-version: '3.13'
+          enable-cache: false
+
+      - name: Install only the scanner's locked dependencies
+        working-directory: ${{ runner.temp }}
+        run: uv sync --project "$GITHUB_WORKSPACE/scanner" --frozen --no-dev --no-editable
+
+      - name: Scan repository skills and agent instructions
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        env:
+          ROOT: ${{ github.workspace }}/repository
+          SCANNER: ${{ github.workspace }}/scanner/.venv/bin/open-agent-scan
+          REPORTS: ${{ runner.temp }}/agent-security-reports
+        run: |
+          set -euo pipefail
+          mkdir -p "$REPORTS"
+          root=$(realpath -- "$ROOT")
+          status=0
+          scanned=0
+          targets=(
+            skills
+            agents
+            .agents
+            .claude/skills
+            .claude/agents
+            .claude/commands
+            .github/agents
+            .github/instructions
+            .github/prompts
+            .cursor/rules
+            .cursor/agents
+            AGENTS.md
+            CLAUDE.md
+            GEMINI.md
+            .cursorrules
+            .github/copilot-instructions.md
+          )
+          for target in "${targets[@]}"; do
+            path="$root/$target"
+            if [[ ! -e "$path" && ! -L "$path" ]]; then
+              continue
+            fi
+            scanned=$((scanned + 1))
+            # Reject parent-link escapes before choosing a nested scan root.
+            resolved=$(realpath -m -- "$path")
+            if [[ "$resolved" != "$root/"* ]]; then
+              printf '%s\n' "Rejected scope outside repository: $target" >&2
+              status=2
+              continue
+            fi
+            name=${target//\//_}
+            code=0
+            "$SCANNER" skills "$path" --format json --fail-on none \
+              --fail-on-incomplete > "$REPORTS/$name.json" || code=$?
+            if (( code > status )); then
+              status=$code
+            fi
+          done
+          if (( scanned == 0 )); then
+            printf '%s\n' 'No configured skill or instruction paths found; update the target list.' >&2
+            exit 1
+          fi
+          exit "$status"
+
+      - name: Preserve scan reports, including failures
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agent-security-reports
+          path: ${{ runner.temp }}/agent-security-reports/
+          if-no-files-found: warn
+          retention-days: 7

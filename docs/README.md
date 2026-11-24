@@ -4,6 +4,9 @@ This is the documentation for [Open Agent Scan](https://github.com/open-agent-sc
 
 ## Contents
 
+- **[GitHub Actions](github-actions.md)** - Scan repository skills and agent instructions on pull requests, with a copyable low-permission workflow.
+- **[Passive skill scanning](passive-skills.md)** - Bounded local-only scanning, coverage gates, reports, and reviewed baselines.
+
 - **[CLI reference](cli-reference.md)** — All commands, flags, options, environment variables, and exit codes.
 - **[Scanning](scanning.md)** — How scanning works and usage examples.
 - **[JSON output](json-output.md)** — JSON schema, CI integration, and programmatic parsing.
