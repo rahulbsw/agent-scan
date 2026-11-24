@@ -14,13 +14,13 @@ Windows. Change the `push.branches` value if your default branch is not `main`.
 
 The example checks out the target and scanner into separate directories, installs
 only the trusted scanner's locked dependencies, scans a fixed allowlist, and
-uploads JSON reports even when scanning fails. It runs on pull requests, pushes
+uploads JSON and self-contained HTML reports even when a policy check fails,
+and writes a GitHub Actions job summary. It runs on pull requests, pushes
 to `main`, and manual dispatch. Missing optional paths are skipped; finding no
 configured paths fails explicitly rather than presenting an empty scan as success.
 
-The scanner is pinned to commit
-`2140da75c0dfb999b4f650a829eb7e32a51c64a1`, which introduces the passive command
-in [PR #12](https://github.com/rahulbsw/agent-scan/pull/12). This is an explicit
+The scanner is pinned to a full reporting-capable commit in the example workflow,
+from [PR #12](https://github.com/rahulbsw/agent-scan/pull/12). This is an explicit
 feature revision, not a claim that the command is in the latest published
 release or PyPI package. Review the revision before adoption and update it through
 reviewed dependency changes. Do not replace it with the pull request's scanner
@@ -60,7 +60,8 @@ gaps. The workflow also rejects selected paths resolving outside the repository.
 
 ## Decide What Blocks a Pull Request
 
-The example uses:
+The workflow runs the CI helper once over the configured targets. Its default
+policy is equivalent to the following individual scan:
 
 ```bash
 open-agent-scan skills PATH --format json --fail-on none --fail-on-incomplete
@@ -73,7 +74,10 @@ To block on medium-or-higher indicators, change `--fail-on none` to
 policy choices, not validated guarantees of maliciousness; quoted attack examples
 can trigger a finding. The command's exits are 0 for no requested gate failure,
 1 for policy/coverage gates, and 2 for operational or unsafe-input failures.
-The example continues scanning other targets and retains the highest exit status.
+The helper continues scanning other targets and retains the highest exit status.
+To change the threshold, edit `--fail-on none` in the workflow's helper command.
+Incomplete coverage blocks by default; do not add `--allow-incomplete` unless
+you intentionally accept nonblocking coverage gaps.
 
 After a successful rollout, add the check
 `Passive skills and agent instructions` as a required check in the consuming
@@ -87,15 +91,49 @@ For a reviewed false positive, use an explicit baseline as described in
 review the reason/owner/expiry, and protect changes. A baseline loaded from an
 unreviewed PR is not an independent trust decision. Keep per-target baselines
 outside scanned directories; they never erase incomplete coverage. Do not
-automatically accept findings or create baselines during PR runs.
+automatically accept findings or create baselines during PR runs. The multi-target
+CI helper does not currently apply per-target baselines; use separately reviewed
+`skills --baseline` invocations when you need baseline-aware gates rather than
+assuming the bundled helper will load them.
 
 ## Read the Results
 
-Open the Actions run and download `agent-security-reports`. Each scanned target
-has a separate `oas.skills/v1` JSON report with severity, confidence, locations,
-remediation, suppressed findings, and explicit coverage limitations. The example
-keeps artifacts for seven days; adjust retention to your data policy. Reports
-omit source snippets, but filenames and metadata can still be sensitive.
+Open the Actions run's **Summary** page for a target-by-target table: coverage,
+active/suppressed findings, highest active severity, and exit status. Missing
+targets are listed as skipped. If scanner setup or report generation fails before
+the summary exists, the workflow writes an explicit failure message instead of
+an empty success summary. A cancelled/timed-out job may not reach reporting steps.
+
+Download and extract the `agent-security-reports` artifact for details:
+
+| File | Purpose |
+| --- | --- |
+| `index.html` | Offline repository dashboard linking each target's HTML report |
+| `<target-id>.html` | Readable target report with findings, remediation and coverage gaps |
+| `<target-id>.json` | Full recorded `oas.skills/v1` report for automation |
+| `manifest.json` | `oas.ci/v1` target-to-file mapping and aggregate exit status |
+| `summary.md` | The same table published to the Actions job summary |
+| `sarif/<target-id>.sarif` | Optional repository-mapped SARIF for complete, successful scopes |
+
+Target IDs are stable hashes to avoid unsafe or colliding filenames. The HTML
+contains no scripts or external assets, escapes untrusted text, and shows at most
+200 findings and 200 coverage gaps per target; use JSON for the full recorded
+lists. Each target is scanned once, then rendered into the requested formats.
+Reports remain available when findings or coverage fail the scan step. The
+example keeps artifacts for seven days; adjust retention to your data policy.
+Reports omit source snippets, but filenames and metadata can still be sensitive.
+
+The helper also works outside GitHub Actions, with a fresh output directory
+outside the target repository:
+
+```bash
+uv run python -m agent_scan.skill_scanning.ci \
+  --root /path/to/repository --reports /tmp/new-agent-reports \
+  --fail-on none skills .agents AGENTS.md
+```
+
+Add `--sarif` to generate mapped SARIF locally. This command only writes reports;
+it never uploads results or changes GitHub permissions.
 
 The current passive profile checks explicit instruction overrides,
 download-to-interpreter pipelines and selected hidden formatting. It does **not**
@@ -105,27 +143,42 @@ safe. A successful run only describes the configured profile and selected scope.
 
 ## Optional SARIF and GitHub Code Scanning
 
-For downloadable SARIF, replace `--format json` with `--format sarif` and the
-output extension `.json` with `.sarif`. The artifact upload works unchanged and
-needs no additional permissions. This alone does not create Security-tab alerts.
+Security-tab publishing is **off by default**. To enable the supplied optional
+job, first check that GitHub code scanning is available/enabled for your repo,
+then create a repository Actions variable in **Settings > Secrets and variables
+> Actions > Variables**:
 
-For GitHub code-scanning ingestion, use
-[`github/codeql-action/upload-sarif`](https://docs.github.com/en/code-security/how-tos/find-and-fix-code-vulnerabilities/integrate-with-existing-tools/upload-sarif-file)
-after generation, pin the action to a reviewed full SHA, and grant only the
-permissions required by your repository/event (including `security-events: write`
-where supported). Check code-scanning availability and fork-PR token policy
-first. Keep the artifact-only workflow as the low-permission default; do not use
-`pull_request_target` as a workaround for permissions.
+```text
+OPEN_AGENT_SCAN_UPLOAD_SARIF=true
+```
 
-Before ingestion, normalize each report's relative artifact URIs to the target
-repository root: a `skills/SKILL.md` scan emits `SKILL.md`, which must map to
-`skills/SKILL.md` in GitHub. Directory targets similarly need their directory
-prefix; single files need their parent prefix. When using this example's second
-checkout layout, set the upload action's `checkout_path` to
-`${{ github.workspace }}/repository`. Multiple reports need stable, distinct
-analysis categories/`runAutomationDetails.id` values so one target's results do
-not replace another's. The supplied example intentionally does not attempt this
-mapping or enable Security-tab uploads; its JSON artifacts are directly usable.
+Use the exact lowercase string `true`. With this variable enabled, the scan job
+generates SARIF alongside JSON/HTML. A separate `upload-sarif` job runs only on
+`push` and `workflow_dispatch`, not pull-request events. The scanner job remains
+read-only. Only the upload job receives `security-events: write` and
+`actions: read`; it checks out source for mapping and uploads reports using a
+pinned `github/codeql-action/upload-sarif`. It never runs the target's code.
+
+Fork and same-repository pull requests still receive the default artifact and
+summary experience; they do not gain a write-token upload path. Do not switch to
+`pull_request_target` to bypass this separation. Upload failures are visible as a
+separate job failure and do not erase the scan reports or change its policy gate.
+With the variable unset/false, no Security-tab job runs and SARIF generation is
+omitted. This is a documented opt-in, not a repository setting changed by this PR.
+
+The helper maps artifact URIs to the consuming repository root (including
+single-file targets), assigns a stable distinct SARIF `automationDetails.id` per
+target, and configures `checkout_path` for the target checkout. It emits uploadable
+SARIF only for successfully executed, completely covered targets, so a partial
+or failed scan cannot clear existing alerts by uploading an empty clean result.
+JSON/HTML and the summary still record those failed scopes. Missing, removed or
+incomplete targets are not refreshed in code scanning; their old alerts may
+remain until a complete rescan or explicit analysis cleanup. Standalone
+`skills --format sarif` remains available for diagnostic reports, including
+partial/failed coverage, but does not itself upload anything.
+
+See GitHub's [SARIF upload requirements](https://docs.github.com/en/code-security/how-tos/find-and-fix-code-vulnerabilities/integrate-with-existing-tools/upload-sarif-file)
+for repository eligibility and token policy.
 
 ## Runner Safety
 

@@ -71,7 +71,8 @@ Scan repository skills, `AGENTS.md`, Claude/Copilot instructions, and Cursor
 rules on pull requests without executing their code. Follow the
 [GitHub Actions guide](docs/github-actions.md) and its
 [copyable workflow](docs/examples/agent-security.yml). It includes pinned scanner
-installation, coverage gates, and downloadable reports; no Snyk token is required.
+installation, coverage gates, JSON/HTML artifacts, an Actions job summary, and
+optional Security-tab SARIF uploads; no Snyk token is required.
 
 ## Use With AI Tools
 

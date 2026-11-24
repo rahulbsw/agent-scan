@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
@@ -19,7 +20,15 @@ def sanitized(value):
     if isinstance(value, list):
         return [sanitized(item) for item in value]
     if isinstance(value, dict):
-        return {key: sanitized(item) for key, item in value.items()}
+        # These schema fields contain scanner-generated evidence IDs, not source secrets.
+        return {
+            key: item
+            if key in {"sha256", "fingerprint", "oasEvidence/v1"}
+            and isinstance(item, str)
+            and re.fullmatch(r"[a-f0-9]{64}", item)
+            else sanitized(item)
+            for key, item in value.items()
+        }
     return value
 
 
@@ -118,6 +127,10 @@ def sarif(report: Report) -> dict:
 
 
 def render(report: Report, output_format: str) -> str:
+    if output_format == "html":
+        from agent_scan.skill_scanning.html_report import render_html
+
+        return render_html(report)
     if output_format == "sarif":
         return json.dumps(sarif(report), ensure_ascii=True, indent=2)
     data = sanitized(report.model_dump())

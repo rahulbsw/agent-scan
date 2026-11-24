@@ -46,16 +46,21 @@ def test_passive_entry_point_does_not_execute_bundle(agent_scan_cmd, tmp_path):
 
 
 @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
-def test_passive_entry_point_renders_sarif(agent_scan_cmd, tmp_path):
+@pytest.mark.parametrize("output_format", ["sarif", "html"])
+def test_passive_entry_point_renders_downloadable_reports(agent_scan_cmd, tmp_path, output_format):
     path = tmp_path / "SKILL.md"
     path.write_text("Read selected files only.\n", encoding="utf-8")
     result = subprocess.run(
-        [*agent_scan_cmd, "skills", str(path), "--format", "sarif", "--fail-on-incomplete"],
+        [*agent_scan_cmd, "skills", str(path), "--format", output_format, "--fail-on-incomplete"],
         capture_output=True,
         text=True,
         timeout=30,
     )
-    report = json.loads(result.stdout)
-    assert report["version"] == "2.1.0"
-    assert report["runs"][0]["tool"]["driver"]["name"] == "Open Agent Scan"
+    if output_format == "sarif":
+        report = json.loads(result.stdout)
+        assert report["version"] == "2.1.0"
+        assert report["runs"][0]["tool"]["driver"]["name"] == "Open Agent Scan"
+    else:
+        assert "<!doctype html>" in result.stdout
+        assert "Open Agent Scan report" in result.stdout
     assert result.returncode == (2 if os.name == "nt" else 0), result.stderr

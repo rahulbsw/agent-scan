@@ -22,7 +22,7 @@ def add_parser(subparsers) -> None:
         description="Experimental bounded text checks on a local file or directory. No discovery, services or execution.",
     )
     parser.add_argument("path", type=Path)
-    parser.add_argument("--format", choices=["terminal", "json", "sarif"], default="terminal")
+    parser.add_argument("--format", choices=["terminal", "json", "html", "sarif"], default="terminal")
     parser.add_argument("--fail-on", choices=["none", "low", "medium", "high", "critical"], default="none")
     parser.add_argument("--fail-on-incomplete", action="store_true")
     baseline = parser.add_mutually_exclusive_group()

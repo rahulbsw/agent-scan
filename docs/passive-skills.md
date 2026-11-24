@@ -16,6 +16,7 @@ For pull-request scanning of repository skills and agent instructions, use the
 ```bash
 uv run open-agent-scan skills ./my-skill
 uv run open-agent-scan skills ./my-skill --format json
+uv run open-agent-scan skills ./my-skill --format html > /tmp/skill-report.html
 uv run open-agent-scan skills ./my-skill --format sarif > /tmp/skill-report.sarif
 uv run open-agent-scan skills ./my-skill --fail-on medium --fail-on-incomplete
 ```
@@ -86,6 +87,15 @@ characters are escaped. Internal raw UTF-8 text is local and ephemeral.
 SARIF 2.1.0 preserves suppressed findings, confidence, experimental status,
 coverage, and tool notifications. Partial coverage is not automatically a failed
 invocation: execution status and coverage are independent.
+
+HTML is available with `--format html`. It is a self-contained offline report
+without JavaScript or external assets, with escaped metadata, findings,
+remediation, suppression reasons and coverage limitations. The readable view
+caps findings and coverage-gap lists at 200 each and explicitly directs readers
+to JSON for the full recorded lists. Like other formats, it prints to stdout;
+redirect it outside the scanned target. The
+[Actions example](github-actions.md#read-the-results) produces JSON/HTML artifacts
+and a job summary by default, with opt-in Security-tab SARIF upload.
 
 Exit precedence:
 
