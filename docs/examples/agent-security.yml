@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: rahulbsw/agent-scan
-          ref: 2140da75c0dfb999b4f650a829eb7e32a51c64a1
+          ref: f06e494c1b5d2d345ba1a3b2f73f89d7d92a445c
           path: scanner
           persist-credentials: false
 
