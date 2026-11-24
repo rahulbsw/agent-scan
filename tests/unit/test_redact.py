@@ -39,6 +39,24 @@ FAKE_ARTIFACTORY_TOKEN = "AKC" + synthetic_secret(b"artifactory fixture token")
 _SECRET_MARKER_RE = re.compile(r"^\*\*REDACTED_SECRET_[A-Z0-9_]+\*\*$")
 
 
+def test_redaction_marker_preserves_all_builtin_detector_labels():
+    from agent_scan.redact import _get_cached_plugins, _redaction_marker
+
+    for plugin in _get_cached_plugins():
+        label = type(plugin).__name__
+        assert _redaction_marker(label) == f"**REDACTED_SECRET_{label.upper()}**"
+
+
+def test_redaction_marker_never_echoes_unknown_detector_results(monkeypatch):
+    from agent_scan.redact import _redaction_marker, redact_text
+
+    assert _redaction_marker(FAKE_API_KEY) == "**REDACTED_SECRET_UNKNOWN**"
+    monkeypatch.setattr("agent_scan.redact._detect_secret_cached", lambda value: FAKE_API_KEY)
+    result = redact_text("VALUE=example")
+    assert FAKE_API_KEY not in result
+    assert "**REDACTED_SECRET_UNKNOWN**" in result
+
+
 @pytest.mark.parametrize(
     "imports",
     [
