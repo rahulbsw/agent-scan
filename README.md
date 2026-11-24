@@ -1,5 +1,9 @@
 # Open Agent Scan
 
+For explicitly scoped scans without MCP execution or remote services, see the
+experimental [passive skill scanner](docs/passive-skills.md):
+`open-agent-scan skills ./my-skill --format json` (Linux/macOS).
+
 Open Agent Scan is a community-led, local-first security scanner for AI agents,
 MCP servers, and agent skills. It discovers installed agent components and
 flags high-confidence risks such as prompt injection, tool poisoning, hidden

@@ -879,6 +879,9 @@ def main():
         description="Available commands (default: scan)",
         metavar="COMMAND",
     )
+    from agent_scan.skill_scanning.cli import add_parser as add_skills_parser
+
+    add_skills_parser(subparsers)
     # SCAN command
     scan_parser = subparsers.add_parser(
         "scan",
@@ -1063,6 +1066,13 @@ def main():
         sys.exit(1)
 
     args = parser.parse_args()
+
+    # Passive skill scans cannot inherit remote services or executable discovery
+    # from config files, environment settings, or the regular scan pipeline.
+    if args.command == "skills":
+        from agent_scan.skill_scanning.cli import run as run_skills
+
+        sys.exit(run_skills(args))
 
     # Attach parsed control servers to args
     args.control_servers = control_servers

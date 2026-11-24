@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "provenance": "Original synthetic regression fixtures authored for Open Agent Scan; Apache-2.0. Not an accuracy benchmark.",
+  "cases": [
+    {"file": "benign.md", "expected_rules": []},
+    {"file": "documentation.md", "expected_rules": []},
+    {"file": "override.md", "expected_rules": ["OAS-SKILL-001"]},
+    {"file": "download.sh", "expected_rules": ["OAS-SKILL-002"]},
+    {"file": "quoted-example.md", "expected_rules": ["OAS-SKILL-001"]}
+  ]
+}
