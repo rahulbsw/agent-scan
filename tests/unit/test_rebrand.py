@@ -3,6 +3,8 @@ import re
 import sys
 from pathlib import Path
 
+import yaml
+
 from agent_scan.run import _maybe_warn_legacy_alias
 
 if sys.version_info >= (3, 11):
@@ -43,6 +45,22 @@ def test_release_workflow_publishes_platform_archives():
     assert ".zip" in workflow
     assert "tar -czf" in workflow
     assert "zipfile.ZipFile" in workflow
+
+
+def test_official_platform_matrices_exclude_intel_macos_and_preserve_other_targets():
+    tests = yaml.safe_load((REPO_ROOT / ".github/workflows/tests.yml").read_text())
+    release = yaml.safe_load((REPO_ROOT / ".github/workflows/release.yml").read_text())
+    expected = {
+        "ubuntu-latest": "linux-x64",
+        "ubuntu-24.04-arm": "linux-arm64",
+        "windows-latest": "windows-x64",
+        "macos-latest": "macos-arm64",
+    }
+    assert set(tests["jobs"]["test"]["strategy"]["matrix"]["os"]) == set(expected)
+    entries = release["jobs"]["build-binaries"]["strategy"]["matrix"]["include"]
+    assert len(entries) == len(expected)
+    assert {entry["os"]: entry["target"] for entry in entries} == expected
+    assert "publish-pypi" in release["jobs"]
 
 
 def test_binary_build_collects_requests_charset_dependency():
