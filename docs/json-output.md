@@ -9,12 +9,13 @@ adds an `oas.ci/v1` manifest alongside per-target JSON/HTML reports. These are
 not the legacy `scan --json` shape described below. HTML and SARIF are also
 available on `skills`; see [the CLI reference](cli-reference.md#passive-skill-reports).
 
-Enable JSON mode with `--json`:
+After [installing the CLI from GitHub Releases](../README.md#install-and-run),
+enable JSON mode with `--json`:
 
 ```bash
-uvx open-agent-scan@latest --json
-uvx open-agent-scan@latest --json ~/.claude/skills
-uvx open-agent-scan@latest inspect --json ~/.vscode/mcp.json
+open-agent-scan --json
+open-agent-scan --json ~/.claude/skills
+open-agent-scan inspect --json ~/.vscode/mcp.json
 ```
 
 **Output behavior**
@@ -186,7 +187,7 @@ These codes are legacy internal hints. If you want JSON parsing to mirror the de
 Use `--ci` for a native non-zero exit when findings or runtime failures remain:
 
 ```bash
-uvx open-agent-scan@latest \
+open-agent-scan \
   --ci \
   --dangerously-run-mcp-servers \
   --json \
@@ -210,7 +211,7 @@ See [CLI reference — CI mode](cli-reference.md#ci-mode).
 ### Any critical findings or failures?
 
 ```bash
-uvx open-agent-scan@latest --json ./my-skill | jq '
+open-agent-scan --json ./my-skill | jq '
   [ .[] ] | map(
     select(
       (.error != null and .error.is_failure) or
@@ -230,7 +231,7 @@ Returns `true` when hard failures or `E*` findings exist.
 Match the default text output by excluding `W003`–`W006`:
 
 ```bash
-uvx open-agent-scan@latest --json ./my-skill | jq '
+open-agent-scan --json ./my-skill | jq '
   .[] | (.issues // [])[] |
   select(
     .code as $c | ["W003", "W004", "W005", "W006"] | index($c) | not
@@ -243,7 +244,7 @@ uvx open-agent-scan@latest --json ./my-skill | jq '
 Fail on any remaining issue (excluding internal warnings) or any `is_failure` error:
 
 ```bash
-uvx open-agent-scan@latest --json ./my-skill | jq '
+open-agent-scan --json ./my-skill | jq '
   [ .[] ] | map(
     select(
       (.error != null and .error.is_failure) or
@@ -265,7 +266,7 @@ If the result is `true`, the target **failed** the check.
 When you cannot use `--ci`, derive an exit code from issue codes:
 
 ```bash
-uvx open-agent-scan@latest --json . | jq -e '
+open-agent-scan --json . | jq -e '
   [
     .[] | (.issues // [])[].code
   ] | map(select(. as $c | ["W003","W004","W005","W006"] | index($c) | not)) | length == 0
@@ -286,7 +287,7 @@ const IGNORE_CODES = new Set(["W003", "W004", "W005", "W006"]);
 
 function checkAgentScan(targetPath) {
   const scanOutput = execSync(
-    `uvx open-agent-scan@latest --json ${JSON.stringify(targetPath)}`,
+    `open-agent-scan --json ${JSON.stringify(targetPath)}`,
     { encoding: "utf8" }
   );
   const scanResult = JSON.parse(scanOutput);

@@ -10,10 +10,16 @@ Open Agent Scan operates in two main modes which can be used jointly or separate
 
 ## Quick Start
 
+Install the CLI from the published GitHub wheel using the
+[installation instructions](../README.md#install-and-run) before these examples.
+The application is not currently on PyPI; registry-only `uvx` invocations cannot
+resolve it. For untrusted skill input, prefer
+[`open-agent-scan skills PATH`](passive-skills.md) over active MCP discovery.
+
 To run a full scan of your machine (auto-discovers agents, MCP servers, and skills), run:
 
 ```bash
-uvx open-agent-scan@latest
+open-agent-scan
 ```
 
 This will scan for security vulnerabilities in servers, skills, tools, prompts, and resources. It will automatically discover a variety of agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf.
@@ -22,13 +28,13 @@ You can also scan particular configuration files or skills:
 
 ```bash
 # scan an MCP configuration
-uvx open-agent-scan@latest ~/.vscode/mcp.json
+open-agent-scan ~/.vscode/mcp.json
 # scan a single agent skill
-uvx open-agent-scan@latest ~/path/to/my/SKILL.md
+open-agent-scan ~/path/to/my/SKILL.md
 # scan all claude skills
-uvx open-agent-scan@latest ~/.claude/skills
+open-agent-scan ~/.claude/skills
 # MCP only (skip skills)
-uvx open-agent-scan@latest --no-skills
+open-agent-scan --no-skills
 ```
 
 ## How It Works

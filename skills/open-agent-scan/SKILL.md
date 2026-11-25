@@ -17,10 +17,11 @@ required. Findings are heuristics, not proof that a component is malicious or sa
 - Prefer an existing `open-agent-scan` installation. Check `--help` to confirm
   supported flags. In a source checkout, use `uv run open-agent-scan`.
 - If the CLI is absent, explain the installation/download needed and obtain
-  authorization before installing or fetching it. The project documents
-  `uvx open-agent-scan@latest`; prefer a user-approved pinned release for
-  repeatable scans. If that package is unavailable, report the failure and use
-  the official source/release instructions; do not substitute similarly named tools.
+  authorization before installing or fetching it. The application is not on
+  PyPI. Use a user-approved pinned wheel from the repository's GitHub Releases,
+  with `uvx --from WHEEL_URL open-agent-scan` for a one-off run or
+  `uv tool install WHEEL_URL` for a persistent installation. Follow the project's
+  README for the exact release URL; do not substitute similarly named tools.
 - This skill supplies instructions, not the scanner executable. It requires an
   agent with shell access; source/package execution requires Python 3.10+.
 

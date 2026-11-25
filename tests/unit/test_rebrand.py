@@ -1,4 +1,5 @@
 import io
+import re
 import sys
 from pathlib import Path
 
@@ -72,3 +73,18 @@ def test_primary_command_does_not_warn(monkeypatch):
     _maybe_warn_legacy_alias("open-agent-scan")
 
     assert stderr.getvalue() == ""
+
+
+def test_install_examples_use_published_release_instead_of_unpublished_pypi_package():
+    readme = (REPO_ROOT / "README.md").read_text()
+    assert (
+        "https://github.com/rahulbsw/agent-scan/releases/download/v0.2.0/open_agent_scan-0.2.0-py3-none-any.whl"
+        in readme
+    )
+    assert "uv tool install" in readme
+    assert "uvx --from" in readme
+    assert "not published to PyPI" in readme
+    docs = [REPO_ROOT / "README.md", *(REPO_ROOT / "docs").glob("*.md")]
+    for path in docs:
+        for block in re.findall(r"```[^\n]*\n(.*?)```", path.read_text(), flags=re.DOTALL):
+            assert "uvx open-agent-scan@latest" not in block, path

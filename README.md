@@ -34,18 +34,37 @@ remote analysis service is required.
 
 ## Install And Run
 
-Run from PyPI with `uvx`:
+Install the published GitHub Release wheel with `uv`:
 
 ```bash
-uvx open-agent-scan@latest
+uv tool install \
+  "open-agent-scan @ https://github.com/rahulbsw/agent-scan/releases/download/v0.2.0/open_agent_scan-0.2.0-py3-none-any.whl"
+open-agent-scan --help
 ```
+
+The package is **not published to PyPI**. Plain `uvx open-agent-scan@latest`
+queries the registry and will fail until PyPI publication is configured.
+If `uv` reports that its tool bin directory is not on `PATH`, run
+`uv tool update-shell` and start a new shell.
+
+For a one-off invocation without a persistent tool install:
+
+```bash
+uvx --from \
+  https://github.com/rahulbsw/agent-scan/releases/download/v0.2.0/open_agent_scan-0.2.0-py3-none-any.whl \
+  open-agent-scan --help
+```
+
+Replace `--help` with `skills ./my-skill --format json` for an explicitly scoped
+passive scan. Installation downloads Python dependencies; passive scanning does
+not contact analysis services or execute MCP startup commands.
 
 Scan specific MCP configs, skill files, or skill directories:
 
 ```bash
-uvx open-agent-scan@latest ~/.vscode/mcp.json
-uvx open-agent-scan@latest ~/path/to/my/SKILL.md
-uvx open-agent-scan@latest ~/.claude/skills
+open-agent-scan ~/.vscode/mcp.json
+open-agent-scan ~/path/to/my/SKILL.md
+open-agent-scan ~/.claude/skills
 ```
 
 The legacy `agent-scan` command remains as a temporary compatibility alias and
@@ -151,7 +170,7 @@ must include:
 Remote analysis remains an explicit opt-in:
 
 ```bash
-uvx open-agent-scan@latest scan \
+open-agent-scan scan \
   --analysis-mode remote \
   --analysis-provider remote \
   --analysis-url "https://analysis.example/scan" \

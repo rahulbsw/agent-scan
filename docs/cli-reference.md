@@ -2,6 +2,9 @@
 
 Complete reference for the `open-agent-scan` command-line interface.
 
+Examples assume the CLI is [installed from GitHub Releases](../README.md#install-and-run).
+The application is not currently published to PyPI.
+
 Open Agent Scan runs local analysis by default. Remote analysis and hook uploads are explicit opt-ins configured with URLs, headers, and pre-provisioned push keys.
 
 Unless noted, flags apply to the standalone CLI. When no subcommand is given, `scan` is assumed.
@@ -254,30 +257,30 @@ Guard environment variables:
 
 ```bash
 # Full machine scan
-uvx open-agent-scan@latest
+open-agent-scan
 
 # MCP only, no skills
-uvx open-agent-scan@latest --no-skills
+open-agent-scan --no-skills
 
 # Specific config or skill directory
-uvx open-agent-scan@latest ~/.cursor/mcp.json
-uvx open-agent-scan@latest ~/.claude/skills
+open-agent-scan ~/.cursor/mcp.json
+open-agent-scan ~/.claude/skills
 
 # Inspect without analysis
-uvx open-agent-scan@latest inspect
+open-agent-scan inspect
 
 # JSON output
-uvx open-agent-scan@latest --json ./my-skill
+open-agent-scan --json ./my-skill
 
 # CI pipeline
-uvx open-agent-scan@latest --ci --dangerously-run-mcp-servers --json
+open-agent-scan --ci --dangerously-run-mcp-servers --json
 
 # CI with ignored warnings
-uvx open-agent-scan@latest --ci --dangerously-run-mcp-servers \
+open-agent-scan --ci --dangerously-run-mcp-servers \
   --ignore-issues-codes W001,W015
 
 # Explicit remote analysis
-uvx open-agent-scan@latest scan \
+open-agent-scan scan \
   --analysis-mode remote \
   --analysis-url "https://analysis.example/scan" \
   --verification-H "Authorization: Bearer token"
