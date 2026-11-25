@@ -1,5 +1,7 @@
 # Failure code reference
 
+CLI examples assume [installation from GitHub Releases](../README.md#install-and-run).
+
 Agent Scan uses `X001` through `X009` for operational conditions encountered during discovery, inspection, and analysis. These codes describe whether the scan itself completed successfully; they are not security findings and have no risk score.
 
 Failure codes can appear beside an MCP server, skill, or scan path in the human-readable report. In JSON, the corresponding `error` object contains the structured `category`, message, and `is_failure` value.
@@ -42,7 +44,7 @@ There is no `X010` code.
 `--ignore-failure-codes` accepts a comma-separated list and is valid only with `--ci`:
 
 ```bash
-uvx open-agent-scan@latest \
+open-agent-scan \
   --ci \
   --dangerously-run-mcp-servers \
   --ignore-failure-codes X001,X007

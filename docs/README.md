@@ -4,6 +4,8 @@ This is the documentation for [Open Agent Scan](https://github.com/open-agent-sc
 
 ## Contents
 
+- **[PyPI Trusted Publishing](pypi-publishing.md)** - Tokenless releases and first-upload instructions for an existing GitHub release.
+
 - **[GitHub Actions](github-actions.md)** - Scan repository skills and agent instructions on pull requests, with a copyable low-permission workflow.
 - **[Passive skill scanning](passive-skills.md)** - Bounded local-only scanning, coverage gates, reports, and reviewed baselines.
 
