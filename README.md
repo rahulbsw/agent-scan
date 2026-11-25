@@ -80,6 +80,13 @@ Standalone binaries are published from GitHub Releases as platform archives:
 `open-agent-scan-<version>-windows-x64.zip` for Windows. Releases include
 checksums, SBOMs, and build attestations.
 
+Official CI and future binary releases target Linux x64/ARM64, Windows x64, and
+macOS ARM64 (Apple Silicon). Intel macOS testing and official `macos-x64` binary
+builds are retired starting with the next release. Existing release assets,
+including v0.2.0's Intel macOS archive, remain available. Python/source installs
+on Intel Macs are best-effort and untested; compatible Python and dependencies
+are still required. The ARM64 macOS executable does not run natively on Intel.
+
 On macOS, extract the archive and run the CLI from Terminal:
 
 ```bash
