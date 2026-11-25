@@ -1,0 +1,29 @@
+{
+  "scan_path_responses": [{
+    "client": "test",
+    "path": "fixture",
+    "server_risks": [],
+    "skill_risks": [{
+      "name": "sample",
+      "files": [{"name": "SKILL.md", "type": "instruction"}],
+      "risk_indexes": {
+        "prompt_injection_skill_instructions": {
+          "score": 600,
+          "evidence": "SKILL.md: suspicious instruction language",
+          "locations": null
+        },
+        "suspicious_download_url": null,
+        "malicious_code": null,
+        "insecure_credential_handling": null,
+        "secret_detection": null,
+        "direct_money_access": null,
+        "third_party_content_exposure": null,
+        "unverifiable_dependencies": null,
+        "modifying_system_services": null,
+        "missing_skill_md": null
+      },
+      "error": null
+    }],
+    "error": null
+  }]
+}

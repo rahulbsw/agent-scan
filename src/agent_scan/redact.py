@@ -162,13 +162,48 @@ def _get_cached_plugins_split() -> tuple[list, list]:
     return _CACHED_PLUGINS_SPLIT
 
 
+_REDACTION_MARKERS = {
+    name: f"**REDACTED_SECRET_{name}**"
+    for name in (
+        "ARTIFACTORYDETECTOR",
+        "AWSKEYDETECTOR",
+        "AZURESTORAGEKEYDETECTOR",
+        "BASICAUTHDETECTOR",
+        "CLOUDANTDETECTOR",
+        "DISCORDBOTTOKENDETECTOR",
+        "GITHUBTOKENDETECTOR",
+        "GITLABTOKENDETECTOR",
+        "BASE64HIGHENTROPYSTRING",
+        "HEXHIGHENTROPYSTRING",
+        "IBMCLOUDIAMDETECTOR",
+        "IBMCOSHMACDETECTOR",
+        "JWTTOKENDETECTOR",
+        "KEYWORDDETECTOR",
+        "MAILCHIMPDETECTOR",
+        "NPMDETECTOR",
+        "OPENAIDETECTOR",
+        "PRIVATEKEYDETECTOR",
+        "PYPITOKENDETECTOR",
+        "SENDGRIDDETECTOR",
+        "SLACKDETECTOR",
+        "SOFTLAYERDETECTOR",
+        "SQUAREOAUTHDETECTOR",
+        "STRIPEDETECTOR",
+        "TELEGRAMBOTTOKENDETECTOR",
+        "TWILIOKEYDETECTOR",
+        "SENSITIVEFLAGNAME",
+    )
+}
+
+
 def _redaction_marker(plugin_name: str) -> str:
     """Format the redaction marker for a triggering detect-secrets plugin.
 
     Uses the same ``**...**`` delimiter shape as the ``REDACTED`` constant
     so both marker styles render and grep consistently.
     """
-    return f"**REDACTED_SECRET_{plugin_name.upper()}**"
+    # Detector results select a fixed label; they never become part of report text.
+    return _REDACTION_MARKERS.get(plugin_name.upper(), "**REDACTED_SECRET_UNKNOWN**")
 
 
 def redact_absolute_paths(text: str | None) -> str | None:

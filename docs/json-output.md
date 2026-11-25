@@ -2,6 +2,13 @@
 
 The `open-agent-scan` CLI can emit structured JSON for programmatic consumption — useful in CI/CD pipelines, catalog validation, and custom auditing tools.
 
+The passive command has a separate, explicitly versioned contract:
+`open-agent-scan skills PATH --format json` emits `oas.skills/v1`, and the
+multi-target [Actions reporting helper](github-actions.md#read-the-results)
+adds an `oas.ci/v1` manifest alongside per-target JSON/HTML reports. These are
+not the legacy `scan --json` shape described below. HTML and SARIF are also
+available on `skills`; see [the CLI reference](cli-reference.md#passive-skill-reports).
+
 Enable JSON mode with `--json`:
 
 ```bash

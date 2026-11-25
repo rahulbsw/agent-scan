@@ -1,0 +1,137 @@
+name: Agent security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  passive-scan:
+    name: Passive skills and agent instructions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      has_sarif: ${{ steps.scan.outputs.has_sarif }}
+    steps:
+      - name: Check out the repository to inspect
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: repository
+          persist-credentials: false
+
+      - name: Check out a trusted scanner revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: rahulbsw/agent-scan
+          ref: 7b83c58425397240d903a72e8ab0f11045db8146
+          path: scanner
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          python-version: '3.13'
+          enable-cache: false
+
+      - name: Install only the scanner's locked dependencies
+        working-directory: ${{ runner.temp }}
+        run: uv sync --project "$GITHUB_WORKSPACE/scanner" --frozen --no-dev --no-editable
+
+      - name: Scan repository skills and agent instructions
+        id: scan
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        env:
+          ROOT: ${{ github.workspace }}/repository
+          PYTHON: ${{ github.workspace }}/scanner/.venv/bin/python
+          REPORTS: ${{ runner.temp }}/agent-security-reports
+          UPLOAD_SARIF: ${{ vars.OPEN_AGENT_SCAN_UPLOAD_SARIF }}
+        run: |
+          set -euo pipefail
+          targets=(
+            skills
+            agents
+            .agents
+            .claude/skills
+            .claude/agents
+            .claude/commands
+            .github/agents
+            .github/instructions
+            .github/prompts
+            .cursor/rules
+            .cursor/agents
+            AGENTS.md
+            CLAUDE.md
+            GEMINI.md
+            .cursorrules
+            .github/copilot-instructions.md
+          )
+          options=(--fail-on none)
+          if [[ "$UPLOAD_SARIF" == 'true' ]]; then
+            options+=(--sarif)
+          fi
+          status=0
+          "$PYTHON" -I -m agent_scan.skill_scanning.ci \
+            --root "$ROOT" --reports "$REPORTS" \
+            "${options[@]}" "${targets[@]}" || status=$?
+          if compgen -G "$REPORTS/sarif/*.sarif" > /dev/null; then
+            printf '%s\n' 'has_sarif=true' >> "$GITHUB_OUTPUT"
+          fi
+          exit "$status"
+
+      - name: Publish job summary, including failures
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          REPORTS: ${{ runner.temp }}/agent-security-reports
+        run: |
+          if [[ -f "$REPORTS/summary.md" ]]; then
+            cat "$REPORTS/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' '## Open Agent Scan' '' \
+              'Scan preparation or report generation failed. No complete report is available; inspect job logs.' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Preserve scan reports, including failures
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agent-security-reports
+          path: ${{ runner.temp }}/agent-security-reports/
+          if-no-files-found: warn
+          retention-days: 7
+
+  upload-sarif:
+    name: Optional Security-tab upload
+    needs: passive-scan
+    if: >-
+      ${{ !cancelled() && vars.OPEN_AGENT_SCAN_UPLOAD_SARIF == 'true' &&
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+          needs.passive-scan.outputs.has_sarif == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - name: Check out repository for source mapping only
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: repository
+          persist-credentials: false
+      - name: Download generated reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: agent-security-reports
+          path: ${{ runner.temp }}/agent-security-upload
+      - name: Upload SARIF to GitHub code scanning
+        uses: github/codeql-action/upload-sarif@bf58c2ac1f8060aa73f1225f461c80391348076a # v4
+        with:
+          sarif_file: ${{ runner.temp }}/agent-security-upload/sarif
+          checkout_path: ${{ github.workspace }}/repository

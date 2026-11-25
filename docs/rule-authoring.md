@@ -46,3 +46,21 @@ redacted/summarized context over raw sensitive values.
 - `high`: strong indicator with narrow matching and low expected noise.
 - `medium`: meaningful signal requiring user review.
 - `low`: weak or broad signal; should not be treated as proof of compromise.
+
+## Passive Profile Rules
+
+The experimental `skills` command consumes `RULES` metadata directly and emits
+the separate `oas.skills/v1` finding contract. Keep new rule IDs stable and bump
+the rule revision when detection semantics change; evidence-bound acceptances
+must be reviewed again after a revision. Mark unvalidated rules experimental.
+
+Submit positive, negative, boundary and evasion fixtures with provenance, plus
+measured runtime and a false-positive rationale. The synthetic regression corpus
+is not a holdout accuracy dataset. Default blocking requires independent
+precision/recall evaluation and maintainer approval; current passive rules are
+advisory unless callers explicitly select a failure threshold.
+
+Never add a blanket exemption for quoted text, code fences, or security tests.
+Never load executable rules, author-supplied suppressions, or remote enrichment
+implicitly from the inspected target. See [passive scanning](passive-skills.md)
+for the profile's scope, limitations, and policy contract.

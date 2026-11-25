@@ -1,0 +1,22 @@
+name: Passive skill benchmark
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Record warm synthetic benchmark
+        run: uv run --frozen benchmarks/passive_skills.py --repeats 10 > benchmark.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: passive-skills-benchmark-${{ github.sha }}
+          path: benchmark.json
+          if-no-files-found: error
+          retention-days: 14

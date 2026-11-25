@@ -1,5 +1,9 @@
 # Open Agent Scan
 
+For explicitly scoped scans without MCP execution or remote services, see the
+experimental [passive skill scanner](docs/passive-skills.md):
+`open-agent-scan skills ./my-skill --format json` (Linux/macOS).
+
 Open Agent Scan is a community-led, local-first security scanner for AI agents,
 MCP servers, and agent skills. It discovers installed agent components and
 flags high-confidence risks such as prompt injection, tool poisoning, hidden
@@ -60,6 +64,15 @@ tar -xzf open-agent-scan-v0.2.0-macos-arm64.tar.gz
 xattr -d com.apple.quarantine open-agent-scan 2>/dev/null || true
 ./open-agent-scan --help
 ```
+
+## GitHub Actions
+
+Scan repository skills, `AGENTS.md`, Claude/Copilot instructions, and Cursor
+rules on pull requests without executing their code. Follow the
+[GitHub Actions guide](docs/github-actions.md) and its
+[copyable workflow](docs/examples/agent-security.yml). It includes pinned scanner
+installation, coverage gates, JSON/HTML artifacts, an Actions job summary, and
+optional Security-tab SARIF uploads; no Snyk token is required.
 
 ## Use With AI Tools
 

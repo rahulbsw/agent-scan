@@ -18,9 +18,44 @@ class RuleDefinition:
     component_types: tuple[ComponentType, ...]
     source_references: tuple[str, ...]
     false_positive_rationale: str
+    revision: str = "1"
+    experimental: bool = False
 
 
 RULES: dict[str, RuleDefinition] = {
+    "OAS-SKILL-001": RuleDefinition(
+        code="OAS-SKILL-001",
+        title="Instruction hierarchy override",
+        category="prompt-injection",
+        severity="medium",
+        confidence="medium",
+        component_types=("skill",),
+        source_references=("OWASP LLM01:2025 Prompt Injection",),
+        false_positive_rationale="Security documentation and quoted attack examples can contain these instructions.",
+        experimental=True,
+    ),
+    "OAS-SKILL-002": RuleDefinition(
+        code="OAS-SKILL-002",
+        title="Downloaded content piped to an interpreter",
+        category="supply-chain",
+        severity="high",
+        confidence="medium",
+        component_types=("skill",),
+        source_references=("OWASP LLM03:2025 Supply Chain",),
+        false_positive_rationale="An explicit installation example can be legitimate; inspect its context and source.",
+        experimental=True,
+    ),
+    "OAS-SKILL-003": RuleDefinition(
+        code="OAS-SKILL-003",
+        title="Hidden instruction formatting",
+        category="obfuscation",
+        severity="low",
+        confidence="medium",
+        component_types=("skill",),
+        source_references=("OWASP LLM01:2025 Prompt Injection",),
+        false_positive_rationale="Invisible and bidirectional formatting can have legitimate linguistic uses.",
+        experimental=True,
+    ),
     "W001": RuleDefinition(
         code="W001",
         title="Suspicious words in tool description",

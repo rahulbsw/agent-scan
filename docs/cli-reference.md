@@ -16,6 +16,7 @@ Unless noted, flags apply to the standalone CLI. When no subcommand is given, `s
 | --- | --- |
 | `scan` | Scan MCP configs, agents, and skills for security issues (default) |
 | `inspect` | List tools, prompts, and resources without running security analysis |
+| `skills PATH` | Passively scan an explicit local skill/instruction path without MCP execution or remote services |
 | `help` | Print top-level help |
 | `guard` | Install, uninstall, or show status of Agent Guard hooks |
 
@@ -33,6 +34,29 @@ open-agent-scan inspect [CONFIG_FILE ...]
 | `CONFIG_FILE ...` | `scan`, `inspect` | One or more MCP config files, `SKILL.md` files, or directories to scan. If omitted, well-known agent config locations on the machine are discovered automatically. |
 
 ---
+
+## Passive Skill Reports
+
+```bash
+open-agent-scan skills ./skills --format terminal
+open-agent-scan skills ./skills --format json > /tmp/skills.json
+open-agent-scan skills ./skills --format html > /tmp/skills.html
+open-agent-scan skills ./skills --format sarif > /tmp/skills.sarif
+```
+
+These flags belong to `skills`, not `scan` or `inspect`:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--format terminal\|json\|html\|sarif` | `terminal` | Report format, written to stdout. HTML is self-contained; JSON uses `oas.skills/v1`. |
+| `--fail-on none\|low\|medium\|high\|critical` | `none` | Fail on unsuppressed experimental findings at or above a selected threshold. |
+| `--fail-on-incomplete` | off | Fail on incomplete coverage; operational failures always exit 2. |
+
+Write reports outside the inspected directory. See [passive scanning](passive-skills.md)
+for platform support, collection limits, baselines and exit codes, and
+[GitHub Actions](github-actions.md) for the single-pass multi-target CI helper,
+JSON/HTML artifacts, job summaries, and optional Security-tab upload. None of
+these formats or destinations automatically enable remote analysis.
 
 ## Global Options
 
