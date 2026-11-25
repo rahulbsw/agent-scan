@@ -10,12 +10,14 @@ on:
         description: "Existing release tag, for example v0.1.0"
         required: true
         type: string
+      pypi_only:
+        description: "Publish existing GitHub release Python assets to PyPI without rebuilding"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
-  artifact-metadata: write
+  contents: read
 
 jobs:
   prepare-release:
@@ -36,16 +38,12 @@ jobs:
           raw_tag="${RAW_TAG#refs/tags/}"
           raw_tag="${raw_tag#refs/heads/}"
 
-          case "$raw_tag" in
-            v*)
-              checkout_ref="$raw_tag"
-              release_tag="$raw_tag"
-              ;;
-            *)
-              echo "::error::Release tag must be v<version>. Got: $raw_tag"
-              exit 1
-              ;;
-          esac
+          if [[ ! "$raw_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
+            echo "::error::Release tag must be vMAJOR.MINOR.PATCH (optionally aN, bN, or rcN)."
+            exit 1
+          fi
+          checkout_ref="$raw_tag"
+          release_tag="$raw_tag"
 
           echo "checkout_ref=$checkout_ref" >> "$GITHUB_OUTPUT"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
@@ -68,6 +66,7 @@ jobs:
           fi
 
   build-binaries:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.pypi_only }}
     name: binary (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     needs:
@@ -97,6 +96,11 @@ jobs:
             target: windows-x64
             ext: ".exe"
             archive_ext: ".zip"
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -144,11 +148,17 @@ jobs:
           if-no-files-found: error
 
   build-python-package:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.pypi_only }}
     name: python package
     runs-on: ubuntu-latest
     needs:
       - prepare-release
       - validate-ref
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -178,6 +188,11 @@ jobs:
       - prepare-release
       - build-binaries
       - build-python-package
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -254,3 +269,91 @@ jobs:
           else
             gh release create "$RELEASE_TAG" release-assets/* --title "Open Agent Scan $RELEASE_TAG" --target "$target_sha" --notes-file release-notes.md
           fi
+
+  publish-pypi:
+    name: publish Python package to PyPI
+    needs:
+      - prepare-release
+      - validate-ref
+      - publish-release
+    if: >-
+      ${{ !cancelled() && github.repository == 'rahulbsw/agent-scan' &&
+          needs.prepare-release.result == 'success' && needs.validate-ref.result == 'success' &&
+          ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+           (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) &&
+          (needs.publish-release.result == 'success' ||
+           (github.event_name == 'workflow_dispatch' && inputs.pypi_only)) }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/open-agent-scan/
+    concurrency:
+      group: pypi-${{ needs.prepare-release.outputs.release_tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download published Python distributions and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG" --repo rahulbsw/agent-scan \
+            --pattern 'open_agent_scan-*.whl' --pattern 'open_agent_scan-*.tar.gz' --dir dist
+          gh release download "$RELEASE_TAG" --repo rahulbsw/agent-scan \
+            --pattern sha256sums.txt --dir release-metadata
+      - name: Verify distribution identity, version, and checksums
+        env:
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import os
+          import tarfile
+          import zipfile
+          from email.parser import BytesParser
+          from pathlib import Path
+
+          version = os.environ["RELEASE_TAG"][1:]
+          wheel = f"open_agent_scan-{version}-py3-none-any.whl"
+          sdist = f"open_agent_scan-{version}.tar.gz"
+          directory = Path("dist")
+          files = {path.name for path in directory.iterdir()}
+          if files != {wheel, sdist}:
+              raise SystemExit("Expected exactly the release version's wheel and source distribution")
+          checksums = {}
+          for line in Path("release-metadata/sha256sums.txt").read_text().splitlines():
+              digest, name = line.split(maxsplit=1)
+              name = name.lstrip(" *")
+              if name in checksums:
+                  raise SystemExit("Duplicate checksum entry")
+              checksums[name] = digest
+          for name in (wheel, sdist):
+              digest = hashlib.sha256((directory / name).read_bytes()).hexdigest()
+              if checksums.get(name) != digest:
+                  raise SystemExit("Distribution checksum mismatch")
+          with zipfile.ZipFile(directory / wheel) as archive:
+              names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+              if len(names) != 1 or archive.getinfo(names[0]).file_size > 4 * 1024 * 1024:
+                  raise SystemExit("Unexpected wheel metadata")
+              metadata = [archive.read(names[0])]
+          with tarfile.open(directory / sdist, "r:gz") as archive:
+              member = archive.getmember(f"open_agent_scan-{version}/PKG-INFO")
+              if not member.isfile() or member.size > 4 * 1024 * 1024:
+                  raise SystemExit("Unexpected source metadata")
+              metadata.append(archive.extractfile(member).read())
+          for data in metadata:
+              parsed = BytesParser().parsebytes(data)
+              name = parsed.get("Name", "").lower().replace("_", "-")
+              if name != "open-agent-scan" or parsed.get("Version") != version:
+                  raise SystemExit("Package name/version does not match this release")
+          print(f"Verified both open-agent-scan {version} distributions against release checksums")
+          PY
+      - name: Publish with PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
+          attestations: true

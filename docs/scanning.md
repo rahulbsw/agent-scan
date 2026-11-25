@@ -12,8 +12,8 @@ Open Agent Scan operates in two main modes which can be used jointly or separate
 
 Install the CLI from the published GitHub wheel using the
 [installation instructions](../README.md#install-and-run) before these examples.
-The application is not currently on PyPI; registry-only `uvx` invocations cannot
-resolve it. For untrusted skill input, prefer
+Registry-only `uvx` invocations require a successful PyPI upload; use the explicit
+wheel source when the registry reports the project missing. For untrusted skill input, prefer
 [`open-agent-scan skills PATH`](passive-skills.md) over active MCP discovery.
 
 To run a full scan of your machine (auto-discovers agents, MCP servers, and skills), run:

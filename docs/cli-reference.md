@@ -3,7 +3,8 @@
 Complete reference for the `open-agent-scan` command-line interface.
 
 Examples assume the CLI is [installed from GitHub Releases](../README.md#install-and-run).
-The application is not currently published to PyPI.
+Registry-only `uvx` invocation requires a successful PyPI upload; adding a
+Trusted Publisher by itself does not publish a version.
 
 Open Agent Scan runs local analysis by default. Remote analysis and hook uploads are explicit opt-ins configured with URLs, headers, and pre-provisioned push keys.
 

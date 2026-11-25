@@ -42,8 +42,12 @@ uv tool install \
 open-agent-scan --help
 ```
 
-The package is **not published to PyPI**. Plain `uvx open-agent-scan@latest`
-queries the registry and will fail until PyPI publication is configured.
+GitHub Releases and PyPI are separate publication destinations. A Trusted
+Publisher does not publish a package until its first upload succeeds. If plain
+`uvx open-agent-scan@latest` reports that the package is missing, use the explicit
+GitHub wheel above. After the version appears on PyPI, registry-only invocations
+are available. See [Trusted Publishing](docs/pypi-publishing.md) for the workflow
+and verification steps.
 If `uv` reports that its tool bin directory is not on `PATH`, run
 `uv tool update-shell` and start a new shell.
 
